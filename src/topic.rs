@@ -1,11 +1,14 @@
-use crate::config::Config;
-use crate::glob;
+use crate::{config::Config, glob};
 use anyhow::{anyhow, Context, Error, Result};
-use ignore::overrides::{Override, OverrideBuilder};
-use ignore::DirEntry;
+use ignore::{
+    overrides::{Override, OverrideBuilder},
+    DirEntry,
+};
 use serde::Deserialize;
-use std::fs;
-use std::path::{Path, PathBuf};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
 
 #[derive(Deserialize, Debug, Clone)]
 pub struct TopicConfig {
@@ -41,6 +44,7 @@ impl TopicId {
     }
 }
 
+#[derive(Debug, Clone)]
 pub struct Topic {
     root_dir: PathBuf,
     dependencies: Vec<TopicId>,
