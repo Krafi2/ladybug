@@ -2,6 +2,7 @@
 mod commands;
 mod config;
 mod context;
+mod env;
 mod glob;
 mod resolver;
 mod topic;

@@ -1,11 +1,13 @@
 use crate::{
     config::Config,
+    env::Env,
     topic::{Topic, TopicId},
 };
-use anyhow::{anyhow, Context, Error};
+use anyhow::{anyhow, Context};
 use std::{
     collections::hash_map::{DefaultHasher, HashMap},
     hash::{BuildHasherDefault, Hash, Hasher},
+    sync::Arc,
 };
 
 #[derive(Debug)]
@@ -14,8 +16,8 @@ pub enum Node {
         children: Vec<NodeId>,
         topic: Box<Topic>,
     },
-    Closed,
-    Err(Error),
+    Closed(Env),
+    Err(Arc<anyhow::Error>),
 }
 
 #[derive(Debug)]
@@ -27,13 +29,17 @@ enum NodeStatus {
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
 pub struct NodeId(usize);
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct Resolver {
     id_map: HashMap<TopicId, NodeId>,
     nodes: Vec<NodeStatus>,
 }
 
 impl Resolver {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
     fn insert_node(&mut self, topic: TopicId, node: NodeStatus) -> NodeId {
         let idx = self.nodes.len();
         let id = NodeId(idx);
@@ -73,14 +79,21 @@ impl Resolver {
                     topic: Box::new(topic),
                 })
             }
-            Err(error) => NodeStatus::Ready(Node::Err(error)),
+            Err(error) => NodeStatus::Ready(Node::Err(Arc::new(error))),
         }
     }
 
     pub fn open(&mut self, topic_id: TopicId, config: &Config) -> NodeId {
         self.get_or_insert_node_with(topic_id.clone(), |_self| {
-            Self::new_node(_self, topic_id.clone(), &config)
+            Self::new_node(_self, topic_id, &config)
         })
+    }
+
+    pub fn try_get(&self, id: NodeId) -> Option<&Node> {
+        match &self.nodes[id.0] {
+            NodeStatus::Ready(node) => Some(node),
+            NodeStatus::Waiting(_) => None,
+        }
     }
 
     pub fn get<'a>(&'a mut self, id: NodeId, config: &Config) -> &'a Node {
@@ -90,23 +103,20 @@ impl Resolver {
             self.nodes[id.0] = ready_node;
         }
 
-        match &self.nodes[id.0] {
-            NodeStatus::Ready(node) => node,
-            _ => panic!("Node should be ready"),
-        }
+        self.try_get(id).expect("Node should be ready")
     }
 
-    pub fn close(&mut self, id: NodeId) {
+    pub fn close(&mut self, id: NodeId, env: Env) {
         match &mut self.nodes[id.0] {
-            NodeStatus::Ready(node @ Node::Open { .. }) => *node = Node::Closed,
+            NodeStatus::Ready(node @ Node::Open { .. }) => *node = Node::Closed(env),
             _ => panic!("Attemted to close a node that wasn't open"),
         }
     }
 
-    pub fn error(&mut self, id: NodeId, error: Error) {
+    pub fn error(&mut self, id: NodeId, error: Arc<anyhow::Error>) {
         match &mut self.nodes[id.0] {
             NodeStatus::Ready(node @ Node::Open { .. }) => *node = Node::Err(error),
-            _ => panic!("Attemted to sett an error on a node that wasn't open"),
+            _ => panic!("Attemted to set an error on a node that wasn't open"),
         }
     }
 }
