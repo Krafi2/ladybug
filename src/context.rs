@@ -1,6 +1,4 @@
-use crate::config::Config;
-use crate::env::Env;
-use crate::resolver::Resolver;
+use crate::{config::Config, resolver::Resolver, topic::Env};
 
 pub struct Context<'a> {
     pub config: &'a Config,

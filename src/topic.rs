@@ -1,4 +1,4 @@
-use crate::{config::Config, env::Env, glob};
+use crate::{config::Config, glob};
 use anyhow::{anyhow, Context, Error, Result};
 use ignore::{
     overrides::{Override, OverrideBuilder},
@@ -7,6 +7,7 @@ use ignore::{
 use serde::Deserialize;
 use std::{
     borrow::Cow,
+    collections::HashMap,
     fs,
     path::{Path, PathBuf},
 };
@@ -17,10 +18,10 @@ pub struct TopicConfig {
     dependencies: Vec<String>,
     pre_hook: Option<String>,
     post_hook: Option<String>,
-    #[serde(default = "default_value")]
-    private: toml::Value,
-    #[serde(default = "default_value")]
-    public: toml::Value,
+    #[serde(default)]
+    private: HashMap<String, toml::Value>,
+    #[serde(default)]
+    public: HashMap<String, toml::Value>,
     ignore: Vec<String>,
     template: Vec<String>,
 }
@@ -60,8 +61,7 @@ pub struct Topic {
     templates: Override,
     pre_hook: Option<String>,
     post_hook: Option<String>,
-    private: toml::Value,
-    public: toml::Value,
+    env: EnvBuilder,
 }
 
 impl Topic {
@@ -97,6 +97,8 @@ impl Topic {
             .parent()
             .ok_or_else(|| anyhow!("Path too short: {}", path.to_string_lossy()))?;
 
+        let env = EnvBuilder::new(conf.private, conf.public);
+
         Ok(Topic {
             root_dir: conf.root_dir,
             dependencies,
@@ -104,8 +106,7 @@ impl Topic {
             templates: Self::make_glob(root, &conf.ignore, &conf.template)?,
             pre_hook: conf.pre_hook,
             post_hook: conf.post_hook,
-            private: conf.private,
-            public: conf.public,
+            env,
             id: topic,
         })
     }
@@ -124,13 +125,48 @@ impl Topic {
         &self.dependencies
     }
 
-    pub fn deploy(&self, env: &Env) -> Result<Env> {
+    pub fn deploy(self, dry_run: bool) -> Result<Env> {
         todo!()
     }
 
     pub fn id(&self) -> &TopicId {
         &self.id
     }
+
+    /// Get a reference to the topic's env.
+    pub fn env(&self) -> &EnvBuilder {
+        &self.env
+    }
+
+    /// Get a mutable reference to the topic's env.
+    pub fn env_mut(&mut self) -> &mut EnvBuilder {
+        &mut self.env
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct EnvBuilder {
+    private: HashMap<String, toml::Value>,
+    public: HashMap<String, toml::Value>,
+}
+
+impl EnvBuilder {
+    fn new(private: HashMap<String, toml::Value>, public: HashMap<String, toml::Value>) -> Self {
+        Self { private, public }
+    }
+
+    pub fn extend(&mut self, env: &Env) {
+        todo!()
+    }
+
+    pub fn build(self) -> Env {
+        todo!()
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct Env {
+    export: HashMap<String, toml::Value>,
 }
 
 pub fn find_topics<'a, I>(root: &Path, globs: I) -> Result<impl Iterator<Item = Result<TopicId>>>

@@ -1,10 +1,8 @@
 use crate::{
     config::Config,
-    context,
-    env::Env,
-    glob,
-    resolver::{Node, NodeId, Resolver},
-    topic::{Topic, TopicId},
+    context, glob,
+    resolver::{Node, NodeDesc, NodeId, Resolver},
+    topic::{Env, EnvBuilder, Topic, TopicId},
 };
 use anyhow::{anyhow, Context, Result};
 use clap::Clap;
@@ -35,7 +33,6 @@ impl Deploy {
         resolver: &'a mut Resolver,
         topic: &TopicId,
         config: &Config,
-        env: &Env,
     ) -> Result<&'a Env> {
         /// This struct stores information for each layer of the dependency tree.
         struct Nodule {
@@ -43,30 +40,28 @@ impl Deploy {
             node: NodeId,
             /// The index of the next child to evaluate
             idx: Cell<usize>,
-            /// The enviroment of the node
-            env: Env,
         }
 
         impl Nodule {
-            fn new(node: NodeId, env: Env) -> Self {
+            fn new(node: NodeId) -> Self {
                 Self {
                     node,
                     idx: Cell::new(0),
-                    env,
                 }
             }
         }
 
+        let desc = resolver.new_node(topic);
         // The root node we actually want to deploy
-        let root = resolver.open(topic.clone(), config);
+        let root = resolver.open(desc, config);
         // All the nodes in the stack should be open with the exception of the head node
-        let mut stack = Vec::<Nodule>::from([Nodule::new(root, env.clone())]);
+        let mut stack = Vec::<Nodule>::from([Nodule::new(root)]);
 
         // We use a depth first search algorithm to make sure all dependencies are satisfied before
         // deploying a node. Any error are propagated up towards the root node.
         'outer: while !stack.is_empty() {
             let head = stack.last().unwrap();
-            let node = resolver.get(head.node, config);
+            let node = resolver.get(head.node);
             match node {
                 // If the node is open, try to go deeper or deploy it
                 Node::Open { children, topic } => {
@@ -74,12 +69,12 @@ impl Deploy {
                     head.idx.set(idx + 1);
                     match children.get(idx) {
                         // A child is available so we will try to push it onto the stack
-                        Some(id) => {
+                        Some(&desc) => {
                             // Check for cycles
                             // NOTE: this has quadratic complexity so we may want to replace this
                             // with a hasmap lookup in the future
                             for Nodule { node, .. } in &stack {
-                                if node == id {
+                                if NodeDesc::from(*node) == desc {
                                     // Name of the current node
                                     let name = topic.id().name();
                                     // Name of the dependecy causing the cycle
@@ -94,37 +89,41 @@ impl Deploy {
                                     continue 'outer;
                                 }
                             }
+                            let id = resolver.open(desc, config);
                             // Everything is ok, so we push the new node
-                            stack.push(Nodule::new(*id, env.clone()))
+                            stack.push(Nodule::new(id))
                         }
                         // All children have been deployed so we can do the same with the node
                         None => {
-                            // Skip deploying if `dry-run` is on
-                            let env = match self.dry_run {
-                                false => topic.deploy(&head.env),
-                                true => Ok(Env::empty()),
-                            };
-                            match env {
-                                // Close the node to be popped on the next iteration
-                                Ok(env) => resolver.close(head.node, env),
-                                // Mark the node as an error. It will be propagated on the next
-                                // iteration
-                                Err(err) => resolver.error(head.node, Arc::new(err)),
-                            };
+                            resolver.replace_with(head.node, |node| match node {
+                                Node::Open { topic, .. } => match topic.deploy(self.dry_run) {
+                                    // Close the node to be popped on the next iteration
+                                    Ok(env) => Node::Closed(env),
+                                    // Mark the node as an error. It will be propagated on the next
+                                    // iteration
+                                    Err(err) => Node::Err(Arc::new(err)),
+                                },
+                                _ => unreachable!("Node must be open"),
+                            });
                         }
                     };
                 }
                 // The node is closed so we pop it and update its parent
                 Node::Closed(env) => {
                     stack.pop();
+                    // TODO: get rid of this clone
+                    let env = env.clone();
                     match stack.last_mut() {
                         // Merge the node's enviroment into its parent
-                        Some(parent) => parent.env.merge(&env),
+                        Some(parent) => match resolver.get_mut(parent.node) {
+                            Node::Open { topic, .. } => topic.env_mut().extend(&env),
+                            _ => panic!("Node should be open"),
+                        },
                         // We are finised
                         None => (),
                     }
                 }
-                // There is an error so we will propagate it up to the node's parents
+                // There is an error so we need to propagate it up to the node's parents
                 Node::Err(err) => {
                     // Last one already is an error
                     stack.pop();
@@ -133,19 +132,22 @@ impl Deploy {
                         // current one
                         let idx = idx.get() - 1;
                         // Extract the cause and the name of the bad child
-                        let (name, cause) =
-                            match resolver.try_get(node).expect("Failed to get node") {
-                                Node::Open { topic, children } => {
-                                    let name = topic.dependencies()[idx].name();
-                                    let error = match resolver.try_get(children[idx]) {
-                                        Some(Node::Err(err)) => Arc::clone(err),
-                                        Some(_) => panic!("Node should be an error"),
-                                        None => panic!("Failed to get node"),
-                                    };
-                                    (name, error)
-                                }
-                                _ => panic!("Unwinding a closed node"),
-                            };
+                        let (name, cause) = match resolver.get(node) {
+                            Node::Open { topic, children } => {
+                                let name = topic.dependencies()[idx].name();
+                                let child = resolver
+                                    .upgrade_desc(children[idx])
+                                    .map(|id| resolver.get(id));
+
+                                let error = match child {
+                                    Some(Node::Err(err)) => Arc::clone(err),
+                                    Some(_) => panic!("Node should be an error"),
+                                    None => panic!("Failed to get node"),
+                                };
+                                (name, error)
+                            }
+                            _ => panic!("Unwinding a closed node"),
+                        };
                         let error = Arc::new(
                             anyhow::Error::msg(cause)
                                 .context(format!("Failed to deploy dependency: {}", name)),
@@ -157,7 +159,7 @@ impl Deploy {
         }
 
         // Retrieve the result
-        match resolver.get(root, config) {
+        match resolver.get(root) {
             Node::Closed(env) => Ok(env),
             Node::Err(err) => Err(anyhow::Error::msg(Arc::clone(err))),
             _ => panic!("Root node should be closed"),
@@ -190,7 +192,7 @@ impl Deploy {
             .into_iter()
             .map(|topic_id| match topic_id {
                 Ok(id) => self
-                    .deploy_topic(&mut resolver, &id, ctx.config, ctx.env)
+                    .deploy_topic(&mut resolver, &id, ctx.config)
                     .map(|_| id),
                 Err(err) => Err(err).with_context(|| "Failed to deploy topic"),
             })

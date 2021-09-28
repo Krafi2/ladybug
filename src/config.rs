@@ -33,36 +33,6 @@ impl Config {
     }
 }
 
-// mod default {
-//     use super::Duplicates;
-//     use std::path::PathBuf;
-//
-//     pub fn default_topic() -> PathBuf {
-//         PathBuf::from("general/")
-//     }
-//
-//     pub fn duplicates() -> Duplicates {
-//         Duplicates::Rename
-//     }
-// }
-
-// mod de {
-//     use std::path::PathBuf;
-//
-//     pub fn dotfile_dir<'de, D>(deserializer: D) -> Result<PathBuf, D::Error>
-//     where
-//         D: serde::Deserializer<'de>,
-//     {
-//         let path = <Option<PathBuf> as serde::Deserialize>::deserialize(deserializer)?;
-//         match path {
-//             Some(path) => Ok(path),
-//             None => super::home_dir()
-//                 .map(|path| path.join(".ladybug/"))
-//                 .map_err(<D::Error as serde::de::Error>::custom),
-//         }
-//     }
-// }
-
 #[derive(Deserialize, Debug, Clone)]
 pub enum Duplicates {
     Delete,
