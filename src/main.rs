@@ -1,8 +1,10 @@
 #![allow(unused)]
+
 mod commands;
 mod config;
 mod context;
 mod env;
+mod fs;
 mod glob;
 mod resolver;
 mod topic;
@@ -13,7 +15,7 @@ fn main() {
     match run() {
         Ok(_) => (),
         Err(e) => {
-            println!("{}", e);
+            eprintln!("{}", e);
             std::process::exit(1);
         }
     }

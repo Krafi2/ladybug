@@ -1,43 +1,87 @@
-use crate::topic;
+use crate::topic::{self, TopicConfig};
 use anyhow::{anyhow, Context, Result};
 use directories_next::{ProjectDirs, UserDirs};
-use serde::Deserialize;
+use figment::{
+    providers::{Format, Serialized, Toml},
+    Figment,
+};
+use serde::{Deserialize, Serialize};
 use std::{
     fs,
     path::{Path, PathBuf},
 };
 
-#[derive(Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct Config {
-    /// Topic directory
+    /// The directory where topics are located
     pub dotfile_dir: PathBuf,
+    // This figment contains the default values to construct a [`TopicConfig`], however it may not
+    // contain all of them so we can't rely on being able to deserialize it into a one. It is also
+    // quite handy as we don't need to construct a figment when it comes to it.
     /// Default topic config
-    pub defaults: topic::TopicConfig,
-    /// Relative path to the default topic
-    pub default_topic: PathBuf,
-    /// What to do when a file already exists
-    pub duplicates: Duplicates,
+    #[serde(with = "serde_figment")]
+    pub topic_config: Figment,
+}
+
+/// We implent serialize and deserialize for [`Figment`] by converting it to a struct that alreaddy
+/// implements these functions, in this case [`Dict]. This approach is a bit hacky and inneficient,
+/// however it is much more concise than the alternatives so I will keep it for now.
+mod serde_figment {
+    use figment::{
+        providers::Serialized,
+        value::{Dict, Value},
+        Figment,
+    };
+    use serde::{de, ser, Deserialize, Deserializer, Serialize, Serializer};
+
+    pub fn serialize<S>(figment: &Figment, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match figment.extract::<Dict>() {
+            Ok(dict) => dict.serialize(serializer),
+            Err(err) => Err(ser::Error::custom(err)),
+        }
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Figment, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        match Dict::deserialize(deserializer) {
+            Ok(dict) => Ok(Figment::from(Serialized::defaults(dict))),
+            Err(err) => Err(err),
+        }
+    }
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            dotfile_dir: paths::home_dir().join("ladybug"),
+            topic_config: Figment::from(Serialized::defaults(TopicConfig::default())),
+        }
+    }
 }
 
 impl Config {
     pub fn from_file(path: &Path) -> Result<Self> {
-        let toml = fs::read_to_string(path)
-            .with_context(|| format!("Couldn't read file '{}'", path.to_string_lossy()))?;
-        toml::from_str(&toml)
-            .with_context(|| format!("Error while deserializing file {}", path.to_string_lossy()))
+        Figment::from(Serialized::defaults(Self::default()))
+            .merge(Toml::file(path))
+            .extract()
+            .with_context(|| {
+                format!(
+                    "Failed to load config from file: '{}'",
+                    path.to_string_lossy()
+                )
+            })
     }
 
     pub fn new() -> Result<Self> {
-        let path = paths::config_path()?;
+        let path = paths::config_path();
         Self::from_file(&path)
     }
-}
-
-#[derive(Deserialize, Debug, Clone)]
-pub enum Duplicates {
-    Delete,
-    Keep,
-    Rename,
 }
 
 pub mod paths {
@@ -45,28 +89,23 @@ pub mod paths {
     use directories_next::{ProjectDirs, UserDirs};
     use std::path::{Path, PathBuf};
 
-    pub fn project_dirs() -> Result<ProjectDirs> {
-        ProjectDirs::from("com", "Ladybug", "ladybug")
-            .ok_or(anyhow!("This system isn't supported."))
+    pub fn project_dirs() -> ProjectDirs {
+        ProjectDirs::from("com", "Ladybug", "ladybug").expect("This system isn't supported.")
     }
 
-    pub fn config_dir() -> Result<PathBuf> {
-        project_dirs()
-            .map(|dirs| dirs.config_dir().to_owned())
-            .context("Failed to resolve config directory.")
+    pub fn config_dir() -> PathBuf {
+        project_dirs().config_dir().to_owned()
     }
 
-    pub fn user_dirs() -> Result<UserDirs> {
-        UserDirs::new().ok_or(anyhow!("This system isn't supported."))
+    pub fn user_dirs() -> UserDirs {
+        UserDirs::new().expect("This system isn't supported.")
     }
 
-    pub fn home_dir() -> Result<PathBuf> {
-        user_dirs()
-            .map(|dirs| dirs.home_dir().to_owned())
-            .context("Failed to resolve home directory.")
+    pub fn home_dir() -> PathBuf {
+        user_dirs().home_dir().to_owned()
     }
 
-    pub fn config_path() -> Result<PathBuf> {
-        Ok(config_dir()?.join("ladybug.toml"))
+    pub fn config_path() -> PathBuf {
+        config_dir().join("ladybug.toml")
     }
 }

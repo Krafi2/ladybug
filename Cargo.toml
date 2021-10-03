@@ -13,3 +13,4 @@ tera = "1.12.1"
 directories-next = "2.0.0"
 anyhow = "1.0"
 ignore = "0.4.18"
+figment = {version = "0.10.6", features = ["toml"]}

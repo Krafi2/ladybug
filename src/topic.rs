@@ -1,33 +1,62 @@
-use crate::{config::Config, glob};
+use crate::{
+    config::{paths, Config},
+    glob,
+};
 use anyhow::{anyhow, Context, Error, Result};
+use figment::{
+    providers::{Format, Toml},
+    Figment,
+};
 use ignore::{
     overrides::{Override, OverrideBuilder},
     DirEntry,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::{
     borrow::Cow,
     collections::HashMap,
     fs,
     path::{Path, PathBuf},
 };
+type Dict = toml::map::Map<String, toml::Value>;
 
-#[derive(Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct TopicConfig {
-    root_dir: PathBuf,
+    /// The directory into which to deploy files
+    target: PathBuf,
+    /// Topics to deploy before this one
     dependencies: Vec<String>,
-    pre_hook: Option<String>,
-    post_hook: Option<String>,
-    #[serde(default)]
-    private: HashMap<String, toml::Value>,
-    #[serde(default)]
-    public: HashMap<String, toml::Value>,
+    /// A command to run before deploying
+    pre_hook: Vec<String>,
+    /// A command to run after deploying
+    post_hook: Vec<String>,
+    /// A list of globs to ignore files
     ignore: Vec<String>,
+    /// A list of globs for files to template using tera
     template: Vec<String>,
+    /// What to do if a file already exists
+    duplicates: Duplicates,
+    /// These values are injected into the tera enviroment
+    env: Dict,
+    /// The values are exported from the enviroment for other topics to use
+    export: Vec<String>,
 }
 
-fn default_value() -> toml::Value {
-    std::collections::BTreeMap::<String, toml::Value>::new().into()
+impl Default for TopicConfig {
+    fn default() -> Self {
+        Self {
+            target: paths::config_dir(),
+            dependencies: Vec::new(),
+            pre_hook: Vec::new(),
+            post_hook: Vec::new(),
+            ignore: Vec::new(),
+            template: Vec::new(),
+            duplicates: Duplicates::Rename,
+            env: Dict::default(),
+            export: Vec::new(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -47,6 +76,9 @@ impl TopicId {
     pub fn path(&self) -> &Path {
         self.0.as_path()
     }
+    pub fn dir(&self) -> &Path {
+        self.0.parent().expect("Topic path has no parent")
+    }
     pub fn name(&self) -> Cow<str> {
         self.path().to_string_lossy()
     }
@@ -55,13 +87,20 @@ impl TopicId {
 #[derive(Debug, Clone)]
 pub struct Topic {
     id: TopicId,
-    root_dir: PathBuf,
+    target: PathBuf,
     dependencies: Vec<TopicId>,
     links: Override,
-    templates: Override,
-    pre_hook: Option<String>,
-    post_hook: Option<String>,
-    env: EnvBuilder,
+    template: TemplateContext,
+    duplicates: Duplicates,
+    pre_hook: Vec<String>,
+    post_hook: Vec<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy)]
+pub enum Duplicates {
+    Delete,
+    Keep,
+    Rename,
 }
 
 impl Topic {
@@ -83,90 +122,302 @@ impl Topic {
         glob::extend_glob(&mut builder, globs.iter().map(AsRef::as_ref))
     }
 
-    fn new(topic: TopicId, conf: TopicConfig, global: &Config) -> Result<Self> {
+    fn new(topic: TopicId, config: TopicConfig, global: &Config) -> Result<Self> {
         let dependencies = find_topics(
             &global.dotfile_dir,
-            conf.dependencies.iter().map(AsRef::as_ref),
+            config.dependencies.iter().map(AsRef::as_ref),
         )
         .context("Failed to construct dependency iterator")?
         .collect::<Result<Vec<_>>>()
         .context("Failed to collect dependencies")?;
 
-        let path = &topic.0;
-        let root = path
-            .parent()
-            .ok_or_else(|| anyhow!("Path too short: {}", path.to_string_lossy()))?;
-
-        let env = EnvBuilder::new(conf.private, conf.public);
+        let dir = topic.dir();
+        let templates = Self::make_glob(dir, &config.ignore, &config.template)?;
+        let template = TemplateContext::new(templates, config.env, config.export);
 
         Ok(Topic {
-            root_dir: conf.root_dir,
-            dependencies,
-            links: Self::make_glob(root, &conf.ignore, &[])?,
-            templates: Self::make_glob(root, &conf.ignore, &conf.template)?,
-            pre_hook: conf.pre_hook,
-            post_hook: conf.post_hook,
-            env,
             id: topic,
+            target: config.target,
+            dependencies,
+            links: Self::make_glob(dir, &config.ignore, &[])?,
+            template,
+            duplicates: config.duplicates,
+            pre_hook: config.pre_hook,
+            post_hook: config.post_hook,
         })
     }
 
-    pub fn from_id(topic: TopicId, conf: &Config) -> Result<Self> {
-        let path = &topic.0;
-        let root = path
-            .parent()
-            .ok_or_else(|| anyhow!("Path too short: {}", path.to_string_lossy()))?;
-        let string = fs::read_to_string(path).context("Failed to read topic config")?;
-        let t_conf = toml::from_str(&string).context("Couldn't parse config")?;
-        Self::new(topic, t_conf, conf)
+    pub fn from_id(topic: TopicId, config: &Config) -> Result<Self> {
+        let dir = topic.dir();
+        let t_config = config
+            .topic_config
+            .merge(Toml::file(topic.path()))
+            .extract()
+            .context("Failed to load config")?;
+        Self::new(topic, t_config, config)
     }
 
     pub fn dependencies(&self) -> &[TopicId] {
         &self.dependencies
     }
 
-    pub fn deploy(self, dry_run: bool) -> Result<Env> {
-        todo!()
-    }
-
     pub fn id(&self) -> &TopicId {
         &self.id
     }
 
-    /// Get a reference to the topic's env.
-    pub fn env(&self) -> &EnvBuilder {
-        &self.env
-    }
-
-    /// Get a mutable reference to the topic's env.
-    pub fn env_mut(&mut self) -> &mut EnvBuilder {
-        &mut self.env
+    pub fn import(&mut self, env: &Env) {
+        self.template.extend(env)
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct EnvBuilder {
-    private: HashMap<String, toml::Value>,
-    public: HashMap<String, toml::Value>,
+mod deploy {
+    use std::{
+        io::stderr,
+        path::Path,
+        process::{Command, ExitStatus, Stdio},
+    };
+
+    use super::{Duplicates, Env, TemplateContext, Topic};
+    use anyhow::{anyhow, Context, Result};
+    use ignore::overrides::Override;
+
+    fn deploy_links(
+        globs: Override,
+        target: &Path,
+        duplicates: Duplicates,
+        dry_run: bool,
+    ) -> Result<()> {
+        let cur_dir = globs.path();
+        for entry in crate::glob::new_walker(globs).build() {
+            match entry {
+                Ok(entry) => {
+                    let path = entry.path();
+                    match path.is_file() {
+                        true => {
+                            let target = crate::fs::rebase_path(path, cur_dir, target)
+                                .expect("Failed to rebase path");
+
+                            if !dry_run {
+                                crate::fs::place_symlink(path, &target, duplicates).with_context(
+                                    || {
+                                        format!(
+                                            "Failed to symlink dotfile: '{}' -> '{}'",
+                                            path.display(),
+                                            target.display()
+                                        )
+                                    },
+                                )?;
+                            }
+                        }
+                        false => {
+                            todo!("Implement logging");
+                        }
+                    }
+                }
+                Err(_) => {
+                    todo!("Implement logging!");
+                }
+            };
+        }
+        Ok(())
+    }
+
+    fn run_cmd(
+        dir: &Path,
+        cmd: &[String],
+        stdin: Stdio,
+        stdout: Stdio,
+        stderr: Stdio,
+    ) -> Option<Result<ExitStatus>> {
+        let cmd_ = cmd;
+        // Make `cmd` `None` if the slice is empty, or `(cmd, None)` if the commands is available
+        // but there are no args, or finally `(cmd, args)` if both are available.
+        let cmd = cmd
+            .split_first()
+            .map(|(cmd, args)| (cmd, Some(args)))
+            .or_else(|| cmd.first().map(|first| (first, None)));
+
+        cmd.map(|(cmd, args)| {
+            let args = args.unwrap_or(&[]);
+            Command::new(cmd)
+                .args(args)
+                .current_dir(dir)
+                .stdin(stdin)
+                .stdout(stdout)
+                .stderr(stderr)
+                .status()
+                .map_err(anyhow::Error::new)
+                .and_then(|status| match status.success() {
+                    true => Ok(status),
+                    false => Err(anyhow!("Process exited with status: {}", status)),
+                })
+                .with_context(|| format!("Failed to run command: '{:?}'", cmd_))
+        })
+    }
+
+    fn run_hook(dir: &Path, cmd: &[String]) -> Option<Result<ExitStatus>> {
+        let stdin = Stdio::inherit();
+        let stdout = Stdio::inherit();
+        let stderr = Stdio::inherit();
+
+        run_cmd(dir, cmd, stdin, stdout, stderr)
+    }
+
+    impl Topic {
+        pub fn deploy(self, dry_run: bool) -> Result<Env> {
+            let dir = self.id.dir();
+
+            if !dry_run {
+                run_hook(dir, &self.pre_hook)
+                    .transpose()
+                    .context("Failed to run pre-hook")?;
+            }
+
+            deploy_links(self.links, &self.target, self.duplicates, dry_run)
+                .context("Failed to deploy symlinks")?;
+
+            let env = self
+                .template
+                .render(&self.target, self.duplicates, dry_run)
+                .context("Failed to deploy templates")?;
+
+            if !dry_run {
+                run_hook(dir, &self.post_hook)
+                    .transpose()
+                    .context("Failed to run post-hook")?;
+            }
+
+            Ok(env)
+        }
+    }
 }
 
-impl EnvBuilder {
-    fn new(private: HashMap<String, toml::Value>, public: HashMap<String, toml::Value>) -> Self {
-        Self { private, public }
+pub use env::{Env, TemplateContext};
+mod env {
+    use super::{Dict, Duplicates};
+    use anyhow::{anyhow, Context, Result};
+    use ignore::overrides::Override;
+    use std::{
+        borrow::Cow,
+        collections::HashMap,
+        fs::File,
+        path::{Path, PathBuf},
+    };
+    use tera::Tera;
+    use toml::{value::Map, Value};
+
+    #[derive(Debug, Clone)]
+    pub struct TemplateContext {
+        context: tera::Context,
+        env: Dict,
+        export: Vec<String>,
+        templates: Override,
     }
 
-    pub fn extend(&mut self, env: &Env) {
-        todo!()
+    impl TemplateContext {
+        pub(super) fn new(templates: Override, env: Dict, export: Vec<String>) -> Self {
+            Self {
+                context: tera::Context::new(),
+                env,
+                export,
+                templates,
+            }
+        }
+
+        pub fn extend(&mut self, env: &Env) {
+            self.context.extend(env.context.clone())
+        }
+
+        pub(super) fn render(
+            self,
+            target: &Path,
+            duplicates: Duplicates,
+            dry_run: bool,
+        ) -> Result<Env> {
+            let context = self.context;
+            for (key, value) in self.env {
+                context.insert(key, &value);
+            }
+
+            let mut id = 0_usize;
+            // Map templates to their target paths. I would love to do this more efficiently but
+            // tera allows you to refer to templatess only via strings.
+            let mut path_map = HashMap::<String, PathBuf>::new();
+
+            let cur_dir = self.templates.path();
+            let templates = crate::glob::new_walker(self.templates)
+                .build()
+                .filter_map(|entry| match entry {
+                    Ok(entry) => {
+                        let path = entry.path();
+                        match path.is_file() {
+                            true => {
+                                let target = crate::fs::rebase_path(path, cur_dir, target)
+                                    .expect("Failed to rebase path");
+                                let name = path
+                                    .strip_prefix(cur_dir)
+                                    .expect("Failed to strip prefix")
+                                    .display()
+                                    .to_string();
+                                path_map.insert(name.clone(), target);
+                                Some((path, Some(name)))
+                            }
+                            false => {
+                                todo!("Implement logging");
+                                None
+                            }
+                        }
+                    }
+                    Err(_) => {
+                        todo!("Implement logging!");
+                        None
+                    }
+                });
+
+            let mut tera = Tera::default();
+            tera.add_template_files(templates);
+
+            for (name, target) in path_map {
+                let render = tera
+                    .render(&name, &context)
+                    .with_context(|| format!("Failed to render template: '{}'", &name))?;
+
+                if !dry_run {
+                    crate::fs::place_file(&target, render.as_bytes(), duplicates).with_context(
+                        || {
+                            format!(
+                                "Failed to write template '{}' to '{}'",
+                                cur_dir.join(name).display(),
+                                target.display()
+                            )
+                        },
+                    )?;
+                }
+            }
+
+            let mut env = tera::Context::new();
+            for var in self.export {
+                let val = context
+                    .get(&var)
+                    .ok_or_else(|| anyhow!("Value not found in env"))
+                    .with_context(|| format!("Failed to export value: '{}'", &var))?;
+                env.insert(&var, val)
+            }
+
+            Ok(Env { context: env })
+        }
     }
 
-    pub fn build(self) -> Env {
-        todo!()
+    #[derive(Debug, Clone)]
+    pub struct Env {
+        context: tera::Context,
     }
-}
 
-#[derive(Debug, Clone)]
-pub struct Env {
-    export: HashMap<String, toml::Value>,
+    impl Env {
+        pub(super) fn new(context: tera::Context) -> Self {
+            Self { context }
+        }
+    }
 }
 
 pub fn find_topics<'a, I>(root: &Path, globs: I) -> Result<impl Iterator<Item = Result<TopicId>>>
@@ -187,12 +438,8 @@ where
     let overrides = builder.build().context("Failed to construct globset")?;
 
     Ok(glob::new_walker(overrides).build().map(|r| match r {
-        Ok(entry) => TopicId::new(entry.path()).with_context(|| {
-            anyhow!(
-                "Failed to construct TopicId: '{}'",
-                entry.path().to_string_lossy()
-            )
-        }),
+        Ok(entry) => TopicId::new(entry.path())
+            .with_context(|| anyhow!("Failed to construct TopicId: '{}'", entry.path().display())),
         Err(err) => Err(err).context("Directory walker encountered an error"),
     }))
 }

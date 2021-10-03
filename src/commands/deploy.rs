@@ -2,7 +2,7 @@ use crate::{
     config::Config,
     context, glob,
     resolver::{Node, NodeDesc, NodeId, Resolver},
-    topic::{Env, EnvBuilder, Topic, TopicId},
+    topic::{Env, TemplateContext, Topic, TopicId},
 };
 use anyhow::{anyhow, Context, Result};
 use clap::Clap;
@@ -116,7 +116,7 @@ impl Deploy {
                     match stack.last_mut() {
                         // Merge the node's enviroment into its parent
                         Some(parent) => match resolver.get_mut(parent.node) {
-                            Node::Open { topic, .. } => topic.env_mut().extend(&env),
+                            Node::Open { topic, .. } => topic.import(&env),
                             _ => panic!("Node should be open"),
                         },
                         // We are finised
@@ -168,7 +168,7 @@ impl Deploy {
 
     /// Try to deploy the provided topics, otherwise look for them in the dotfile directory. If a
     /// topic fails to deploy, still try the next ones.
-    pub(super) fn run(self, ctx: context::Context) -> Result<Vec<Result<TopicId>>> {
+    pub(super) fn run(self, config: &Config) -> Result<Vec<Result<TopicId>>> {
         // Get the topics to deploy
         // We potentially don't have to collect this in order to conserve memory, however the
         // filesystem walkers might keep some handles open so we prioritize getting rid of them
@@ -180,7 +180,7 @@ impl Deploy {
                 .map(|s| TopicId::new(Path::new(s)).with_context(|| anyhow!("No topic: '{}'", s)))
                 .collect::<Vec<_>>(),
             // None have been provided so find all the top-level ones
-            None => Self::get_all_topics(&ctx.config.dotfile_dir)
+            None => Self::get_all_topics(&config.dotfile_dir)
                 .context("Failed to create topic iterator")?
                 .collect(),
         };
@@ -191,9 +191,7 @@ impl Deploy {
         Ok(topics
             .into_iter()
             .map(|topic_id| match topic_id {
-                Ok(id) => self
-                    .deploy_topic(&mut resolver, &id, ctx.config)
-                    .map(|_| id),
+                Ok(id) => self.deploy_topic(&mut resolver, &id, config).map(|_| id),
                 Err(err) => Err(err).with_context(|| "Failed to deploy topic"),
             })
             .collect())
