@@ -136,10 +136,10 @@ impl Topic {
         let template = TemplateContext::new(templates, config.env, config.export);
 
         Ok(Topic {
+            links: Self::make_glob(dir, &config.ignore, &[])?,
             id: topic,
             target: config.target,
             dependencies,
-            links: Self::make_glob(dir, &config.ignore, &[])?,
             template,
             duplicates: config.duplicates,
             pre_hook: config.pre_hook,
@@ -151,6 +151,7 @@ impl Topic {
         let dir = topic.dir();
         let t_config = config
             .topic_config
+            .clone()
             .merge(Toml::file(topic.path()))
             .extract()
             .context("Failed to load config")?;
@@ -187,14 +188,14 @@ mod deploy {
         duplicates: Duplicates,
         dry_run: bool,
     ) -> Result<()> {
-        let cur_dir = globs.path();
+        let cur_dir = globs.path().to_owned();
         for entry in crate::glob::new_walker(globs).build() {
             match entry {
                 Ok(entry) => {
                     let path = entry.path();
                     match path.is_file() {
                         true => {
-                            let target = crate::fs::rebase_path(path, cur_dir, target)
+                            let target = crate::fs::rebase_path(path, &cur_dir, target)
                                 .expect("Failed to rebase path");
 
                             if !dry_run {
@@ -334,7 +335,7 @@ mod env {
             duplicates: Duplicates,
             dry_run: bool,
         ) -> Result<Env> {
-            let context = self.context;
+            let mut context = self.context;
             for (key, value) in self.env {
                 context.insert(key, &value);
             }
@@ -344,7 +345,7 @@ mod env {
             // tera allows you to refer to templatess only via strings.
             let mut path_map = HashMap::<String, PathBuf>::new();
 
-            let cur_dir = self.templates.path();
+            let cur_dir = self.templates.path().to_owned();
             let templates = crate::glob::new_walker(self.templates)
                 .build()
                 .filter_map(|entry| match entry {
@@ -352,15 +353,15 @@ mod env {
                         let path = entry.path();
                         match path.is_file() {
                             true => {
-                                let target = crate::fs::rebase_path(path, cur_dir, target)
+                                let target = crate::fs::rebase_path(path, &cur_dir, target)
                                     .expect("Failed to rebase path");
                                 let name = path
-                                    .strip_prefix(cur_dir)
+                                    .strip_prefix(&cur_dir)
                                     .expect("Failed to strip prefix")
                                     .display()
                                     .to_string();
                                 path_map.insert(name.clone(), target);
-                                Some((path, Some(name)))
+                                Some((path.to_owned(), Some(name)))
                             }
                             false => {
                                 todo!("Implement logging");

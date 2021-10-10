@@ -5,8 +5,8 @@ use clap::Clap;
 pub(super) struct Add {
     #[clap(short, long)]
     dry_run: bool,
-    #[clap(short, long, default_value = todo!())]
-    topic: String,
+    #[clap(short, long)]
+    topic: Option<String>,
 }
 
 impl Add {

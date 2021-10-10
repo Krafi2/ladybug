@@ -2,7 +2,7 @@ mod add;
 mod deploy;
 mod topic;
 
-use crate::context::Context;
+use crate::config::Config;
 use anyhow::Result;
 use clap::{AppSettings, Clap};
 
@@ -21,15 +21,15 @@ enum SubCommand {
     Deploy(deploy::Deploy),
 }
 
-pub(super) fn run(ctx: Context) -> Result<()> {
+pub(super) fn run(config: &Config) -> Result<()> {
     let opts = Opts::parse();
     match opts.subcmd {
         SubCommand::Topic(topic) => topic.run(),
         SubCommand::Add(add) => add.run(),
         SubCommand::Deploy(deploy) => {
-            deploy.run(ctx);
-            todo!()
+            // TODO: handle errors
+            deploy.run(config)?;
+            Ok(())
         }
-    };
-    todo!()
+    }
 }

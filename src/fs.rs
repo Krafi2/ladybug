@@ -57,8 +57,7 @@ pub fn place_symlink(original: &Path, link: &Path, duplicates: Duplicates) -> Re
 pub fn place_file(path: &Path, contents: &[u8], duplicates: Duplicates) -> Result<()> {
     let clean_file = match OpenOptions::new().read(true).open(path) {
         Ok(file) => {
-            let reader = contents;
-            match contents_equal(&file, &reader) {
+            match contents_equal(&file, <&[u8]>::clone(&contents)) {
                 // Contents are equal, our job is already done
                 true => return Ok(()),
                 // The contents arent the same so we will need to free the file
@@ -78,11 +77,12 @@ pub fn place_file(path: &Path, contents: &[u8], duplicates: Duplicates) -> Resul
             .with_context(|| format!("Failed to free file: '{}'", path.display()))?;
     }
 
-    let file = OpenOptions::new()
+    let mut file = OpenOptions::new()
         .write(true)
         .create_new(true)
         .open(path)
         .with_context(|| format!("Failed to open file: '{}'", path.display()))?;
+
     file.write_all(contents)
         .with_context(|| format!("Failed to write to file: '{}'", path.display()))
 }
@@ -90,7 +90,7 @@ pub fn place_file(path: &Path, contents: &[u8], duplicates: Duplicates) -> Resul
 // I think this implementation doesn't cover a lot of the edge cases, but we will see how it goes.
 /// Compare the contents of two readers to check if they are equal. If either reader returns an
 /// error, the function returns false.
-fn contents_equal<A, B>(reader1: &A, reader2: &B) -> bool
+fn contents_equal<A, B>(mut reader1: A, mut reader2: B) -> bool
 where
     A: Read,
     B: Read,

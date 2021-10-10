@@ -2,14 +2,15 @@
 
 mod commands;
 mod config;
-mod context;
 mod env;
 mod fs;
 mod glob;
 mod resolver;
 mod topic;
 
-use anyhow::Result;
+use anyhow::{anyhow, Context, Result};
+
+use crate::config::Config;
 
 fn main() {
     match run() {
@@ -22,7 +23,6 @@ fn main() {
 }
 
 fn run() -> Result<()> {
-    let ctx = todo!();
-    commands::run(ctx);
-    todo!()
+    let config = Config::new().context("Failed to load config")?;
+    commands::run(&config).context("Failed to run command")
 }

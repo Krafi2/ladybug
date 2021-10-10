@@ -28,8 +28,8 @@ enum SubCommand {
 struct Add {
     #[clap(short, long)]
     dry_run: bool,
-    #[clap(short, long, default_value = todo!())]
-    root: String,
+    #[clap(short, long)]
+    root: Option<String>,
 }
 
 #[derive(Clap)]
@@ -40,6 +40,6 @@ struct Remove {
 
 #[derive(Clap)]
 struct Edit {
-    #[clap(short, long, default_value = todo!())]
-    root: String,
+    #[clap(short, long)]
+    root: Option<String>,
 }

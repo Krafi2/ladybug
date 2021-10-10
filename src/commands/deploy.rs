@@ -1,6 +1,6 @@
 use crate::{
     config::Config,
-    context, glob,
+    glob,
     resolver::{Node, NodeDesc, NodeId, Resolver},
     topic::{Env, TemplateContext, Topic, TopicId},
 };
