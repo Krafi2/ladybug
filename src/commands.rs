@@ -26,10 +26,6 @@ pub(super) fn run(config: &Config) -> Result<()> {
     match opts.subcmd {
         SubCommand::Topic(topic) => topic.run(),
         SubCommand::Add(add) => add.run(),
-        SubCommand::Deploy(deploy) => {
-            // TODO: handle errors
-            deploy.run(config)?;
-            Ok(())
-        }
+        SubCommand::Deploy(deploy) => deploy.run(config),
     }
 }

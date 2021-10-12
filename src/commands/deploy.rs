@@ -8,6 +8,7 @@ use anyhow::{anyhow, Context, Result};
 use clap::Clap;
 use std::{
     cell::Cell,
+    fmt::{Debug, Display},
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -29,10 +30,10 @@ impl Deploy {
     /// Try to deploy a single topic and return its final enviroment, Used `env` as the default
     /// topic enviroment. Results are cached by the resolver.
     fn deploy_topic<'a>(
-        &self,
         resolver: &'a mut Resolver,
         topic: &TopicId,
         config: &Config,
+        dry_run: bool,
     ) -> Result<&'a Env> {
         /// This struct stores information for each layer of the dependency tree.
         struct Nodule {
@@ -96,7 +97,7 @@ impl Deploy {
                         // All children have been deployed so we can do the same with the node
                         None => {
                             resolver.replace_with(head.node, |node| match node {
-                                Node::Open { topic, .. } => match topic.deploy(self.dry_run) {
+                                Node::Open { topic, .. } => match topic.deploy(dry_run) {
                                     // Close the node to be popped on the next iteration
                                     Ok(env) => Node::Closed(env),
                                     // Mark the node as an error. It will be propagated on the next
@@ -168,32 +169,68 @@ impl Deploy {
 
     /// Try to deploy the provided topics, otherwise look for them in the dotfile directory. If a
     /// topic fails to deploy, still try the next ones.
-    pub(super) fn run(self, config: &Config) -> Result<Vec<Result<TopicId>>> {
-        // Get the topics to deploy
-        // We potentially don't have to collect this in order to conserve memory, however the
-        // filesystem walkers might keep some handles open so we prioritize getting rid of them
-        // as soon as possible
-        let topics = match &self.topics {
+    pub(super) fn run(self, config: &Config) -> Result<()> {
+        // We store the name of the topic and its TopicId, if it could be created
+        let topics: Vec<(String, Result<TopicId>)> = match self.topics {
             // Try to resolver the provided names
             Some(topics) => topics
                 .iter()
-                .map(|s| TopicId::new(Path::new(s)).with_context(|| anyhow!("No topic: '{}'", s)))
-                .collect::<Vec<_>>(),
+                .map(|s| {
+                    let path = Path::new(s);
+                    let topic = TopicId::new(path).context("Topic not found");
+                    (s.to_owned(), topic)
+                })
+                .collect(),
             // None have been provided so find all the top-level ones
             None => Self::get_all_topics(&config.dotfile_dir)
                 .context("Failed to create topic iterator")?
+                .filter_map(|topic| match topic {
+                    Ok(topic) => Some((topic.name().to_string(), Ok(topic))),
+                    // Any errors here are because of bugs or filesystem privilege issues, so we
+                    // will log them, but not print them in the final summary                    Err(err) => todo!("Implement logging"),
+                    Err(err) => todo!("Implement logging"),
+                })
                 .collect(),
         };
 
         let mut resolver = Resolver::new();
+        let dry_run = self.dry_run;
 
         // Try to deploy all the topics that have been successfully resolved
-        Ok(topics
+        let results = topics
             .into_iter()
-            .map(|topic_id| match topic_id {
-                Ok(id) => self.deploy_topic(&mut resolver, &id, config).map(|_| id),
-                Err(err) => Err(err).with_context(|| "Failed to deploy topic"),
+            .filter_map(|(name, topic)| {
+                match topic
+                    .and_then(|id| Self::deploy_topic(&mut resolver, &id, config, dry_run))
+                    .with_context(|| format!("Failed to deploy topic: '{}'", name))
+                {
+                    Ok(_) => None,
+                    Err(err) => Some(err),
+                }
             })
-            .collect())
+            .collect::<Vec<_>>();
+
+        match results.len() {
+            0 => Ok(()),
+            _ => Err(anyhow::Error::msg(DeployError(results))),
+        }
+    }
+}
+
+pub struct DeployError(Vec<anyhow::Error>);
+
+impl Display for DeployError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Failed to deploy the following topics:\n")?;
+        for err in &self.0 {
+            Display::fmt(err, f)?;
+        }
+        Ok(())
+    }
+}
+
+impl Debug for DeployError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("DeployError").field(&self.0).finish()
     }
 }
