@@ -23,6 +23,8 @@ fn main() {
 }
 
 fn run() -> Result<()> {
+    env_logger::init();
+
     let config = Config::new().context("Failed to load config")?;
     commands::run(&config).context("Failed to run command")
 }
