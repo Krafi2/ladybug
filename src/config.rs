@@ -59,7 +59,7 @@ mod serde_figment {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            dotfile_dir: paths::home_dir().join("ladybug"),
+            dotfile_dir: paths::dotfile_dir(),
             topic_config: Figment::from(Serialized::defaults(TopicConfig::default())),
         }
     }
@@ -107,5 +107,8 @@ pub mod paths {
 
     pub fn config_path() -> PathBuf {
         config_dir().join("ladybug.toml")
+    }
+    pub fn dotfile_dir() -> PathBuf {
+        home_dir().join("ladybug")
     }
 }

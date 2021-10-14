@@ -22,11 +22,6 @@ pub(super) struct Deploy {
 }
 
 impl Deploy {
-    fn get_all_topics(root: &Path) -> Result<impl Iterator<Item = Result<TopicId>>> {
-        // Look for topics in all top-level directories
-        crate::topic::find_topics(root, ["*/"])
-    }
-
     /// Try to deploy a single topic and return its final enviroment, Used `env` as the default
     /// topic enviroment. Results are cached by the resolver.
     fn deploy_topic<'a>(
@@ -167,6 +162,17 @@ impl Deploy {
         }
     }
 
+    fn get_all_topics(root: &Path) -> Result<impl Iterator<Item = TopicId>> {
+        // Look for topics in all top-level directories
+        crate::topic::find_topics(root, ["*/"]).map(|iter| {
+            iter.map(|topic| match topic {
+                Ok(topic) => topic,
+                // Any errors here are bugs so we crash
+                Err(err) => panic!("Failed to construct topic: {}", err),
+            })
+        })
+    }
+
     /// Try to deploy the provided topics, otherwise look for them in the dotfile directory. If a
     /// topic fails to deploy, still try the next ones.
     pub(super) fn run(self, config: &Config) -> Result<()> {
@@ -184,12 +190,7 @@ impl Deploy {
             // None have been provided so find all the top-level ones
             None => Self::get_all_topics(&config.dotfile_dir)
                 .context("Failed to create topic iterator")?
-                .filter_map(|topic| match topic {
-                    Ok(topic) => Some((topic.name().to_string(), Ok(topic))),
-                    // Any errors here are because of bugs or filesystem privilege issues, so we
-                    // will log them, but not print them in the final summary                    Err(err) => todo!("Implement logging"),
-                    Err(err) => todo!("Implement logging"),
-                })
+                .map(|topic| (topic.name().to_string(), Ok(topic)))
                 .collect(),
         };
 

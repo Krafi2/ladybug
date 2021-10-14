@@ -438,9 +438,19 @@ where
     }
     let overrides = builder.build().context("Failed to construct globset")?;
 
-    Ok(glob::new_walker(overrides).build().map(|r| match r {
-        Ok(entry) => TopicId::new(entry.path())
-            .with_context(|| anyhow!("Failed to construct TopicId: '{}'", entry.path().display())),
-        Err(err) => Err(err).context("Directory walker encountered an error"),
-    }))
+    let iter = glob::new_walker(overrides).build().filter_map(|r| match r {
+        Ok(entry) => {
+            let topic = TopicId::new(entry.path()).with_context(|| {
+                anyhow!("Failed to construct TopicId: '{}'", entry.path().display())
+            });
+            Some(topic)
+        }
+        // The walker may return errors if it tries to search folders that are inaccesible due to
+        // filesystem permissions, which we can safely log and ignore.
+        Err(err) => {
+            log::info!("Walker encountered an error: {}", err);
+            None
+        }
+    });
+    Ok(iter)
 }
