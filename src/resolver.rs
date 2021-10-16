@@ -1,7 +1,4 @@
-use crate::{
-    config::Config,
-    topic::{Env, Topic, TopicId},
-};
+use crate::topic::{factory::TopicFactory, Env, Topic, TopicId};
 use anyhow::{anyhow, Context};
 use std::{
     collections::hash_map::{DefaultHasher, HashMap},
@@ -150,8 +147,8 @@ impl Resolver {
         }
     }
 
-    fn construct_node(&mut self, topic_id: TopicId, config: &Config) -> Node {
-        match Topic::from_id(topic_id, config) {
+    fn construct_node<T: TopicFactory>(&mut self, topic_id: TopicId, factory: &mut T) -> Node {
+        match factory.new_topic(topic_id) {
             Ok(topic) => {
                 let children = topic
                     .dependencies()
@@ -172,13 +169,13 @@ impl Resolver {
         self.get_or_insert_node_with(topic, |_| NodeStatus::Waiting(topic.clone()))
     }
 
-    pub fn open(&mut self, desc: NodeDesc, config: &Config) -> NodeId {
+    pub fn open<T: TopicFactory>(&mut self, desc: NodeDesc, factory: &mut T) -> NodeId {
         match &mut self.storage[desc] {
             NodeStatus::Ready(_) => (),
             node @ NodeStatus::Waiting(_) => {
                 let old = std::mem::replace(node, NodeStatus::Absent);
                 let new = match old {
-                    NodeStatus::Waiting(topic_id) => Self::construct_node(self, topic_id, config),
+                    NodeStatus::Waiting(topic_id) => Self::construct_node(self, topic_id, factory),
                     _ => unreachable!(),
                 };
                 self.storage[desc] = NodeStatus::Ready(new);

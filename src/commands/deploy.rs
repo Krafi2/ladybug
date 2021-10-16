@@ -2,7 +2,7 @@ use crate::{
     config::Config,
     glob,
     resolver::{Node, NodeDesc, NodeId, Resolver},
-    topic::{Env, TemplateContext, Topic, TopicId},
+    topic::{factory::TopicFactory, Env, TemplateContext, Topic, TopicId},
 };
 use anyhow::{anyhow, Context, Result};
 use clap::Clap;
@@ -24,10 +24,10 @@ pub(super) struct Deploy {
 impl Deploy {
     /// Try to deploy a single topic and return its final enviroment, Used `env` as the default
     /// topic enviroment. Results are cached by the resolver.
-    fn deploy_topic<'a>(
+    fn deploy_topic<'a, T: TopicFactory>(
         resolver: &'a mut Resolver,
         topic: &TopicId,
-        config: &Config,
+        factory: &mut T,
         dry_run: bool,
     ) -> Result<&'a Env> {
         /// This struct stores information for each layer of the dependency tree.
@@ -49,7 +49,7 @@ impl Deploy {
 
         let desc = resolver.new_node(topic);
         // The root node we actually want to deploy
-        let root = resolver.open(desc, config);
+        let root = resolver.open(desc, factory);
         // All the nodes in the stack should be open with the exception of the head node
         let mut stack = Vec::<Nodule>::from([Nodule::new(root)]);
 
@@ -85,7 +85,7 @@ impl Deploy {
                                     continue 'outer;
                                 }
                             }
-                            let id = resolver.open(desc, config);
+                            let id = resolver.open(desc, factory);
                             // Everything is ok, so we push the new node
                             stack.push(Nodule::new(id))
                         }
@@ -168,7 +168,9 @@ impl Deploy {
             iter.map(|topic| match topic {
                 Ok(topic) => topic,
                 // Any errors here are bugs so we crash
-                Err(err) => panic!("Failed to construct topic: {}", err),
+                Err(err) => {
+                    panic!("Failed to construct topic: {:#}", err);
+                }
             })
         })
     }
@@ -194,6 +196,7 @@ impl Deploy {
                 .collect(),
         };
 
+        let mut factory = crate::topic::factory::StandardFactory::new(config);
         let mut resolver = Resolver::new();
         let dry_run = self.dry_run;
 
@@ -202,7 +205,7 @@ impl Deploy {
             .into_iter()
             .filter_map(|(name, topic)| {
                 match topic
-                    .and_then(|id| Self::deploy_topic(&mut resolver, &id, config, dry_run))
+                    .and_then(|id| Self::deploy_topic(&mut resolver, &id, &mut factory, dry_run))
                     .with_context(|| format!("Failed to deploy topic: '{}'", name))
                 {
                     Ok(_) => None,

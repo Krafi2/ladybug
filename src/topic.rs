@@ -1,3 +1,5 @@
+pub mod factory;
+
 use crate::{
     config::{paths, Config},
     glob,
@@ -440,9 +442,7 @@ where
 
     let iter = glob::new_walker(overrides).build().filter_map(|r| match r {
         Ok(entry) => {
-            let topic = TopicId::new(entry.path()).with_context(|| {
-                anyhow!("Failed to construct TopicId: '{}'", entry.path().display())
-            });
+            let topic = TopicId::new(entry.path()).context("Failed to construct TopicId");
             Some(topic)
         }
         // The walker may return errors if it tries to search folders that are inaccesible due to
