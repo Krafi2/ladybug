@@ -357,7 +357,7 @@ dependencies = [
  "directories-next",
  "env_logger",
  "figment",
- "ignore",
+ "globwalk",
  "log",
  "serde",
  "tera",

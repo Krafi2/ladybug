@@ -8,6 +8,8 @@ mod glob;
 mod resolver;
 mod topic;
 
+use std::path::Path;
+
 use anyhow::{anyhow, Context, Result};
 
 use crate::config::Config;
@@ -16,13 +18,24 @@ fn main() {
     match run() {
         Ok(_) => (),
         Err(e) => {
-            eprintln!("{:#}", e);
+            eprintln!("{:?}", e);
             std::process::exit(1);
         }
     }
 }
 
 fn run() -> Result<()> {
+    // println!("Hee");
+    // let mut glob = crate::glob::GlobBuilder::new(Path::new("/home/jakub/ladybug"));
+    // glob.add("*/ladybug.toml", true)?;
+    // glob.add("**", false)?;
+    // let glob = glob.build()?;
+    // dbg!(&glob);
+    // for file in glob.walk() {
+    //     println!("file: {:?}", file?);
+    // }
+    // return Ok(());
+
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
     check_dirs()?;

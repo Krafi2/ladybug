@@ -169,7 +169,7 @@ impl Deploy {
                 Ok(topic) => topic,
                 // Any errors here are bugs so we crash
                 Err(err) => {
-                    panic!("Failed to construct topic: {:#}", err);
+                    panic!("Failed to construct topic: {:?}", err);
                 }
             })
         })

@@ -1,32 +1,59 @@
 use anyhow::{anyhow, Context, Error, Result};
-use ignore::{
-    overrides::{Override, OverrideBuilder},
-    Walk, WalkBuilder,
+use globwalk::{GlobWalker, GlobWalkerBuilder};
+use std::{
+    borrow::Cow,
+    path::{Path, PathBuf},
 };
-use std::path::Path;
 
-pub fn extend_glob<'a, I>(mut builder: &mut OverrideBuilder, globs: I) -> Result<Override>
-where
-    I: IntoIterator<Item = &'a str>,
-{
-    for s in globs {
-        builder
-            .add(s)
-            .with_context(|| anyhow!("Failed to construct glob"))?;
+#[derive(Debug)]
+pub struct GlobBuilder {
+    base: PathBuf,
+    patterns: Vec<String>,
+}
+
+impl GlobBuilder {
+    pub fn new(base: PathBuf) -> Self {
+        Self {
+            base,
+            patterns: Vec::new(),
+        }
     }
-    builder.build().map_err(Error::new)
-}
 
-pub fn from_strings<'a, I>(root: &Path, globs: I) -> Result<Override>
-where
-    I: IntoIterator<Item = &'a str>,
-{
-    let mut builder = OverrideBuilder::new(root);
-    extend_glob(&mut builder, globs)
-}
+    pub fn add<'a, S>(mut self, glob: S, whitelist: bool) -> Self
+    where
+        S: Into<Cow<'a, str>>,
+    {
+        let glob = glob.into();
+        let pattern = match whitelist {
+            true => glob.into_owned(),
+            false => {
+                let mut pattern = String::from("!");
+                pattern.push_str(&glob);
+                pattern
+            }
+        };
+        self.patterns.push(pattern);
+        self
+    }
 
-pub fn new_walker(globs: Override) -> WalkBuilder {
-    let mut builder = WalkBuilder::new(globs.path());
-    builder.overrides(globs).standard_filters(false);
-    builder
+    pub fn extend<'a, I, T>(mut self, globs: I, whitelist: bool) -> Self
+    where
+        I: IntoIterator<Item = T>,
+        T: Into<Cow<'a, str>>,
+    {
+        for s in globs {
+            self = self.add(s, whitelist);
+        }
+        self
+    }
+
+    pub fn base(&self) -> &Path {
+        &self.base
+    }
+
+    pub fn build(mut self) -> Result<GlobWalker> {
+        GlobWalkerBuilder::from_patterns(&self.base, &self.patterns)
+            .build()
+            .context("Failed to build GlobWalker")
+    }
 }

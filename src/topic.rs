@@ -2,17 +2,14 @@ pub mod factory;
 
 use crate::{
     config::{paths, Config},
-    glob,
+    glob::GlobBuilder,
 };
 use anyhow::{anyhow, Context, Error, Result};
 use figment::{
     providers::{Format, Toml},
     Figment,
 };
-use ignore::{
-    overrides::{Override, OverrideBuilder},
-    DirEntry,
-};
+use globwalk::GlobWalker;
 use serde::{Deserialize, Serialize};
 use std::{
     borrow::Cow,
@@ -86,12 +83,12 @@ impl TopicId {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct Topic {
     id: TopicId,
     target: PathBuf,
     dependencies: Vec<TopicId>,
-    links: Override,
+    links: GlobBuilder,
     template: TemplateContext,
     duplicates: Duplicates,
     pre_hook: Vec<String>,
@@ -106,24 +103,6 @@ pub enum Duplicates {
 }
 
 impl Topic {
-    fn make_ignore<'a, I>(root: &Path, globs: I) -> Result<OverrideBuilder>
-    where
-        I: IntoIterator<Item = &'a str>,
-    {
-        let mut builder = OverrideBuilder::new(root);
-        for s in globs.into_iter() {
-            builder
-                .add(["!", s].join("").as_str())
-                .context("Falied to construct glob")?;
-        }
-        Ok(builder)
-    }
-
-    fn make_glob(root: &Path, ignore: &[String], globs: &[String]) -> Result<Override> {
-        let mut builder = Self::make_ignore(root, ignore.iter().map(AsRef::as_ref))?;
-        glob::extend_glob(&mut builder, globs.iter().map(AsRef::as_ref))
-    }
-
     fn new(topic: TopicId, config: TopicConfig, global: &Config) -> Result<Self> {
         let dependencies = find_topics(
             &global.dotfile_dir,
@@ -134,15 +113,20 @@ impl Topic {
         .context("Failed to collect dependencies")?;
 
         let dir = topic.dir();
-        let templates = Self::make_glob(dir, &config.ignore, &config.template)?;
-        let template = TemplateContext::new(templates, config.env, config.export);
+        let mut templates = GlobBuilder::new(dir.to_owned())
+            .extend(&config.template, true)
+            .extend(&config.ignore, false);
+
+        let mut links = GlobBuilder::new(dir.to_owned())
+            .extend(&config.template, false)
+            .extend(&config.ignore, false);
 
         Ok(Topic {
-            links: Self::make_glob(dir, &config.ignore, &[])?,
+            links,
             id: topic,
             target: config.target,
             dependencies,
-            template,
+            template: TemplateContext::new(templates, config.env, config.export),
             duplicates: config.duplicates,
             pre_hook: config.pre_hook,
             post_hook: config.post_hook,
@@ -174,24 +158,23 @@ impl Topic {
 }
 
 mod deploy {
+    use super::{Duplicates, Env, TemplateContext, Topic};
+    use crate::glob::GlobBuilder;
+    use anyhow::{anyhow, Context, Result};
     use std::{
         io::stderr,
         path::Path,
         process::{Command, ExitStatus, Stdio},
     };
 
-    use super::{Duplicates, Env, TemplateContext, Topic};
-    use anyhow::{anyhow, Context, Result};
-    use ignore::overrides::Override;
-
     fn deploy_links(
-        globs: Override,
+        globs: GlobBuilder,
         target: &Path,
         duplicates: Duplicates,
         dry_run: bool,
     ) -> Result<()> {
-        let cur_dir = globs.path().to_owned();
-        for entry in crate::glob::new_walker(globs).build() {
+        let cur_dir = globs.base().to_owned();
+        for entry in globs.build().context("Failed to build GlobWalker")? {
             match entry {
                 Ok(entry) => {
                     let path = entry.path();
@@ -297,9 +280,10 @@ mod deploy {
 
 pub use env::{Env, TemplateContext};
 mod env {
+    use crate::glob::GlobBuilder;
+
     use super::{Dict, Duplicates};
     use anyhow::{anyhow, Context, Result};
-    use ignore::overrides::Override;
     use std::{
         borrow::Cow,
         collections::HashMap,
@@ -309,16 +293,16 @@ mod env {
     use tera::Tera;
     use toml::{value::Map, Value};
 
-    #[derive(Debug, Clone)]
+    #[derive(Debug)]
     pub struct TemplateContext {
         context: tera::Context,
         env: Dict,
         export: Vec<String>,
-        templates: Override,
+        templates: GlobBuilder,
     }
 
     impl TemplateContext {
-        pub(super) fn new(templates: Override, env: Dict, export: Vec<String>) -> Self {
+        pub(super) fn new(templates: GlobBuilder, env: Dict, export: Vec<String>) -> Self {
             Self {
                 context: tera::Context::new(),
                 env,
@@ -347,9 +331,11 @@ mod env {
             // tera allows you to refer to templatess only via strings.
             let mut path_map = HashMap::<String, PathBuf>::new();
 
-            let cur_dir = self.templates.path().to_owned();
-            let templates = crate::glob::new_walker(self.templates)
+            let cur_dir = self.templates.base().to_owned();
+            let templates = self
+                .templates
                 .build()
+                .context("Failed to construct GlobWalker")?
                 .filter_map(|entry| match entry {
                     Ok(entry) => {
                         let path = entry.path();
@@ -427,30 +413,30 @@ pub fn find_topics<'a, I>(root: &Path, globs: I) -> Result<impl Iterator<Item = 
 where
     I: IntoIterator<Item = &'a str>,
 {
-    let mut builder = OverrideBuilder::new(root);
+    let mut builder = GlobBuilder::new(root.to_owned());
     for s in globs {
         let mut s = s.to_owned();
         if !s.ends_with("/") {
             s.push('/');
         }
         s.push_str("ladybug.toml");
-        builder
-            .add(&s)
-            .with_context(|| anyhow!("Failed to construct glob: '{}'", &s))?;
+        builder = builder.add(s, true);
     }
-    let overrides = builder.build().context("Failed to construct globset")?;
 
-    let iter = glob::new_walker(overrides).build().filter_map(|r| match r {
-        Ok(entry) => {
-            let topic = TopicId::new(entry.path()).context("Failed to construct TopicId");
-            Some(topic)
-        }
-        // The walker may return errors if it tries to search folders that are inaccesible due to
-        // filesystem permissions, which we can safely log and ignore.
-        Err(err) => {
-            log::info!("Walker encountered an error: {}", err);
-            None
-        }
-    });
+    let iter = builder
+        .build()
+        .context("Failed to construct GlobWalker")?
+        .filter_map(|r| match r {
+            Ok(entry) => {
+                let topic = TopicId::new(entry.path()).context("Failed to construct TopicId");
+                Some(topic)
+            }
+            // The walker may return errors if it tries to search folders that are inaccesible due to
+            // filesystem permissions, which we can safely log and ignore.
+            Err(err) => {
+                log::info!("Walker encountered an error: {}", err);
+                None
+            }
+        });
     Ok(iter)
 }
