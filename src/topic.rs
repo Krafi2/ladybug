@@ -1,3 +1,4 @@
+pub mod deployer;
 pub mod factory;
 
 use crate::{
@@ -250,7 +251,7 @@ mod deploy {
     }
 
     impl Topic {
-        pub fn deploy(self, dry_run: bool) -> Result<Env> {
+        pub(super) fn deploy(self, dry_run: bool) -> Result<Env> {
             let dir = self.id.dir();
 
             if !dry_run {

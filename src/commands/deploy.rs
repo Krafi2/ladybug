@@ -2,7 +2,11 @@ use crate::{
     config::Config,
     glob,
     resolver::{Node, NodeDesc, NodeId, Resolver},
-    topic::{factory::TopicFactory, Env, TemplateContext, Topic, TopicId},
+    topic::{
+        deployer::{Deployer, StandardDeployer},
+        factory::TopicFactory,
+        Env, TemplateContext, Topic, TopicId,
+    },
 };
 use anyhow::{anyhow, Context, Result};
 use clap::Clap;
@@ -24,11 +28,11 @@ pub(super) struct Deploy {
 impl Deploy {
     /// Try to deploy a single topic and return its final enviroment, Used `env` as the default
     /// topic enviroment. Results are cached by the resolver.
-    fn deploy_topic<'a, T: TopicFactory>(
+    fn deploy_topic<'a, F: TopicFactory, D: Deployer>(
         resolver: &'a mut Resolver,
         topic: &TopicId,
-        factory: &mut T,
-        dry_run: bool,
+        factory: &mut F,
+        deployer: &mut D,
     ) -> Result<&'a Env> {
         /// This struct stores information for each layer of the dependency tree.
         struct Nodule {
@@ -92,7 +96,7 @@ impl Deploy {
                         // All children have been deployed so we can do the same with the node
                         None => {
                             resolver.replace_with(head.node, |node| match node {
-                                Node::Open { topic, .. } => match topic.deploy(dry_run) {
+                                Node::Open { topic, .. } => match deployer.deploy(*topic) {
                                     // Close the node to be popped on the next iteration
                                     Ok(env) => Node::Closed(env),
                                     // Mark the node as an error. It will be propagated on the next
@@ -197,6 +201,7 @@ impl Deploy {
         };
 
         let mut factory = crate::topic::factory::StandardFactory::new(config);
+        let mut deployer = StandardDeployer::new(self.dry_run);
         let mut resolver = Resolver::new();
         let dry_run = self.dry_run;
 
@@ -205,7 +210,9 @@ impl Deploy {
             .into_iter()
             .filter_map(|(name, topic)| {
                 match topic
-                    .and_then(|id| Self::deploy_topic(&mut resolver, &id, &mut factory, dry_run))
+                    .and_then(|id| {
+                        Self::deploy_topic(&mut resolver, &id, &mut factory, &mut deployer)
+                    })
                     .with_context(|| format!("Failed to deploy topic: '{}'", name))
                 {
                     Ok(_) => None,
