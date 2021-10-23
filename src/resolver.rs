@@ -1,4 +1,4 @@
-use crate::topic::{factory::TopicFactory, Env, Topic, TopicId};
+use crate::topic::{factory::TopicFactory, registry::TopicId, Env, Topic, TopicDesc};
 use anyhow::{anyhow, Context};
 use std::{
     collections::hash_map::{DefaultHasher, HashMap},
@@ -7,125 +7,82 @@ use std::{
 };
 
 #[derive(Debug)]
-pub enum Node {
-    Open {
-        children: Vec<NodeDesc>,
-        topic: Box<Topic>,
-    },
-    Closed(Env),
-    Err(Arc<anyhow::Error>),
+pub enum NodeErr {
+    /// A dependency couldn't be satisfied
+    Unsatisfied(NodeId),
+    /// This node is a part of a cycle
+    Cycle(NodeId),
+    /// Something is wrong with this node
+    Custom(anyhow::Error),
 }
 
 #[derive(Debug)]
-enum NodeStatus {
-    Ready(Node),
-    Waiting(TopicId),
-    /// This variant is necessary for when we want to take ownership of a `Node`. All absent nodes
-    /// are temporary and must be replaced with a valid `NodeStatus` before the function eits.
-    Absent,
+pub enum Node {
+    Open(Box<Topic>),
+    Closed(Env),
+    Err(NodeErr),
 }
 
-pub use storage::{NodeDesc, NodeId};
+pub use storage::NodeId;
 mod storage {
-    #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
-    // Describes a node that may still be uninitialized
-    pub struct NodeDesc(usize);
-
-    impl From<NodeId> for NodeDesc {
-        fn from(id: NodeId) -> Self {
-            id.0
-        }
-    }
-
-    #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
-    // Describes a node that is known to be initialized
-    pub struct NodeId(NodeDesc);
-
-    use super::{Node, NodeStatus};
-    use crate::topic::TopicId;
+    use super::Node;
+    use crate::topic::registry::{self, Handle, TopicId};
     use std::{
         collections::HashMap,
         ops::{Index, IndexMut},
     };
 
+    /// Describes a node that is known to be initialized
+    #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+    pub struct NodeId(Handle<Option<Node>>);
+
+    impl Into<TopicId> for NodeId {
+        fn into(self) -> TopicId {
+            self.0.into()
+        }
+    }
+
     #[derive(Debug, Default)]
     pub(super) struct Storage {
-        nodes: Vec<NodeStatus>,
+        inner: registry::Storage<Option<Node>>,
     }
 
     impl Storage {
-        pub fn get_desc(&self, desc: NodeDesc) -> Option<&NodeStatus> {
-            self.nodes.get(desc.0)
-        }
-
-        pub fn get_desc_mut(&mut self, desc: NodeDesc) -> Option<&mut NodeStatus> {
-            self.nodes.get_mut(desc.0)
-        }
-
-        pub fn get_id(&self, id: NodeId) -> Option<&Node> {
-            self.get_desc(id.0).map(|node| match node {
-                NodeStatus::Ready(node) => node,
-                NodeStatus::Waiting(_) => panic!("Node should be ready"),
-                NodeStatus::Absent => panic!("Node must not be absent"),
-            })
-        }
-
-        pub fn get_id_mut(&mut self, id: NodeId) -> Option<&mut Node> {
-            self.get_desc_mut(id.0).map(|node| match node {
-                NodeStatus::Ready(node) => node,
-                NodeStatus::Waiting(_) => panic!("Node should be ready"),
-                NodeStatus::Absent => panic!("Node must not be absent"),
-            })
-        }
-
-        pub fn new_status(&mut self, status: NodeStatus) -> NodeDesc {
-            let idx = self.nodes.len();
-            self.nodes.push(status);
-            NodeDesc(idx)
-        }
-
-        pub fn upgrade_desc(&self, desc: NodeDesc) -> Option<NodeId> {
-            match self[desc] {
-                NodeStatus::Ready(_) => Some(NodeId(desc)),
-                _ => None,
+        pub fn get_id<F>(&mut self, id: TopicId, func: F) -> NodeId
+        where
+            F: FnOnce() -> Node,
+        {
+            let handle = self.inner.get_handle(id, |_| None);
+            match &mut self.inner[handle] {
+                Some(_) => (),
+                None => {
+                    self.inner[handle] = Some(func());
+                }
             }
+            NodeId(handle)
         }
 
-        // pub fn new_node(&mut self, node: Node) {}
-    }
-
-    impl Index<NodeDesc> for Storage {
-        type Output = NodeStatus;
-
-        fn index(&self, index: NodeDesc) -> &Self::Output {
-            self.get_desc(index).expect("Node not found")
+        pub fn get(&self, id: NodeId) -> &Node {
+            self.inner[id.0].as_ref().expect("Node is absent")
         }
-    }
 
-    impl IndexMut<NodeDesc> for Storage {
-        fn index_mut(&mut self, index: NodeDesc) -> &mut Self::Output {
-            self.get_desc_mut(index).expect("Node not found")
+        pub fn get_mut(&mut self, id: NodeId) -> &mut Node {
+            self.inner[id.0].as_mut().expect("Node is absent")
         }
-    }
 
-    impl Index<NodeId> for Storage {
-        type Output = Node;
-
-        fn index(&self, index: NodeId) -> &Self::Output {
-            self.get_id(index).expect("Node not found")
-        }
-    }
-
-    impl IndexMut<NodeId> for Storage {
-        fn index_mut(&mut self, index: NodeId) -> &mut Self::Output {
-            self.get_id_mut(index).expect("Node not found")
+        pub fn replace<F>(&mut self, id: NodeId, func: F)
+        where
+            F: FnOnce(Node) -> Node,
+        {
+            let node = &mut self.inner[id.0];
+            let old = std::mem::replace(node, None);
+            std::mem::replace(node, Some(func(old.expect("Node is absent"))));
         }
     }
 }
 
 #[derive(Debug, Default)]
 pub struct Resolver {
-    id_map: HashMap<TopicId, NodeDesc>,
     storage: storage::Storage,
 }
 
@@ -134,92 +91,36 @@ impl Resolver {
         Self::default()
     }
 
-    fn get_or_insert_node_with<F>(&mut self, topic: &TopicId, func: F) -> NodeDesc
-    where
-        F: FnOnce(&mut Self) -> NodeStatus,
-    {
-        match self.id_map.get(topic) {
-            Some(id) => *id,
-            None => {
-                let node = func(self);
-                self.storage.new_status(node)
-            }
+    fn new_node<T: TopicFactory>(id: TopicId, factory: &mut T) -> Node {
+        match factory.new_topic(id) {
+            Ok(topic) => Node::Open(Box::new(topic)),
+            Err(error) => Node::Err(NodeErr::Custom(error)),
         }
     }
 
-    fn construct_node<T: TopicFactory>(&mut self, topic_id: TopicId, factory: &mut T) -> Node {
-        match factory.new_topic(topic_id) {
-            Ok(topic) => {
-                let children = topic
-                    .dependencies()
-                    .iter()
-                    .map(|id| self.get_or_insert_node_with(id, |_| NodeStatus::Waiting(id.clone())))
-                    .collect::<Vec<_>>();
-
-                Node::Open {
-                    children,
-                    topic: Box::new(topic),
-                }
-            }
-            Err(error) => Node::Err(Arc::new(error)),
-        }
-    }
-
-    pub fn new_node(&mut self, topic: &TopicId) -> NodeDesc {
-        self.get_or_insert_node_with(topic, |_| NodeStatus::Waiting(topic.clone()))
-    }
-
-    pub fn open<T: TopicFactory>(&mut self, desc: NodeDesc, factory: &mut T) -> NodeId {
-        match &mut self.storage[desc] {
-            NodeStatus::Ready(_) => (),
-            node @ NodeStatus::Waiting(_) => {
-                let old = std::mem::replace(node, NodeStatus::Absent);
-                let new = match old {
-                    NodeStatus::Waiting(topic_id) => Self::construct_node(self, topic_id, factory),
-                    _ => unreachable!(),
-                };
-                self.storage[desc] = NodeStatus::Ready(new);
-            }
-            NodeStatus::Absent => panic!("Node must not be absent"),
-        };
-        self.storage
-            .upgrade_desc(desc)
-            .expect("Failed to upgrade descriptor")
-    }
-
-    pub fn replace_with<F>(&mut self, id: NodeId, func: F)
-    where
-        F: FnOnce(Node) -> Node,
-    {
-        match &mut self.storage[NodeDesc::from(id)] {
-            node @ NodeStatus::Ready(_) => {
-                let old = match std::mem::replace(node, NodeStatus::Absent) {
-                    NodeStatus::Ready(node) => node,
-                    _ => unreachable!("Node must be ready"),
-                };
-                let new = func(old);
-                *node = NodeStatus::Ready(new);
-            }
-            _ => unreachable!("Node must be ready"),
-        }
+    pub fn open<T: TopicFactory>(&mut self, id: TopicId, factory: &mut T) -> NodeId {
+        self.storage.get_id(id, || Self::new_node(id, factory))
     }
 
     pub fn get(&self, id: NodeId) -> &Node {
-        &self.storage[id]
+        self.storage.get(id)
     }
 
     pub fn get_mut(&mut self, id: NodeId) -> &mut Node {
-        &mut self.storage[id]
+        self.storage.get_mut(id)
     }
 
-    pub fn error(&mut self, id: NodeId, error: Arc<anyhow::Error>) {
-        match &mut self.storage[id] {
+    pub fn replace<F>(&mut self, id: NodeId, func: F)
+    where
+        F: FnOnce(Node) -> Node,
+    {
+        self.storage.replace(id, func)
+    }
+
+    pub fn error(&mut self, id: NodeId, error: NodeErr) {
+        match self.storage.get_mut(id) {
             node @ Node::Open { .. } => *node = Node::Err(error),
             _ => panic!("Attemted to set an error on a node that wasn't open"),
         }
-    }
-
-    pub fn upgrade_desc(&self, desc: NodeDesc) -> Option<NodeId> {
-        self.storage.upgrade_desc(desc)
     }
 }

@@ -1,5 +1,6 @@
 pub mod deployer;
 pub mod factory;
+pub mod registry;
 
 use crate::{
     config::{paths, Config},
@@ -60,9 +61,9 @@ impl Default for TopicConfig {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct TopicId(PathBuf);
+pub struct TopicDesc(PathBuf);
 
-impl TopicId {
+impl TopicDesc {
     pub fn new(path: &Path) -> Result<Self> {
         if path.ends_with("ladybug.toml") {
             Ok(Self(path.to_owned()))
@@ -79,14 +80,16 @@ impl TopicId {
     pub fn dir(&self) -> &Path {
         self.0.parent().expect("Topic path has no parent")
     }
-    pub fn name(&self) -> Cow<str> {
-        self.path().to_string_lossy()
+    pub fn name(&self) -> std::path::Display {
+        self.dir().display()
     }
 }
 
 #[derive(Debug)]
 pub struct Topic {
     id: TopicId,
+    name: String,
+    dir: PathBuf,
     target: PathBuf,
     dependencies: Vec<TopicId>,
     links: GlobBuilder,
@@ -104,8 +107,14 @@ pub enum Duplicates {
 }
 
 impl Topic {
-    fn new(topic: TopicId, config: TopicConfig, global: &Config) -> Result<Self> {
+    fn new(
+        registry: &mut Registry,
+        desc: TopicDesc,
+        config: TopicConfig,
+        global: &Config,
+    ) -> Result<Self> {
         let dependencies = find_topics(
+            registry,
             &global.dotfile_dir,
             config.dependencies.iter().map(AsRef::as_ref),
         )
@@ -113,18 +122,23 @@ impl Topic {
         .collect::<Result<Vec<_>>>()
         .context("Failed to collect dependencies")?;
 
-        let dir = topic.dir();
-        let mut templates = GlobBuilder::new(dir.to_owned())
+        let dir = desc.dir().to_owned();
+        let name = desc.name().to_string();
+        let id = registry.register(desc);
+
+        let mut templates = GlobBuilder::new(dir.clone())
             .extend(&config.template, true)
             .extend(&config.ignore, false);
 
-        let mut links = GlobBuilder::new(dir.to_owned())
+        let mut links = GlobBuilder::new(dir.clone())
             .extend(&config.template, false)
             .extend(&config.ignore, false);
 
         Ok(Topic {
             links,
-            id: topic,
+            id,
+            name,
+            dir,
             target: config.target,
             dependencies,
             template: TemplateContext::new(templates, config.env, config.export),
@@ -134,15 +148,15 @@ impl Topic {
         })
     }
 
-    pub fn from_id(topic: TopicId, config: &Config) -> Result<Self> {
-        let dir = topic.dir();
+    pub fn from_desc(registry: &mut Registry, config: &Config, desc: TopicDesc) -> Result<Self> {
+        let dir = desc.dir();
         let t_config = config
             .topic_config
             .clone()
-            .merge(Toml::file(topic.path()))
+            .merge(Toml::file(desc.path()))
             .extract()
             .context("Failed to load config")?;
-        Self::new(topic, t_config, config)
+        Self::new(registry, desc, t_config, config)
     }
 
     pub fn dependencies(&self) -> &[TopicId] {
@@ -155,6 +169,16 @@ impl Topic {
 
     pub fn import(&mut self, env: &Env) {
         self.template.extend(env)
+    }
+
+    /// Get a reference to the topic's dir.
+    pub fn dir(&self) -> &PathBuf {
+        &self.dir
+    }
+
+    /// Get a reference to the topic's name.
+    pub fn name(&self) -> &str {
+        self.name.as_str()
     }
 }
 
@@ -252,10 +276,8 @@ mod deploy {
 
     impl Topic {
         pub(super) fn deploy(self, dry_run: bool) -> Result<Env> {
-            let dir = self.id.dir();
-
             if !dry_run {
-                run_hook(dir, &self.pre_hook)
+                run_hook(&self.dir, &self.pre_hook)
                     .transpose()
                     .context("Failed to run pre-hook")?;
             }
@@ -269,7 +291,7 @@ mod deploy {
                 .context("Failed to deploy templates")?;
 
             if !dry_run {
-                run_hook(dir, &self.post_hook)
+                run_hook(&self.dir, &self.post_hook)
                     .transpose()
                     .context("Failed to run post-hook")?;
             }
@@ -280,6 +302,8 @@ mod deploy {
 }
 
 pub use env::{Env, TemplateContext};
+
+use self::registry::{Registry, TopicId};
 mod env {
     use crate::glob::GlobBuilder;
 
@@ -410,9 +434,13 @@ mod env {
     }
 }
 
-pub fn find_topics<'a, I>(root: &Path, globs: I) -> Result<impl Iterator<Item = Result<TopicId>>>
+pub fn find_topics<'a, 'b, I>(
+    registry: &'a mut Registry,
+    root: &Path,
+    globs: I,
+) -> Result<impl Iterator<Item = Result<TopicId>> + 'a>
 where
-    I: IntoIterator<Item = &'a str>,
+    I: IntoIterator<Item = &'b str>,
 {
     let mut builder = GlobBuilder::new(root.to_owned());
     for s in globs {
@@ -427,10 +455,12 @@ where
     let iter = builder
         .build()
         .context("Failed to construct GlobWalker")?
-        .filter_map(|r| match r {
+        .filter_map(move |r| match r {
             Ok(entry) => {
-                let topic = TopicId::new(entry.path()).context("Failed to construct TopicId");
-                Some(topic)
+                let id = TopicDesc::new(entry.path())
+                    .context("Failed to construct TopicId")
+                    .map(|desc| registry.register(desc));
+                Some(id)
             }
             // The walker may return errors if it tries to search folders that are inaccesible due to
             // filesystem permissions, which we can safely log and ignore.
