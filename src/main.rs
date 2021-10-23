@@ -25,17 +25,6 @@ fn main() {
 }
 
 fn run() -> Result<()> {
-    // println!("Hee");
-    // let mut glob = crate::glob::GlobBuilder::new(Path::new("/home/jakub/ladybug"));
-    // glob.add("*/ladybug.toml", true)?;
-    // glob.add("**", false)?;
-    // let glob = glob.build()?;
-    // dbg!(&glob);
-    // for file in glob.walk() {
-    //     println!("file: {:?}", file?);
-    // }
-    // return Ok(());
-
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
     check_dirs()?;
