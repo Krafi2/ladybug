@@ -34,7 +34,7 @@ mod storage {
 
     /// Describes a node that is known to be initialized
     #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
-    pub struct NodeId(Handle<Option<Node>>);
+    pub struct NodeId(Handle<Node>);
 
     impl Into<TopicId> for NodeId {
         fn into(self) -> TopicId {
@@ -44,7 +44,7 @@ mod storage {
 
     #[derive(Debug, Default)]
     pub(super) struct Storage {
-        inner: registry::Storage<Option<Node>>,
+        inner: registry::Storage<Node>,
     }
 
     impl Storage {
@@ -52,29 +52,23 @@ mod storage {
         where
             F: FnOnce() -> Node,
         {
-            let handle = self.inner.get_handle(id, |_| None);
-            match &mut self.inner[handle] {
-                Some(_) => (),
-                None => {
-                    self.inner[handle] = Some(func());
-                }
-            }
+            let handle = self.inner.get_handle(id, func);
             NodeId(handle)
         }
 
         pub fn get(&self, id: NodeId) -> &Node {
-            self.inner[id.0].as_ref().expect("Node is absent")
+            &self.inner[id.0]
         }
 
         pub fn get_mut(&mut self, id: NodeId) -> &mut Node {
-            self.inner[id.0].as_mut().expect("Node is absent")
+            &mut self.inner[id.0]
         }
 
         pub fn replace<F>(&mut self, id: NodeId, func: F)
         where
             F: FnOnce(Node) -> Node,
         {
-            let node = &mut self.inner[id.0];
+            let node = self.inner.get_raw_mut(id.0);
             let old = std::mem::replace(node, None);
             std::mem::replace(node, Some(func(old.expect("Node is absent"))));
         }

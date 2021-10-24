@@ -87,22 +87,35 @@ impl<T> Into<TopicId> for Handle<T> {
     }
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct Storage<T> {
-    vec: Vec<T>,
+    vec: Vec<Option<T>>,
 }
 
 impl<T> Storage<T> {
     pub fn get_handle<F>(&mut self, id: TopicId, func: F) -> Handle<T>
     where
-        F: FnMut(TopicId) -> T,
+        F: FnOnce() -> T,
     {
         let idx = id.0;
         let len = self.vec.len();
-        let to_fill = (idx + 1).saturating_sub(len);
-        self.vec
-            .extend((len..=idx).take(to_fill).map(TopicId::new).map(func));
+        if idx >= len {
+            let to_fill = idx - len + 1;
+            self.vec
+                .extend(std::iter::repeat_with(|| None).take(to_fill))
+        }
+        match &mut self.vec[idx] {
+            Some(_) => (),
+            t @ None => *t = Some(func()),
+        }
         Handle::new(id)
+    }
+
+    pub fn get_raw(&self, handle: Handle<T>) -> &Option<T> {
+        &self.vec[handle.0 .0]
+    }
+    pub fn get_raw_mut(&mut self, handle: Handle<T>) -> &mut Option<T> {
+        &mut self.vec[handle.0 .0]
     }
 }
 
@@ -110,12 +123,22 @@ impl<T> Index<Handle<T>> for Storage<T> {
     type Output = T;
 
     fn index(&self, index: Handle<T>) -> &Self::Output {
-        &self.vec[index.0 .0]
+        self.get_raw(index).as_ref().expect("Handle not available")
     }
 }
 
 impl<T> IndexMut<Handle<T>> for Storage<T> {
     fn index_mut(&mut self, index: Handle<T>) -> &mut Self::Output {
-        &mut self.vec[index.0 .0]
+        self.get_raw_mut(index)
+            .as_mut()
+            .expect("Handle not available")
+    }
+}
+
+impl<T> Default for Storage<T> {
+    fn default() -> Self {
+        Self {
+            vec: Vec::default(),
+        }
     }
 }
