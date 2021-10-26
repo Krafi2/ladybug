@@ -36,8 +36,6 @@ mod resolver {
     use super::{Interface, Node};
     use crate::topic::registry::{Handle, Storage, TopicId};
 
-    // type Node<T: Interface> = super::Node<T::Open, T::Closed, T::OpenError, T::CloseError>;
-
     #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
     pub struct NodeId(TopicId);
 
@@ -141,7 +139,7 @@ pub fn resolve<T: Interface>(
 
     // We use a depth first search algorithm to make sure all dependencies are satisfied before
     // deploying a node. Any errors are propagated up towards the root node.
-    loop {
+    while !stack.is_empty() {
         let head = stack.last().unwrap().clone();
         match &resolver[head.node] {
             // If the node is open, try to go deeper or deploy it
@@ -209,7 +207,7 @@ pub fn resolve<T: Interface>(
                 let raw = resolver.get_raw_mut(head);
                 let mut dep = std::mem::replace(raw, None).expect("Invalid handle");
 
-                let finish = match stack.last() {
+                match stack.last() {
                     // Notify the interface that the node's dependency is satisfied                    Some(Frame { node, .. }) => match &mut storage[node] {
                     Some(Frame { node, .. }) => match &mut resolver[*node] {
                         Node::Open(open) => {
@@ -218,20 +216,15 @@ pub fn resolve<T: Interface>(
                                 _ => unreachable!("Node should be closed"),
                             };
                             interface.satisfy(open, dep);
-                            false
                         }
                         _ => unreachable!("Node should be open"),
                     },
                     // We are finished
-                    None => true,
+                    None => (),
                 };
 
                 // We have to put everything back together
                 resolver.get_handle(head.into(), || dep);
-
-                if finish {
-                    break Ok(head);
-                }
             }
             // There is an error so we need to mark the parent as having an unsatisfied
             // dependency
@@ -243,7 +236,7 @@ pub fn resolve<T: Interface>(
                         resolver[*node] = Node::Err(NodeErr::Unsatisfied(head))
                     }
                     // The error is on the root, nothing to do
-                    None => break Err(head),
+                    None => (),
                 };
             }
         }
