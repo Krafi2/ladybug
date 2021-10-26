@@ -1,6 +1,4 @@
 pub mod deploy;
-pub mod deployer;
-pub mod factory;
 pub mod registry;
 
 pub use deploy::{Env, TemplateContext};
@@ -9,21 +7,15 @@ use crate::{
     config::{paths, Config},
     glob::GlobBuilder,
 };
-use anyhow::{anyhow, Context, Error, Result};
-use figment::{
-    providers::{Format, Toml},
-    Figment,
-};
-use globwalk::GlobWalker;
+use anyhow::{anyhow, Context, Result};
+use figment::providers::{Format, Toml};
 use serde::{Deserialize, Serialize};
 use std::{
-    borrow::Cow,
     collections::HashMap,
-    fs,
     path::{Path, PathBuf},
 };
 
-use self::registry::{Registry, TopicId};
+use self::registry::{Registry, Storage, TopicId};
 type Dict = toml::map::Map<String, toml::Value>;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -93,7 +85,6 @@ impl TopicDesc {
 #[derive(Debug)]
 pub struct Topic {
     id: TopicId,
-    name: String,
     dir: PathBuf,
     target: PathBuf,
     dependencies: Vec<TopicId>,
@@ -113,8 +104,8 @@ pub enum Duplicates {
 
 impl Topic {
     fn new(
-        registry: &mut Registry,
-        desc: TopicDesc,
+        registry: &mut DescRegistry,
+        desc: &TopicDesc,
         config: TopicConfig,
         global: &Config,
     ) -> Result<Self> {
@@ -128,21 +119,19 @@ impl Topic {
         .context("Failed to collect dependencies")?;
 
         let dir = desc.dir().to_owned();
-        let name = desc.name().to_string();
-        let id = registry.register(desc);
+        let id = registry.new_id(&desc);
 
-        let mut templates = GlobBuilder::new(dir.clone())
+        let templates = GlobBuilder::new(dir.clone())
             .extend(&config.template, true)
             .extend(&config.ignore, false);
 
-        let mut links = GlobBuilder::new(dir.clone())
+        let links = GlobBuilder::new(dir.clone())
             .extend(&config.template, false)
             .extend(&config.ignore, false);
 
         Ok(Topic {
             links,
             id,
-            name,
             dir,
             target: config.target,
             dependencies,
@@ -153,8 +142,11 @@ impl Topic {
         })
     }
 
-    pub fn from_desc(registry: &mut Registry, config: &Config, desc: TopicDesc) -> Result<Self> {
-        let dir = desc.dir();
+    pub fn from_desc(
+        registry: &mut DescRegistry,
+        config: &Config,
+        desc: &TopicDesc,
+    ) -> Result<Self> {
         let t_config = config
             .topic_config
             .clone()
@@ -162,6 +154,10 @@ impl Topic {
             .extract()
             .context("Failed to load config")?;
         Self::new(registry, desc, t_config, config)
+    }
+
+    pub fn import(&mut self, env: &Env) {
+        self.template.extend(env)
     }
 
     pub fn dependencies(&self) -> &[TopicId] {
@@ -172,23 +168,44 @@ impl Topic {
         &self.id
     }
 
-    pub fn import(&mut self, env: &Env) {
-        self.template.extend(env)
-    }
-
     /// Get a reference to the topic's dir.
     pub fn dir(&self) -> &PathBuf {
         &self.dir
     }
+}
 
-    /// Get a reference to the topic's name.
-    pub fn name(&self) -> &str {
-        self.name.as_str()
+#[derive(Default)]
+pub struct DescRegistry {
+    registry: Registry,
+    storage: Storage<TopicDesc>,
+    map: HashMap<TopicDesc, TopicId>,
+}
+
+impl DescRegistry {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn new_id(&mut self, desc: &TopicDesc) -> TopicId {
+        match self.map.get(desc) {
+            Some(id) => *id,
+            None => {
+                let id = self.registry.new_id();
+                self.map.insert(desc.clone(), id);
+                let _ = self.storage.get_handle(id, || desc.clone());
+                id
+            }
+        }
+    }
+
+    pub fn get_desc(&self, id: TopicId) -> &TopicDesc {
+        let handle = self.storage.try_get_handle(id).expect("Invalid TopicId");
+        &self.storage[handle]
     }
 }
 
 pub fn find_topics<'a, 'b, I>(
-    registry: &'a mut Registry,
+    registry: &'a mut DescRegistry,
     root: &Path,
     globs: I,
 ) -> Result<impl Iterator<Item = Result<TopicId>> + 'a>
@@ -212,7 +229,7 @@ where
             Ok(entry) => {
                 let id = TopicDesc::new(entry.path())
                     .context("Failed to construct TopicId")
-                    .map(|desc| registry.register(desc));
+                    .map(|desc| registry.new_id(&desc));
                 Some(id)
             }
             // The walker may return errors if it tries to search folders that are inaccesible due to

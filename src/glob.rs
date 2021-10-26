@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Context, Error, Result};
+use anyhow::{Context, Result};
 use globwalk::{GlobWalker, GlobWalkerBuilder};
 use std::{
     borrow::Cow,
@@ -51,7 +51,7 @@ impl GlobBuilder {
         &self.base
     }
 
-    pub fn build(mut self) -> Result<GlobWalker> {
+    pub fn build(self) -> Result<GlobWalker> {
         GlobWalkerBuilder::from_patterns(&self.base, &self.patterns)
             .build()
             .context("Failed to build GlobWalker")

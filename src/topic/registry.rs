@@ -1,10 +1,7 @@
-use super::TopicDesc;
 use std::{
-    collections::HashMap,
     hash::Hash,
     marker::PhantomData,
     ops::{Index, IndexMut},
-    path::PathBuf,
 };
 
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
@@ -18,36 +15,18 @@ impl TopicId {
 
 #[derive(Clone, Debug, Default)]
 pub struct Registry {
-    map: HashMap<TopicDesc, TopicId>,
-    storage: Vec<TopicDesc>,
+    next_id: usize,
 }
 
 impl Registry {
     pub fn new() -> Self {
         Self::default()
     }
-    pub fn register(&mut self, desc: TopicDesc) -> TopicId {
-        match self.map.get(&desc) {
-            Some(id) => *id,
-            None => {
-                let idx = self.storage.len();
-                let id = TopicId(idx);
-                self.storage.push(desc.clone());
-                self.map.insert(desc, id);
-                id
-            }
-        }
-    }
-    pub fn get_desc(&self, id: TopicId) -> &TopicDesc {
-        &self.storage[id.0]
-    }
-}
 
-impl Index<TopicId> for Registry {
-    type Output = TopicDesc;
-
-    fn index(&self, index: TopicId) -> &Self::Output {
-        self.get_desc(index)
+    pub fn new_id(&mut self) -> TopicId {
+        let id = self.next_id;
+        self.next_id += 1;
+        TopicId::new(id)
     }
 }
 
@@ -93,6 +72,10 @@ pub struct Storage<T> {
 }
 
 impl<T> Storage<T> {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
     pub fn get_handle<F>(&mut self, id: TopicId, func: F) -> Handle<T>
     where
         F: FnOnce() -> T,
@@ -111,11 +94,29 @@ impl<T> Storage<T> {
         Handle::new(id)
     }
 
+    pub fn try_get_handle(&self, id: TopicId) -> Option<Handle<T>> {
+        self.vec
+            .get(id.0)
+            .map(<&Option<T> as Into<Option<&T>>>::into)
+            .flatten()
+            .map(|_| Handle::new(id))
+    }
+
     pub fn get_raw(&self, handle: Handle<T>) -> &Option<T> {
         &self.vec[handle.0 .0]
     }
+
     pub fn get_raw_mut(&mut self, handle: Handle<T>) -> &mut Option<T> {
         &mut self.vec[handle.0 .0]
+    }
+
+    pub fn replace<F>(&mut self, handle: Handle<T>, f: F)
+    where
+        F: FnOnce(T) -> T,
+    {
+        let raw = self.get_raw_mut(handle);
+        let old = std::mem::replace(raw, None).expect("Invalid handle");
+        *raw = Some(f(old));
     }
 }
 

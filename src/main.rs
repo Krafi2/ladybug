@@ -1,5 +1,3 @@
-#![allow(unused)]
-
 mod commands;
 mod config;
 mod fs;
@@ -7,11 +5,8 @@ mod glob;
 mod resolver;
 mod topic;
 
-use std::path::Path;
-
-use anyhow::{anyhow, Context, Result};
-
 use crate::config::Config;
+use anyhow::{anyhow, Context, Result};
 
 fn main() {
     match run() {

@@ -3,7 +3,6 @@ use crate::glob::GlobBuilder;
 use anyhow::{anyhow, Context, Result};
 use std::{
     collections::HashMap,
-    io::stderr,
     path::{Path, PathBuf},
     process::{Command, ExitStatus, Stdio},
 };
@@ -92,7 +91,7 @@ fn run_hook(dir: &Path, cmd: &[String]) -> Option<Result<ExitStatus>> {
 }
 
 impl Topic {
-    pub(super) fn deploy(self, dry_run: bool) -> Result<Env> {
+    pub fn deploy(self, dry_run: bool) -> Result<Env> {
         if !dry_run {
             run_hook(&self.dir, &self.pre_hook)
                 .transpose()
@@ -150,7 +149,6 @@ impl TemplateContext {
             context.insert(key, &value);
         }
 
-        let mut id = 0_usize;
         // Map templates to their target paths. I would love to do this more efficiently but
         // tera allows you to refer to templatess only via strings.
         let mut path_map = HashMap::<String, PathBuf>::new();
@@ -188,7 +186,7 @@ impl TemplateContext {
             });
 
         let mut tera = Tera::default();
-        tera.add_template_files(templates);
+        tera.add_template_files(templates)?;
 
         for (name, target) in path_map {
             let render = tera
@@ -224,10 +222,4 @@ impl TemplateContext {
 #[derive(Debug, Clone)]
 pub struct Env {
     context: tera::Context,
-}
-
-impl Env {
-    pub(super) fn new(context: tera::Context) -> Self {
-        Self { context }
-    }
 }

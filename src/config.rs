@@ -1,15 +1,11 @@
-use crate::topic::{self, TopicConfig};
-use anyhow::{anyhow, Context, Result};
-use directories_next::{ProjectDirs, UserDirs};
+use crate::topic::TopicConfig;
+use anyhow::{Context, Result};
 use figment::{
     providers::{Format, Serialized, Toml},
     Figment,
 };
 use serde::{Deserialize, Serialize};
-use std::{
-    fs,
-    path::{Path, PathBuf},
-};
+use std::path::{Path, PathBuf};
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(deny_unknown_fields)]
@@ -28,12 +24,8 @@ pub struct Config {
 /// implements these functions, in this case [`Dict]. This approach is a bit hacky and inneficient,
 /// however it is much more concise than the alternatives so I will keep it for now.
 mod serde_figment {
-    use figment::{
-        providers::Serialized,
-        value::{Dict, Value},
-        Figment,
-    };
-    use serde::{de, ser, Deserialize, Deserializer, Serialize, Serializer};
+    use figment::{providers::Serialized, value::Dict, Figment};
+    use serde::{ser, Deserialize, Deserializer, Serialize, Serializer};
 
     pub fn serialize<S>(figment: &Figment, serializer: S) -> Result<S::Ok, S::Error>
     where
@@ -85,9 +77,8 @@ impl Config {
 }
 
 pub mod paths {
-    use anyhow::{anyhow, Context, Result};
     use directories_next::{ProjectDirs, UserDirs};
-    use std::path::{Path, PathBuf};
+    use std::path::PathBuf;
 
     pub fn project_dirs() -> ProjectDirs {
         ProjectDirs::from("com", "Ladybug", "ladybug").expect("This system isn't supported.")

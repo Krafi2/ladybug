@@ -1,7 +1,6 @@
 use anyhow::{anyhow, Context, Result};
 use std::{
-    borrow::Cow,
-    fs::{self, File, OpenOptions},
+    fs::{self, OpenOptions},
     io::{ErrorKind, Read, Write},
     path::{Path, PathBuf},
 };
@@ -121,10 +120,6 @@ where
         }
     }
 }
-
-// pub fn symlink_file<P: AsRef<Path>, Q: AsRef<Path>>(original: P, link: Q) -> std::io::Result<()> {
-//     imp::symlink_file(original, link)
-// }
 
 #[cfg(any(target_os = "redox", unix))]
 mod imp {
