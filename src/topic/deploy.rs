@@ -93,7 +93,7 @@ fn run_hook(dir: &Path, cmd: &[String]) -> Option<Result<ExitStatus>> {
 impl Topic {
     pub fn deploy(self, dry_run: bool) -> Result<Env> {
         if !dry_run {
-            run_hook(&self.dir, &self.pre_hook)
+            run_hook(&self.target, &self.pre_hook)
                 .transpose()
                 .context("Failed to run pre-hook")?;
         }
@@ -107,7 +107,7 @@ impl Topic {
             .context("Failed to deploy templates")?;
 
         if !dry_run {
-            run_hook(&self.dir, &self.post_hook)
+            run_hook(&self.target, &self.post_hook)
                 .transpose()
                 .context("Failed to run post-hook")?;
         }
