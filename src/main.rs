@@ -8,22 +8,31 @@ mod topic;
 use crate::config::Config;
 use anyhow::{anyhow, Context, Result};
 
+pub enum CmdStatus {
+    Ok,
+    Err,
+}
+
 fn main() {
     match run() {
-        Ok(_) => (),
+        Ok(CmdStatus::Ok) => (),
+        Ok(CmdStatus::Err) => std::process::exit(1),
         Err(e) => {
-            eprintln!("{:?}", e);
+            log::error!("{:?}", e);
             std::process::exit(1);
         }
     }
 }
 
-fn run() -> Result<()> {
+fn run() -> Result<CmdStatus> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
     check_dirs()?;
     let config = Config::new().context("Failed to load config")?;
-    commands::run(&config).context("Failed to run command")
+    match commands::run(&config) {
+        Ok(_) => Ok(CmdStatus::Ok),
+        Err(_) => Ok(CmdStatus::Err),
+    }
 }
 
 fn check_dirs() -> Result<()> {

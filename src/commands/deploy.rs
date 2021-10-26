@@ -1,5 +1,4 @@
-use std::path::Path;
-
+use crate::CmdStatus;
 use crate::{
     config::Config,
     resolver::{self, Resolver},
@@ -7,6 +6,7 @@ use crate::{
 };
 use anyhow::{Context, Result};
 use clap::Clap;
+use std::path::Path;
 
 #[derive(Clap)]
 pub(super) struct Deploy {
@@ -47,9 +47,7 @@ impl<'a> resolver::Interface for InterfaceImpl<'a> {
 }
 
 impl Deploy {
-    /// Try to deploy the provided topics, otherwise look for them in the dotfile directory. If a
-    /// topic fails to deploy, still try the next ones.
-    pub(super) fn run(self, config: &Config) -> Result<()> {
+    fn run_(self, config: &Config) -> Result<CmdStatus> {
         let mut registry = DescRegistry::new();
 
         // We store the name by which the topic was requested, and its TopicId, if it could be created
@@ -85,8 +83,22 @@ impl Deploy {
 
         // TODO: figure out how commands should report status
         match err_len {
-            0 => Ok(()),
-            _ => Err(anyhow::Error::msg("")),
+            0 => Ok(CmdStatus::Ok),
+            _ => Ok(CmdStatus::Err),
+        }
+    }
+
+    /// Try to deploy the provided topics, otherwise look for them in the dotfile directory. If a
+    /// topic fails to deploy, still try the next ones.
+    pub(super) fn run(self, config: &Config) -> std::result::Result<(), ()> {
+        match self.run_(config) {
+            Ok(CmdStatus::Ok) => Ok(()),
+            Ok(CmdStatus::Err) => Err(()),
+            Err(err) => {
+                let err = err.context("Failed to deploy topics");
+                log::error!("{:?}", err);
+                Err(())
+            }
         }
     }
 }

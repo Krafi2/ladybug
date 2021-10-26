@@ -1,4 +1,3 @@
-use anyhow::Result;
 use clap::Clap;
 
 #[derive(Clap)]
@@ -10,7 +9,7 @@ pub(super) struct Add {
 }
 
 impl Add {
-    pub(super) fn run(self) -> Result<()> {
+    pub(super) fn run(self) -> Result<(), ()> {
         todo!()
     }
 }
