@@ -248,4 +248,177 @@ pub fn resolve<T: Interface>(
             }
         }
     }
+
+    match &resolver[root] {
+        Node::Closed(_) => Ok(root),
+        Node::Err(_) => Err(root),
+        Node::Open(_) => panic!("Node must be closed"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Interface;
+    use crate::{
+        resolver::{resolve, Resolver},
+        topic::registry::{Registry, Storage, TopicId},
+    };
+    use std::collections::HashSet;
+    use Behaviour::*;
+
+    #[derive(Hash, PartialEq, Eq, Clone, Copy)]
+    struct Closed(TopicId);
+
+    #[derive(Clone, Copy)]
+    enum Behaviour {
+        FailOpen,
+        FailClose,
+        Pass,
+    }
+
+    struct Node {
+        deps: Vec<TopicId>,
+        unsatisfied: HashSet<Closed>,
+        behaviour: Behaviour,
+        id: TopicId,
+    }
+
+    impl Node {
+        fn new(deps: Vec<TopicId>, behaviour: Behaviour, id: TopicId) -> Self {
+            Self {
+                unsatisfied: deps.iter().map(|id| Closed(*id)).collect(),
+                deps,
+                behaviour,
+                id,
+            }
+        }
+    }
+
+    struct TestInterface(Storage<Option<Node>>, TopicId);
+
+    impl TestInterface {
+        fn new(nodes: Vec<(Behaviour, Vec<usize>)>) -> Self {
+            let mut registry = Registry::new();
+            let ids = nodes.iter().map(|_| registry.new_id()).collect::<Vec<_>>();
+            let mut storage = Storage::new();
+
+            for (i, (behaviour, deps)) in nodes.into_iter().enumerate() {
+                let deps = deps.into_iter().map(|idx| ids[idx]).collect::<Vec<_>>();
+                let id = ids[i];
+                let node = Node::new(deps, behaviour, id);
+                storage.get_handle(id, || Some(node));
+            }
+
+            Self(storage, ids[0])
+        }
+
+        fn root(&self) -> TopicId {
+            self.1
+        }
+    }
+
+    impl Interface for TestInterface {
+        type Open = Node;
+        type Closed = Closed;
+        type OpenError = ();
+        type CloseError = ();
+
+        fn open(&mut self, id: TopicId) -> Result<Self::Open, Self::OpenError> {
+            let handle = self.0.try_get_handle(id).expect("Unknown TopicId");
+            let node = self.0[handle]
+                .take()
+                .expect("Resolver tried to open a node twice");
+
+            match node.behaviour {
+                Behaviour::FailOpen => Err(()),
+                _ => Ok(node),
+            }
+        }
+
+        fn close(&mut self, open: Self::Open) -> Result<Self::Closed, Self::CloseError> {
+            match open.unsatisfied.is_empty() {
+                true => match open.behaviour {
+                    Behaviour::FailClose => Err(()),
+                    _ => Ok(Closed(open.id)),
+                },
+                false => panic!("Resolver failed to satisfy all dependencies"),
+            }
+        }
+
+        fn dependencies<'a>(&'a mut self, open: &'a Self::Open) -> &'a [TopicId] {
+            &open.deps
+        }
+
+        fn satisfy(&mut self, open: &mut Self::Open, dep: &mut Self::Closed) {
+            if !open.unsatisfied.remove(dep) {
+                panic!("Resolver tried to satisfy a dependency twice")
+            }
+        }
+    }
+
+    #[test]
+    fn simple_cycle() {
+        let nodes = vec![(Pass, vec![0])];
+        let mut interface = TestInterface::new(nodes);
+        let mut resolver = Resolver::new();
+        let root = interface.root();
+        resolve(&mut resolver, &mut interface, root).unwrap_err();
+    }
+
+    #[test]
+    fn complex_cycle() {
+        let nodes = vec![
+            (Pass, vec![1, 3, 2]),
+            (Pass, vec![2]),
+            (Pass, vec![3]),
+            (Pass, vec![4, 1]),
+            (Pass, vec![]),
+        ];
+        let mut interface = TestInterface::new(nodes);
+        let mut resolver = Resolver::new();
+        let root = interface.root();
+        resolve(&mut resolver, &mut interface, root).unwrap_err();
+    }
+
+    #[test]
+    fn simple_dep_error() {
+        let nodes = vec![(Pass, vec![1]), (FailClose, vec![])];
+        let mut interface = TestInterface::new(nodes);
+        let mut resolver = Resolver::new();
+        let root = interface.root();
+        resolve(&mut resolver, &mut interface, root).unwrap_err();
+    }
+
+    #[test]
+    fn complex_dep_error() {
+        let nodes = vec![
+            (Pass, vec![3, 2]),
+            (FailClose, vec![]),
+            (Pass, vec![4, 3]),
+            (Pass, vec![1]),
+            (Pass, vec![3]),
+        ];
+        let mut interface = TestInterface::new(nodes);
+        let mut resolver = Resolver::new();
+        let root = interface.root();
+        resolve(&mut resolver, &mut interface, root).unwrap_err();
+    }
+
+    #[test]
+    fn correct() {
+        let nodes = vec![
+            (Pass, vec![3, 2, 4]),
+            (Pass, vec![5, 6, 7]),
+            (Pass, vec![4, 3]),
+            (Pass, vec![1]),
+            (Pass, vec![3]),
+            (Pass, vec![6]),
+            (Pass, vec![]),
+            (Pass, vec![]),
+        ];
+        let mut interface = TestInterface::new(nodes);
+        let mut resolver = Resolver::new();
+        let root = interface.root();
+        resolve(&mut resolver, &mut interface, root).unwrap();
+    }
 }
