@@ -77,7 +77,7 @@ impl Config {
 }
 
 pub mod paths {
-    use directories_next::{ProjectDirs, UserDirs};
+    use directories_next::{BaseDirs, ProjectDirs, UserDirs};
     use std::path::PathBuf;
 
     pub fn project_dirs() -> ProjectDirs {
@@ -92,6 +92,14 @@ pub mod paths {
         UserDirs::new().expect("This system isn't supported.")
     }
 
+    pub fn base_dirs() -> BaseDirs {
+        BaseDirs::new().expect("This system isn't supported")
+    }
+
+    pub fn user_config() -> PathBuf {
+        base_dirs().config_dir().to_owned()
+    }
+
     pub fn home_dir() -> PathBuf {
         user_dirs().home_dir().to_owned()
     }
@@ -99,6 +107,7 @@ pub mod paths {
     pub fn config_path() -> PathBuf {
         config_dir().join("ladybug.toml")
     }
+
     pub fn dotfile_dir() -> PathBuf {
         home_dir().join("ladybug")
     }

@@ -44,7 +44,7 @@ pub struct TopicConfig {
 impl Default for TopicConfig {
     fn default() -> Self {
         Self {
-            target: paths::config_dir(),
+            target: paths::user_config(),
             dependencies: Vec::new(),
             pre_hook: Vec::new(),
             post_hook: Vec::new(),
