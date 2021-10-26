@@ -1,12 +1,60 @@
 use super::{Dict, Duplicates, Topic};
 use crate::glob::GlobBuilder;
 use anyhow::{anyhow, Context, Result};
+use globwalk::GlobWalker;
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
     process::{Command, ExitStatus, Stdio},
 };
 use tera::Tera;
+
+#[derive(Debug, Clone)]
+pub struct Env {
+    context: tera::Context,
+}
+
+impl Topic {
+    pub fn deploy(self, dry_run: bool) -> Result<Env> {
+        if !dry_run {
+            run_hook(&self.target, &self.pre_hook)
+                .transpose()
+                .context("Failed to run pre-hook")?;
+        }
+
+        deploy_links(self.links, &self.target, self.duplicates, dry_run)
+            .context("Failed to deploy symlinks")?;
+
+        let env = self
+            .template
+            .render(&self.target, self.duplicates, dry_run)
+            .context("Failed to deploy templates")?;
+
+        if !dry_run {
+            run_hook(&self.target, &self.post_hook)
+                .transpose()
+                .context("Failed to run post-hook")?;
+        }
+
+        Ok(env)
+    }
+}
+
+fn walk_files(walker: GlobWalker) -> impl Iterator<Item = PathBuf> {
+    walker.filter_map(|entry| match entry {
+        Ok(entry) => {
+            let path = entry.path();
+            match path.is_file() {
+                true => Some(path.to_owned()),
+                false => None,
+            }
+        }
+        Err(err) => {
+            log::warn!("Walker error: {}", err);
+            None
+        }
+    })
+}
 
 fn deploy_links(
     globs: GlobBuilder,
@@ -15,37 +63,23 @@ fn deploy_links(
     dry_run: bool,
 ) -> Result<()> {
     let cur_dir = globs.base().to_owned();
-    for entry in globs.build().context("Failed to build GlobWalker")? {
-        match entry {
-            Ok(entry) => {
-                let path = entry.path();
-                match path.is_file() {
-                    true => {
-                        let target = crate::fs::rebase_path(path, &cur_dir, target)
-                            .expect("Failed to rebase path");
+    let walker = globs.build().context("Failed to build GlobWalker")?;
 
-                        if !dry_run {
-                            crate::fs::place_symlink(path, &target, duplicates).with_context(
-                                || {
-                                    format!(
-                                        "Failed to symlink dotfile: '{}' -> '{}'",
-                                        path.display(),
-                                        target.display()
-                                    )
-                                },
-                            )?;
-                        }
-                    }
-                    false => {
-                        todo!("Implement logging");
-                    }
-                }
-            }
-            Err(_) => {
-                todo!("Implement logging!");
-            }
-        };
+    for path in walk_files(walker) {
+        let target =
+            crate::fs::rebase_path(&path, &cur_dir, target).expect("Failed to rebase path");
+
+        if !dry_run {
+            crate::fs::place_symlink(&path, &target, duplicates).with_context(|| {
+                format!(
+                    "Failed to symlink dotfile: '{}' -> '{}'",
+                    path.display(),
+                    target.display()
+                )
+            })?;
+        }
     }
+
     Ok(())
 }
 
@@ -90,32 +124,6 @@ fn run_hook(dir: &Path, cmd: &[String]) -> Option<Result<ExitStatus>> {
     run_cmd(dir, cmd, stdin, stdout, stderr)
 }
 
-impl Topic {
-    pub fn deploy(self, dry_run: bool) -> Result<Env> {
-        if !dry_run {
-            run_hook(&self.target, &self.pre_hook)
-                .transpose()
-                .context("Failed to run pre-hook")?;
-        }
-
-        deploy_links(self.links, &self.target, self.duplicates, dry_run)
-            .context("Failed to deploy symlinks")?;
-
-        let env = self
-            .template
-            .render(&self.target, self.duplicates, dry_run)
-            .context("Failed to deploy templates")?;
-
-        if !dry_run {
-            run_hook(&self.target, &self.post_hook)
-                .transpose()
-                .context("Failed to run post-hook")?;
-        }
-
-        Ok(env)
-    }
-}
-
 #[derive(Debug)]
 pub struct TemplateContext {
     context: tera::Context,
@@ -150,40 +158,27 @@ impl TemplateContext {
         }
 
         // Map templates to their target paths. I would love to do this more efficiently but
-        // tera allows you to refer to templatess only via strings.
+        // tera only allows you to refer to templatess via strings.
         let mut path_map = HashMap::<String, PathBuf>::new();
-
-        let cur_dir = self.templates.base().to_owned();
-        let templates = self
+        let dir = self.templates.base().to_owned();
+        let walker = self
             .templates
             .build()
-            .context("Failed to construct GlobWalker")?
-            .filter_map(|entry| match entry {
-                Ok(entry) => {
-                    let path = entry.path();
-                    match path.is_file() {
-                        true => {
-                            let target = crate::fs::rebase_path(path, &cur_dir, target)
-                                .expect("Failed to rebase path");
-                            let name = path
-                                .strip_prefix(&cur_dir)
-                                .expect("Failed to strip prefix")
-                                .display()
-                                .to_string();
-                            path_map.insert(name.clone(), target);
-                            Some((path.to_owned(), Some(name)))
-                        }
-                        false => {
-                            todo!("Implement logging");
-                            None
-                        }
-                    }
-                }
-                Err(_) => {
-                    todo!("Implement logging!");
-                    None
-                }
-            });
+            .context("Failed to construct GlobWalker")?;
+
+        let templates = walk_files(walker).map(|path| {
+            let target =
+                crate::fs::rebase_path(&path, &dir, target).expect("Failed to rebase path");
+            let name = path
+                .strip_prefix(&dir)
+                .expect("Failed to strip prefix")
+                .display()
+                .to_string();
+
+            path_map.insert(name.clone(), target);
+
+            (path, Some(name))
+        });
 
         let mut tera = Tera::default();
         tera.add_template_files(templates)?;
@@ -198,7 +193,7 @@ impl TemplateContext {
                     || {
                         format!(
                             "Failed to write template '{}' to '{}'",
-                            cur_dir.join(name).display(),
+                            dir.join(name).display(),
                             target.display()
                         )
                     },
@@ -217,9 +212,4 @@ impl TemplateContext {
 
         Ok(Env { context: env })
     }
-}
-
-#[derive(Debug, Clone)]
-pub struct Env {
-    context: tera::Context,
 }

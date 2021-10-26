@@ -1,4 +1,4 @@
-pub mod deploy;
+mod deploy;
 pub mod registry;
 
 pub use deploy::{Env, TemplateContext};
