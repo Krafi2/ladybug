@@ -1,7 +1,7 @@
 mod deploy;
 pub mod registry;
-
 pub use deploy::{Env, TemplateContext};
+use globwalk::GlobWalker;
 
 use crate::{
     config::{paths, Config},
@@ -12,6 +12,7 @@ use figment::providers::{Format, Toml};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
+    fmt::Display,
     path::{Path, PathBuf},
 };
 
@@ -58,7 +59,10 @@ impl Default for TopicConfig {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct TopicDesc(PathBuf);
+pub struct TopicDesc(
+    /// Path to the topic configuration file
+    PathBuf,
+);
 
 impl TopicDesc {
     pub fn new(path: &Path) -> Result<Self> {
@@ -71,13 +75,18 @@ impl TopicDesc {
             ))
         }
     }
-    pub fn path(&self) -> &Path {
+    /// Path to the topic's configuration file
+    pub fn config(&self) -> &Path {
         self.0.as_path()
     }
+
+    /// Path to the topic's directory
     pub fn dir(&self) -> &Path {
         self.0.parent().expect("Topic path has no parent")
     }
-    pub fn name(&self) -> std::path::Display {
+
+    /// Get the topic's name
+    pub fn name<'a>(&'a self) -> impl Display + 'a {
         self.dir().display()
     }
 }
@@ -112,6 +121,7 @@ impl Topic {
         let dependencies = find_topics(
             registry,
             &global.dotfile_dir,
+            desc.dir(),
             config.dependencies.iter().map(AsRef::as_ref),
         )
         .context("Failed to construct dependency iterator")?
@@ -150,7 +160,7 @@ impl Topic {
         let t_config = config
             .topic_config
             .clone()
-            .merge(Toml::file(desc.path()))
+            .merge(Toml::file(desc.config()))
             .extract()
             .context("Failed to load config")?;
         Self::new(registry, desc, t_config, config)
@@ -204,40 +214,68 @@ impl DescRegistry {
     }
 }
 
+struct TopicIter<'a> {
+    registry: &'a mut DescRegistry,
+    topic: GlobWalker,
+    root: GlobWalker,
+}
+
+impl<'a> Iterator for TopicIter<'a> {
+    type Item = Result<TopicId>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            match self.root.next().or_else(|| self.topic.next()) {
+                Some(Ok(entry)) => {
+                    let id = TopicDesc::new(entry.path())
+                        .context("Failed to construct TopicId")
+                        .map(|desc| self.registry.new_id(&desc));
+                    return Some(id);
+                }
+                // The walker may return errors if it tries to search folders that are inaccesible
+                // due to filesystem permissions, which we can safely log and ignore.
+                Some(Err(err)) => {
+                    log::info!("Walker encountered an error: {}", err);
+                }
+                None => return None,
+            }
+        }
+    }
+}
+
 pub fn find_topics<'a, 'b, I>(
     registry: &'a mut DescRegistry,
     root: &Path,
+    topic: &Path,
     globs: I,
 ) -> Result<impl Iterator<Item = Result<TopicId>> + 'a>
 where
     I: IntoIterator<Item = &'b str>,
 {
-    let mut builder = GlobBuilder::new(root.to_owned());
+    let mut root_glob = GlobBuilder::new(root.to_owned());
+    let mut topic_glob = GlobBuilder::new(topic.to_owned());
+
     for s in globs {
         let mut s = s.to_owned();
         if !s.ends_with("/") {
             s.push('/');
         }
         s.push_str("ladybug.toml");
-        builder = builder.add(s, true);
+
+        // Consider globs starting with '/' as relative to dotfile root
+        if s.starts_with('/') {
+            root_glob = root_glob.add(s, true);
+        } else {
+            topic_glob = topic_glob.add(s, true);
+        }
     }
 
-    let iter = builder
-        .build()
-        .context("Failed to construct GlobWalker")?
-        .filter_map(move |r| match r {
-            Ok(entry) => {
-                let id = TopicDesc::new(entry.path())
-                    .context("Failed to construct TopicId")
-                    .map(|desc| registry.new_id(&desc));
-                Some(id)
-            }
-            // The walker may return errors if it tries to search folders that are inaccesible due to
-            // filesystem permissions, which we can safely log and ignore.
-            Err(err) => {
-                log::info!("Walker encountered an error: {}", err);
-                None
-            }
-        });
-    Ok(iter)
+    let root = root_glob.build().context("Failed to construct root glob")?;
+    let topic = topic_glob.build().context("Failed to build topic glob")?;
+
+    Ok(TopicIter {
+        registry,
+        topic,
+        root,
+    })
 }

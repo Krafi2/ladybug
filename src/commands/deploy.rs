@@ -81,7 +81,6 @@ impl Deploy {
         let err_len = errors.len();
         logging::log_errors(errors, &registry, &resolver);
 
-        // TODO: figure out how commands should report status
         match err_len {
             0 => Ok(CmdStatus::Ok),
             _ => Ok(CmdStatus::Err),
@@ -108,7 +107,7 @@ fn get_all_topics<'a>(
     root: &Path,
 ) -> Result<impl Iterator<Item = TopicId> + 'a> {
     // Look for topics in all top-level directories
-    crate::topic::find_topics(registry, root, ["*/"]).map(|iter| {
+    crate::topic::find_topics(registry, root, root, ["*"]).map(|iter| {
         iter.map(move |topic| match topic {
             Ok(topic) => topic,
             // Any errors here are bugs so we crash
