@@ -2,6 +2,7 @@ mod commands;
 mod config;
 mod fs;
 mod glob;
+mod print;
 mod resolver;
 mod topic;
 
