@@ -1,4 +1,5 @@
 use crate::topic::registry::TopicId;
+use std::fmt::{Debug, Display};
 
 pub trait Interface {
     type Open;
@@ -12,6 +13,7 @@ pub trait Interface {
     fn satisfy(&mut self, open: &mut Self::Open, dep: &mut Self::Closed);
 }
 
+#[derive(Debug)]
 pub enum NodeErr<O, C> {
     /// A dependency couldn't be satisfied
     Unsatisfied(NodeId),
@@ -23,10 +25,31 @@ pub enum NodeErr<O, C> {
     CloseError(C),
 }
 
+impl<O: Debug, C: Debug> Display for NodeErr<O, C> {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        match self {
+            NodeErr::Unsatisfied(dep) => write!(f, "Couldn't satisfy dependency: {:?}", dep),
+            NodeErr::Cycle(dep) => write!(f, "Cycle detected: {:?}", dep),
+            NodeErr::OpenError(err) => write!(f, "Failed to open node: {:?}", err),
+            NodeErr::CloseError(err) => write!(f, "Failed to close node: {:?}", err),
+        }
+    }
+}
+impl<O: Debug, C: Debug> std::error::Error for NodeErr<O, C> {}
+
 pub enum Node<O, C, OE, CE> {
     Open(O),
     Closed(C),
     Err(NodeErr<OE, CE>),
+}
+
+impl<O, C, OE, CE> Node<O, C, OE, CE> {
+    pub fn unwrap_err(&self) -> &NodeErr<OE, CE> {
+        match self {
+            Node::Err(e) => e,
+            _ => panic!("Expected an error node"),
+        }
+    }
 }
 
 pub use resolver::{NodeId, Resolver};

@@ -1,3 +1,4 @@
+use crate::print::Formatter;
 use crate::CmdStatus;
 use crate::{
     config::Config,
@@ -6,6 +7,7 @@ use crate::{
 };
 use anyhow::{Context, Result};
 use clap::Clap;
+use std::fmt::Write;
 use std::path::Path;
 
 #[derive(Clap)]
@@ -49,8 +51,9 @@ impl<'a> resolver::Interface for InterfaceImpl<'a> {
 impl Deploy {
     fn run_(self, config: &Config) -> Result<CmdStatus> {
         let mut registry = DescRegistry::new();
+        let mut fmt = Formatter::new(&["", "\t", "\t\t"]);
 
-        // We store the name by which the topic was requested, and its TopicId, if it could be created
+        // We store the name by which the topic was requested and its TopicId, if it could be created
         let topics =
             get_topic_ids(&mut registry, config, self.topics).context("Failed to fetch topics")?;
 
@@ -66,12 +69,29 @@ impl Deploy {
             topics
                 .into_iter()
                 .filter_map(|(name, id)| {
+                    log::info!("Deploying {}", name);
+                    write!(fmt, "[Deploying {}]", name).unwrap();
                     let id = match id {
                         Ok(id) => match resolver::resolve(&mut resolver, &mut interface, id) {
-                            Ok(_) => None,
-                            Err(id) => Some(Ok(id)),
+                            Ok(_) => {
+                                log::debug!("Successfully deployed {}", name);
+                                writeln!(fmt, "\rSuccessfully deployed {}", name).unwrap();
+                                None
+                            }
+                            Err(id) => {
+                                log::error!(
+                                    "Failed to deploy {}: {:?}",
+                                    name,
+                                    resolver[id].unwrap_err()
+                                );
+                                writeln!(fmt, "\rFailed to deploy {}", name).unwrap();
+                                Some(Ok(id))
+                            }
                         },
-                        Err(err) => Some(Err(err)),
+                        Err(err) => {
+                            log::error!("Failed to resolve topic {}", name);
+                            Some(Err(err))
+                        }
                     };
                     id.map(|id| (name, id))
                 })
@@ -79,7 +99,7 @@ impl Deploy {
         };
 
         let err_len = errors.len();
-        logging::log_errors(errors, &registry, &resolver);
+        logging::log_errors(errors, &registry, &resolver, fmt);
 
         match err_len {
             0 => Ok(CmdStatus::Ok),
@@ -151,45 +171,45 @@ fn get_topic_ids(
 
 mod logging {
     use crate::{
+        print::Formatter,
         resolver::{Node, NodeErr, NodeId},
-        topic::{DescRegistry, Env, Topic},
+        topic::{registry::TopicId, DescRegistry, Env, Topic},
     };
     use anyhow::Result;
     use std::fmt::Write;
 
     type Resolver = crate::resolver::Resolver<Topic, Env, anyhow::Error, anyhow::Error>;
 
-    pub fn log_errors<I>(errors: I, registry: &DescRegistry, resolver: &Resolver)
-    where
+    pub fn log_errors<I>(
+        errors: I,
+        registry: &DescRegistry,
+        resolver: &Resolver,
+        mut fmt: Formatter,
+    ) where
         I: IntoIterator<Item = (String, Result<NodeId>)>,
     {
         for (name, id) in errors {
-            let mut buffer = String::new();
-            writeln!(&mut buffer, "\nFailed to deploy topic '{}':", name).unwrap();
+            writeln!(fmt, "Failed to deploy topic '{}':", name).unwrap();
 
+            let mut fmt = fmt.descend().unwrap();
             match id {
-                Ok(id) => match &resolver[id] {
-                    Node::Err(err) => match err {
-                        NodeErr::Unsatisfied(_) => {
-                            handle_unsatisfied(&mut buffer, registry, resolver, id)
-                        }
-                        NodeErr::Cycle(_) => handle_cycle(&mut buffer, registry, resolver, id),
-                        NodeErr::OpenError(e) | NodeErr::CloseError(e) => {
-                            handle_anyhow(&mut buffer, e)
-                        }
-                    },
-                    _ => panic!("Not an error node"),
+                Ok(id) => match &resolver[id].unwrap_err() {
+                    NodeErr::Unsatisfied(_) => handle_unsatisfied(fmt, registry, resolver, id),
+                    NodeErr::Cycle(_) => handle_cycle(fmt, registry, resolver, id),
+                    NodeErr::OpenError(err) | NodeErr::CloseError(err) => {
+                        handle_anyhow(fmt, &err, registry, id.into())
+                    }
                 },
-                Err(err) => handle_anyhow(&mut buffer, &err),
+                Err(err) => {
+                    writeln!(fmt, "Couldn't resolve topic '{}'", name).unwrap();
+                    anyhow_raw(fmt.descend().unwrap(), &err);
+                }
             }
-
-            writeln!(&mut buffer, "").unwrap();
-            log::error!("{}", buffer);
         }
     }
 
     fn handle_unsatisfied(
-        buffer: &mut String,
+        mut fmt: Formatter,
         registry: &DescRegistry,
         resolver: &Resolver,
         mut id: NodeId,
@@ -197,53 +217,67 @@ mod logging {
         loop {
             match &resolver[id] {
                 Node::Err(err) => match err {
-                    NodeErr::Unsatisfied(next) => {
-                        let name = registry.get_desc(id.into()).name();
-                        writeln!(buffer, "Couldn't satisfy dependency '{}'", name).unwrap();
-                        id = *next;
+                    &NodeErr::Unsatisfied(next) => {
+                        let name = registry.get_desc(next.into()).name();
+                        writeln!(fmt, "Couldn't satisfy dependency '{}'", name).unwrap();
+                        id = next;
                     }
-                    NodeErr::Cycle(id) => {
-                        handle_cycle(buffer, registry, resolver, *id);
+                    &NodeErr::Cycle(id) => {
+                        handle_cycle(fmt, registry, resolver, id);
                         break;
                     }
-                    NodeErr::OpenError(e) | NodeErr::CloseError(e) => handle_anyhow(buffer, e),
+                    NodeErr::OpenError(e) | NodeErr::CloseError(e) => {
+                        handle_anyhow(fmt, e, registry, id.into());
+                        break;
+                    }
                 },
                 _ => panic!("Expected error"),
             }
         }
     }
 
-    fn handle_cycle(buffer: &mut String, registry: &DescRegistry, resolver: &Resolver, id: NodeId) {
+    fn handle_cycle(mut fmt: Formatter, registry: &DescRegistry, resolver: &Resolver, id: NodeId) {
         fn write_entry<'a>(
-            buffer: &mut String,
+            fmt: &mut Formatter,
             registry: &DescRegistry,
             resolver: &Resolver,
             id: NodeId,
             prefix: &str,
         ) -> NodeId {
             let name = registry.get_desc(id.into()).name();
-            writeln!(buffer, "{}{}", prefix, name).unwrap();
+            writeln!(fmt, "{}{}", prefix, name).unwrap();
             match &resolver[id] {
                 Node::Err(NodeErr::Cycle(id)) => *id,
                 _ => panic!("Expected a cycle error"),
             }
         }
 
-        writeln!(buffer, "\tDependency cycle detected:").unwrap();
-        let mut next = write_entry(buffer, registry, resolver, id, "\t┌-> ");
+        writeln!(fmt, "Dependency cycle detected:").unwrap();
+        let mut next = write_entry(&mut fmt, registry, resolver, id, "┌-> ");
         loop {
             if id == next {
-                write_entry(buffer, registry, resolver, id, "\t└─  ");
+                write_entry(&mut fmt, registry, resolver, id, "└─  ");
                 break;
             } else {
-                next = write_entry(buffer, registry, resolver, id, "\t│   ");
+                next = write_entry(&mut fmt, registry, resolver, id, "│   ");
             }
         }
     }
 
-    fn handle_anyhow(buffer: &mut String, err: &anyhow::Error) {
+    fn anyhow_raw(mut fmt: Formatter, err: &anyhow::Error) {
         for err in err.chain() {
-            writeln!(buffer, "\t{}", err).unwrap();
+            writeln!(fmt, "{}", err).unwrap();
         }
+    }
+
+    fn handle_anyhow(
+        mut fmt: Formatter,
+        err: &anyhow::Error,
+        registry: &DescRegistry,
+        id: TopicId,
+    ) {
+        let name = registry.get_desc(id).name();
+        writeln!(fmt, "Failed to deploy {}", name).unwrap();
+        anyhow_raw(fmt.descend().unwrap(), err)
     }
 }

@@ -1,3 +1,4 @@
+use crate::topic::Duplicates;
 use anyhow::{anyhow, Context, Result};
 use std::{
     fs::{self, OpenOptions},
@@ -5,15 +6,15 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use crate::topic::Duplicates;
-
 pub fn rebase_path(path: &Path, current: &Path, target: &Path) -> Result<PathBuf> {
     Ok(target.join(path.strip_prefix(current)?))
 }
 
 /// Check if two paths point to the same file, resolving symlinks if neccessary.
-fn path_eq(path1: &Path, path2: &Path) -> Result<bool> {
-    Ok(PathBuf::eq(&path1.canonicalize()?, &path2.canonicalize()?))
+fn file_eq(path1: &Path, path2: &Path) -> Result<bool> {
+    let path1 = path1.canonicalize()?;
+    let path2 = path2.canonicalize()?;
+    Ok(path1 == path2)
 }
 
 /// Try to remove the file at `path` according to the `[Duplicates]` strategy. This could be by
@@ -24,7 +25,10 @@ fn free_file(path: &Path, duplicates: Duplicates) -> Result<()> {
         Duplicates::Delete => fs::remove_file(path).context("Failed to remove file"),
         Duplicates::Keep => Err(anyhow!("File already present")),
         Duplicates::Rename => {
-            let new = path.join(".old");
+            let mut name = path.file_name().expect("Expected a file").to_owned();
+            name.push(".old");
+            let new = path.join(name);
+
             fs::rename(path, &new).with_context(|| {
                 format!(
                     "Failed to rename file: '{}' -> '{}'",
@@ -39,18 +43,27 @@ fn free_file(path: &Path, duplicates: Duplicates) -> Result<()> {
 /// Creates a new symlink at `link`, pointing to `original`. If there is a file at `link`, try to free
 /// it according to the provided `[Duplicates]` strategy.
 pub fn place_symlink(original: &Path, link: &Path, duplicates: Duplicates) -> Result<()> {
-    if original.exists() && !path_eq(original, link)? {
-        free_file(original, duplicates)
-            .with_context(|| format!("Failed to free file: '{}'", link.display()))?;
-    }
+    // Create a symlink only if it isn't already present
+    if !file_eq(original, link).unwrap_or(false) {
+        // Try to free the file if it exists
+        if link.exists() {
+            free_file(link, duplicates)
+                .with_context(|| format!("Failed to free file: '{}'", link.display()))?;
+        // The parent directories may not exist
+        } else {
+            let dir = link.parent().expect("Path too short");
+            std::fs::create_dir_all(dir).context("Failed to create parent directories")?;
+        }
 
-    imp::symlink_file(original, link).with_context(|| {
-        format!(
-            "Failed to create symlink: '{}' -> '{}'",
-            link.display(),
-            original.display(),
-        )
-    })
+        imp::symlink_file(original, link).with_context(|| {
+            format!(
+                "Failed to create symlink: '{}' -> '{}'",
+                link.display(),
+                original.display(),
+            )
+        })?;
+    }
+    Ok(())
 }
 
 pub fn place_file(path: &Path, contents: &[u8], duplicates: Duplicates) -> Result<()> {

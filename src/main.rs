@@ -26,7 +26,7 @@ fn main() {
 }
 
 fn run() -> Result<CmdStatus> {
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn")).init();
 
     check_dirs()?;
     let config = Config::new().context("Failed to load config")?;

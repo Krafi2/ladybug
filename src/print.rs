@@ -2,11 +2,11 @@ use anyhow::{anyhow, Result};
 use std::io::Write;
 
 pub struct Formatter<'a> {
-    prefixes: &'a [String],
+    prefixes: &'a [&'static str],
 }
 
 impl<'a> Formatter<'a> {
-    pub fn new(prefixes: &'a [String]) -> Self {
+    pub fn new(prefixes: &'a [&'static str]) -> Self {
         Self { prefixes }
     }
 
@@ -16,7 +16,7 @@ impl<'a> Formatter<'a> {
             Ok(Self::new(&self.prefixes[1..]))
         // We're out of levels
         } else {
-            Err(anyhow!("Formatter cannot descend any farther"))
+            Err(anyhow!("Formatter cannot descend any further"))
         }
     }
 }

@@ -1,14 +1,15 @@
 mod deploy;
 pub mod registry;
 pub use deploy::{Env, TemplateContext};
-use globwalk::GlobWalker;
 
+use self::registry::{Registry, Storage, TopicId};
 use crate::{
     config::{paths, Config},
     glob::GlobBuilder,
 };
 use anyhow::{anyhow, Context, Result};
 use figment::providers::{Format, Toml};
+use globwalk::GlobWalker;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
@@ -16,7 +17,6 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use self::registry::{Registry, Storage, TopicId};
 type Dict = toml::map::Map<String, toml::Value>;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -135,15 +135,28 @@ impl Topic {
             .extend(&config.template, true)
             .extend(&config.ignore, false);
 
+        // Link all files that are not ignored or templates
         let links = GlobBuilder::new(dir.clone())
+            .extend(["**"], true)
             .extend(&config.template, false)
-            .extend(&config.ignore, false);
+            .extend(&config.ignore, false)
+            .extend(["ladybug.toml"], false);
+
+        // Replace `~` with the user's home path
+        let target = config.target;
+        let target = match target.strip_prefix("~") {
+            Ok(path) => {
+                let base = crate::config::paths::home_dir();
+                base.join(path)
+            }
+            Err(_) => target,
+        };
 
         Ok(Topic {
             links,
             id,
             dir,
-            target: config.target,
+            target,
             dependencies,
             template: TemplateContext::new(templates, config.env, config.export),
             duplicates: config.duplicates,

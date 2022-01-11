@@ -17,6 +17,7 @@ pub struct Env {
 impl Topic {
     pub fn deploy(self, dry_run: bool) -> Result<Env> {
         if !dry_run {
+            log::info!("Running pre-hook");
             run_hook(&self.target, &self.pre_hook)
                 .transpose()
                 .context("Failed to run pre-hook")?;
@@ -31,6 +32,7 @@ impl Topic {
             .context("Failed to deploy templates")?;
 
         if !dry_run {
+            log::info!("Running post-hook");
             run_hook(&self.target, &self.post_hook)
                 .transpose()
                 .context("Failed to run post-hook")?;
@@ -44,10 +46,7 @@ fn walk_files(walker: GlobWalker) -> impl Iterator<Item = PathBuf> {
     walker.filter_map(|entry| match entry {
         Ok(entry) => {
             let path = entry.path();
-            match path.is_file() {
-                true => Some(path.to_owned()),
-                false => None,
-            }
+            path.is_file().then(|| path.to_owned())
         }
         Err(err) => {
             log::warn!("Walker error: {}", err);
@@ -62,6 +61,7 @@ fn deploy_links(
     duplicates: Duplicates,
     dry_run: bool,
 ) -> Result<()> {
+    log::info!("Linking files");
     let cur_dir = globs.base().to_owned();
     let walker = globs.build().context("Failed to build GlobWalker")?;
 
@@ -69,12 +69,17 @@ fn deploy_links(
         let target =
             crate::fs::rebase_path(&path, &cur_dir, target).expect("Failed to rebase path");
 
+        log::debug!(
+            "Creating link '{}' -> '{}'",
+            path.display(),
+            target.display(),
+        );
         if !dry_run {
             crate::fs::place_symlink(&path, &target, duplicates).with_context(|| {
                 format!(
-                    "Failed to symlink dotfile: '{}' -> '{}'",
+                    "Failed to create symlink: '{}' -> '{}'",
                     path.display(),
-                    target.display()
+                    target.display(),
                 )
             })?;
         }
@@ -152,6 +157,8 @@ impl TemplateContext {
         duplicates: Duplicates,
         dry_run: bool,
     ) -> Result<Env> {
+        log::info!("Rendering templates");
+
         let mut context = self.context;
         for (key, value) in self.env {
             context.insert(key, &value);
@@ -169,6 +176,11 @@ impl TemplateContext {
         let templates = walk_files(walker).map(|path| {
             let target =
                 crate::fs::rebase_path(&path, &dir, target).expect("Failed to rebase path");
+            log::debug!(
+                "Rendering template '{}' to '{}'",
+                path.display(),
+                target.display()
+            );
             let name = path
                 .strip_prefix(&dir)
                 .expect("Failed to strip prefix")
