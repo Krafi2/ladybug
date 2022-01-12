@@ -1,6 +1,7 @@
 use anyhow::{anyhow, Result};
 use std::io::Write;
 
+#[derive(Debug, Clone)]
 pub struct Formatter<'a> {
     prefixes: &'a [&'static str],
 }

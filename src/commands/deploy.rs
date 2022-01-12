@@ -51,7 +51,7 @@ impl<'a> resolver::Interface for InterfaceImpl<'a> {
 impl Deploy {
     fn run_(self, config: &Config) -> Result<CmdStatus> {
         let mut registry = DescRegistry::new();
-        let mut fmt = Formatter::new(&["", "\t", "\t\t"]);
+        let mut fmt = Formatter::new(&["", "\t", "\t\t", "\t\t\t"]);
 
         // We store the name by which the topic was requested and its TopicId, if it could be created
         let topics =
@@ -98,12 +98,13 @@ impl Deploy {
                 .collect::<Vec<_>>()
         };
 
-        let err_len = errors.len();
-        logging::log_errors(errors, &registry, &resolver, fmt);
-
-        match err_len {
+        match errors.len() {
             0 => Ok(CmdStatus::Ok),
-            _ => Ok(CmdStatus::Err),
+            _ => {
+                writeln!(fmt, "").unwrap();
+                logging::log_errors(errors, &registry, &resolver, fmt);
+                Ok(CmdStatus::Err)
+            }
         }
     }
 
@@ -180,14 +181,13 @@ mod logging {
 
     type Resolver = crate::resolver::Resolver<Topic, Env, anyhow::Error, anyhow::Error>;
 
-    pub fn log_errors<I>(
-        errors: I,
-        registry: &DescRegistry,
-        resolver: &Resolver,
-        mut fmt: Formatter,
-    ) where
+    pub fn log_errors<I>(errors: I, registry: &DescRegistry, resolver: &Resolver, fmt: Formatter)
+    where
         I: IntoIterator<Item = (String, Result<NodeId>)>,
     {
+        let mut fmt = fmt.descend().unwrap();
+        writeln!(fmt, "Encountered errors:").unwrap();
+
         for (name, id) in errors {
             writeln!(fmt, "Failed to deploy topic '{}':", name).unwrap();
 
@@ -196,9 +196,7 @@ mod logging {
                 Ok(id) => match &resolver[id].unwrap_err() {
                     NodeErr::Unsatisfied(_) => handle_unsatisfied(fmt, registry, resolver, id),
                     NodeErr::Cycle(_) => handle_cycle(fmt, registry, resolver, id),
-                    NodeErr::OpenError(err) | NodeErr::CloseError(err) => {
-                        handle_anyhow(fmt, &err, registry, id.into())
-                    }
+                    NodeErr::OpenError(err) | NodeErr::CloseError(err) => anyhow_raw(fmt, &err),
                 },
                 Err(err) => {
                     writeln!(fmt, "Couldn't resolve topic '{}'", name).unwrap();
