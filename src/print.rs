@@ -25,10 +25,13 @@ impl<'a> std::fmt::Write for Formatter<'a> {
     fn write_str(&mut self, s: &str) -> std::fmt::Result {
         let handle = std::io::stdout();
         let mut handle = handle.lock();
-        let prefix = &self.prefixes[0];
-        handle
-            .write_all(prefix.as_bytes())
-            .map_err(|_| std::fmt::Error)?;
+
+        let prefix = self.prefixes[0];
+        // TODO: Fnd a way to improve the prefix writing
+        let mut prepend = "\n".to_owned();
+        prepend.push_str(prefix);
+        let s = s.replace('\n', &prepend);
+
         handle.write_all(s.as_bytes()).map_err(|_| std::fmt::Error)
     }
 }
