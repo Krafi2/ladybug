@@ -28,12 +28,14 @@ pub struct TopicConfig {
     dependencies: Vec<String>,
     #[serde(rename = "type")]
     kind: Kind,
+    /// A list of globs for files to template using tera
+    template: Vec<String>,
+    /// Globs for files to be linked to the target directory
+    link: Vec<String>,
     /// A command to run before deploying
     pre_hook: Vec<String>,
     /// A command to run after deploying
     post_hook: Vec<String>,
-    /// A list of globs for files to template using tera
-    template: Vec<String>,
     /// What to do if a file already exists
     duplicates: Duplicates,
     /// These values are injected into the tera enviroment
@@ -48,9 +50,10 @@ impl Default for TopicConfig {
             target: paths::user_config(),
             dependencies: Vec::new(),
             kind: Kind::Deep,
+            template: Vec::new(),
+            link: vec!["**".to_owned()],
             pre_hook: Vec::new(),
             post_hook: Vec::new(),
-            template: Vec::new(),
             duplicates: Duplicates::Rename,
             env: Dict::default(),
             export: Vec::new(),
@@ -144,7 +147,7 @@ impl Topic {
 
         // Link all files that are not templates
         let mut links = GlobBuilder::new(dir.clone())
-            .extend(["**"], true)
+            .extend(&config.link, true)
             .extend(&config.template, false)
             .extend(["ladybug.toml"], false);
 
