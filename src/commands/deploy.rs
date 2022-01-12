@@ -128,15 +128,17 @@ fn get_all_topics<'a>(
     root: &Path,
 ) -> Result<impl Iterator<Item = TopicId> + 'a> {
     // Look for topics in all top-level directories
-    crate::topic::find_topics(registry, root, root, ["*"]).map(|iter| {
-        iter.map(move |topic| match topic {
-            Ok(topic) => topic,
-            // Any errors here are bugs so we crash
-            Err(err) => {
-                panic!("Failed to construct topic: {:?}", err);
-            }
-        })
-    })
+    crate::topic::find_topics(registry, root, root, crate::topic::Kind::Shallow, ["*"]).map(
+        |iter| {
+            iter.map(move |topic| match topic {
+                Ok(topic) => topic,
+                // Any errors here are bugs so we crash
+                Err(err) => {
+                    panic!("Failed to construct topic: {:?}", err);
+                }
+            })
+        },
+    )
 }
 
 fn get_topic_ids(

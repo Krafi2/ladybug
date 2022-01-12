@@ -26,6 +26,8 @@ pub struct TopicConfig {
     target: PathBuf,
     /// Topics to deploy before this one
     dependencies: Vec<String>,
+    #[serde(rename = "type")]
+    kind: Kind,
     /// A command to run before deploying
     pre_hook: Vec<String>,
     /// A command to run after deploying
@@ -45,6 +47,7 @@ impl Default for TopicConfig {
         Self {
             target: paths::user_config(),
             dependencies: Vec::new(),
+            kind: Kind::Deep,
             pre_hook: Vec::new(),
             post_hook: Vec::new(),
             template: Vec::new(),
@@ -53,6 +56,21 @@ impl Default for TopicConfig {
             export: Vec::new(),
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum Kind {
+    Shallow,
+    Deep,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy)]
+#[serde(rename_all = "lowercase")]
+pub enum Duplicates {
+    Delete,
+    Keep,
+    Rename,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -101,13 +119,6 @@ pub struct Topic {
     post_hook: Vec<String>,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone, Copy)]
-pub enum Duplicates {
-    Delete,
-    Keep,
-    Rename,
-}
-
 impl Topic {
     fn new(
         registry: &mut DescRegistry,
@@ -119,6 +130,7 @@ impl Topic {
             registry,
             &global.dotfile_dir,
             desc.dir(),
+            config.kind,
             config.dependencies.iter().map(AsRef::as_ref),
         )
         .context("Failed to construct dependency iterator")?
@@ -254,6 +266,7 @@ pub fn find_topics<'a, 'b, I>(
     registry: &'a mut DescRegistry,
     root: &Path,
     topic: &Path,
+    kind: Kind,
     globs: I,
 ) -> Result<impl Iterator<Item = Result<TopicId>> + 'a>
 where
@@ -262,18 +275,21 @@ where
     let mut root_glob = GlobBuilder::new(root.to_owned());
     let mut topic_glob = GlobBuilder::new(topic.to_owned());
 
-    for s in globs {
-        let mut s = s.to_owned();
+    for glob in globs {
+        let mut s = glob.to_owned();
         if !s.ends_with("/") {
             s.push('/');
         }
         s.push_str("ladybug.toml");
 
         // Consider globs starting with '/' as relative to dotfile root
-        if s.starts_with('/') {
-            root_glob = root_glob.add(s, true);
-        } else {
-            topic_glob = topic_glob.add(s, true);
+        match (s.starts_with('/'), kind) {
+            (true, _) => root_glob = root_glob.add(s, true),
+            (false, Kind::Shallow) => topic_glob = topic_glob.add(s, true),
+            (false, Kind::Deep) => {
+                return Err(anyhow!("'{}' is a relative topic path", glob))
+                    .context("Deep topics cannot contain sub-topics")
+            }
         }
     }
 

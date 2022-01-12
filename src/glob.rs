@@ -5,10 +5,11 @@ use std::{
     path::{Path, PathBuf},
 };
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct GlobBuilder {
     base: PathBuf,
     patterns: Vec<String>,
+    max_depth: Option<usize>,
 }
 
 impl GlobBuilder {
@@ -16,6 +17,7 @@ impl GlobBuilder {
         Self {
             base,
             patterns: Vec::new(),
+            max_depth: None,
         }
     }
 
@@ -51,8 +53,20 @@ impl GlobBuilder {
         &self.base
     }
 
+    pub fn max_depth(mut self, depth: usize) -> Self {
+        self.max_depth.replace(depth);
+        self
+    }
+
     pub fn build(self) -> Result<GlobWalker> {
-        GlobWalkerBuilder::from_patterns(&self.base, &self.patterns)
+        let mut builder = GlobWalkerBuilder::from_patterns(&self.base, &self.patterns);
+
+        if let Some(depth) = self.max_depth {
+            builder = builder.max_depth(depth);
+        }
+
+        builder
+            .min_depth(1)
             .build()
             .context("Failed to build GlobWalker")
     }

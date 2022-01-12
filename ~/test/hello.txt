@@ -1,1 +1,0 @@
-/home/goose/ladybug/test/hello.txt
