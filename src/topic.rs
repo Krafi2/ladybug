@@ -30,8 +30,6 @@ pub struct TopicConfig {
     pre_hook: Vec<String>,
     /// A command to run after deploying
     post_hook: Vec<String>,
-    /// A list of globs to ignore files
-    ignore: Vec<String>,
     /// A list of globs for files to template using tera
     template: Vec<String>,
     /// What to do if a file already exists
@@ -49,7 +47,6 @@ impl Default for TopicConfig {
             dependencies: Vec::new(),
             pre_hook: Vec::new(),
             post_hook: Vec::new(),
-            ignore: Vec::new(),
             template: Vec::new(),
             duplicates: Duplicates::Rename,
             env: Dict::default(),
@@ -131,15 +128,12 @@ impl Topic {
         let dir = desc.dir().to_owned();
         let id = registry.new_id(&desc);
 
-        let templates = GlobBuilder::new(dir.clone())
-            .extend(&config.template, true)
-            .extend(&config.ignore, false);
+        let templates = GlobBuilder::new(dir.clone()).extend(&config.template, true);
 
         // Link all files that are not ignored or templates
         let links = GlobBuilder::new(dir.clone())
             .extend(["**"], true)
             .extend(&config.template, false)
-            .extend(&config.ignore, false)
             .extend(["ladybug.toml"], false);
 
         // Replace `~` with the user's home path
