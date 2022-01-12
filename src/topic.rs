@@ -142,11 +142,16 @@ impl Topic {
 
         let templates = GlobBuilder::new(dir.clone()).extend(&config.template, true);
 
-        // Link all files that are not ignored or templates
-        let links = GlobBuilder::new(dir.clone())
+        // Link all files that are not templates
+        let mut links = GlobBuilder::new(dir.clone())
             .extend(["**"], true)
             .extend(&config.template, false)
             .extend(["ladybug.toml"], false);
+
+        // Search only the top level in shallow topics
+        if config.kind == Kind::Shallow {
+            links = links.max_depth(1);
+        }
 
         // Replace `~` with the user's home path
         let target = config.target;
