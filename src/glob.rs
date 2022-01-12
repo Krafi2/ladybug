@@ -25,16 +25,20 @@ impl GlobBuilder {
     where
         S: Into<Cow<'a, str>>,
     {
-        let glob = glob.into();
-        let pattern = match whitelist {
-            true => glob.into_owned(),
-            false => {
-                let mut pattern = String::from("!");
-                pattern.push_str(&glob);
-                pattern
+        let glob: Cow<_> = glob.into();
+
+        let glob = if whitelist {
+            glob
+        } else
+        // Invert pattern
+        {
+            match glob.strip_prefix('!') {
+                Some(s) => Cow::Borrowed(s),
+                None => Cow::Owned("!".to_owned() + glob.as_ref()),
             }
         };
-        self.patterns.push(pattern);
+
+        self.patterns.push(glob.into_owned());
         self
     }
 
