@@ -138,7 +138,10 @@ pub struct TemplateContext {
 }
 
 impl TemplateContext {
-    pub(super) fn new(templates: GlobBuilder, env: Dict, export: Vec<String>) -> Self {
+    pub(super) fn new(templates: GlobBuilder, env: crate::topic::EnvConfig) -> Self {
+        let export = env.public.keys().cloned().collect();
+        let env = env.private.into_iter().chain(env.public).collect();
+
         Self {
             context: tera::Context::new(),
             env,

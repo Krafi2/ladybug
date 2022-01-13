@@ -16,8 +16,22 @@ pub struct Config {
     // contain all of them so we can't rely on being able to deserialize it into a one. It is also
     // quite handy as we don't need to construct a figment when it comes to it.
     /// Default topic config
+    pub topic: TopicOverride,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(deny_unknown_fields)]
+pub struct TopicOverride {
     #[serde(with = "serde_figment")]
-    pub topic_config: Figment,
+    pub default: Figment,
+}
+
+impl Default for TopicOverride {
+    fn default() -> Self {
+        Self {
+            default: Figment::from(Serialized::defaults(TopicConfig::default())),
+        }
+    }
 }
 
 /// We implent serialize and deserialize for [`Figment`] by converting it to a struct that alreaddy
@@ -52,7 +66,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             dotfile_dir: paths::dotfile_dir(),
-            topic_config: Figment::from(Serialized::defaults(TopicConfig::default())),
+            topic: TopicOverride::default(),
         }
     }
 }

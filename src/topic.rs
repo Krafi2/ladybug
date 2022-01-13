@@ -25,7 +25,7 @@ pub struct TopicConfig {
     /// The directory into which to deploy files
     target: PathBuf,
     /// Topics to deploy before this one
-    dependencies: Vec<String>,
+    deps: Vec<String>,
     #[serde(rename = "type")]
     kind: Kind,
     /// A list of globs for files to template using tera
@@ -39,24 +39,28 @@ pub struct TopicConfig {
     /// What to do if a file already exists
     duplicates: Duplicates,
     /// These values are injected into the tera enviroment
-    env: Dict,
-    /// The values are exported from the enviroment for other topics to use
-    export: Vec<String>,
+    env: EnvConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct EnvConfig {
+    private: Dict,
+    public: Dict,
 }
 
 impl Default for TopicConfig {
     fn default() -> Self {
         Self {
             target: paths::user_config(),
-            dependencies: Vec::new(),
+            deps: Vec::new(),
             kind: Kind::Deep,
             template: Vec::new(),
             link: vec!["**".to_owned()],
             pre_hook: Vec::new(),
             post_hook: Vec::new(),
             duplicates: Duplicates::Rename,
-            env: Dict::default(),
-            export: Vec::new(),
+            env: EnvConfig::default(),
         }
     }
 }
@@ -114,7 +118,7 @@ pub struct Topic {
     id: TopicId,
     dir: PathBuf,
     target: PathBuf,
-    dependencies: Vec<TopicId>,
+    deps: Vec<TopicId>,
     links: GlobBuilder,
     template: TemplateContext,
     duplicates: Duplicates,
@@ -129,12 +133,12 @@ impl Topic {
         config: TopicConfig,
         global: &Config,
     ) -> Result<Self> {
-        let dependencies = find_topics(
+        let deps = find_topics(
             registry,
             &global.dotfile_dir,
             desc.dir(),
             config.kind,
-            config.dependencies.iter().map(AsRef::as_ref),
+            config.deps.iter().map(AsRef::as_ref),
         )
         .context("Failed to construct dependency iterator")?
         .collect::<Result<Vec<_>>>()
@@ -171,8 +175,8 @@ impl Topic {
             id,
             dir,
             target,
-            dependencies,
-            template: TemplateContext::new(templates, config.env, config.export),
+            deps,
+            template: TemplateContext::new(templates, config.env),
             duplicates: config.duplicates,
             pre_hook: config.pre_hook,
             post_hook: config.post_hook,
@@ -185,7 +189,8 @@ impl Topic {
         desc: &TopicDesc,
     ) -> Result<Self> {
         let t_config = config
-            .topic_config
+            .topic
+            .default
             .clone()
             .merge(Toml::file(desc.config()))
             .extract()
@@ -193,12 +198,12 @@ impl Topic {
         Self::new(registry, desc, t_config, config)
     }
 
-    pub fn import(&mut self, env: &Env) {
+    pub fn import(&mut self, env: &deploy::Env) {
         self.template.extend(env)
     }
 
     pub fn dependencies(&self) -> &[TopicId] {
-        &self.dependencies
+        &self.deps
     }
 
     pub fn id(&self) -> &TopicId {
