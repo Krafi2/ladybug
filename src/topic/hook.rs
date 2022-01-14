@@ -23,12 +23,12 @@ pub struct HookConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type")]
+#[serde(untagged)]
 #[serde(rename_all = "lowercase")]
 #[serde(deny_unknown_fields)]
 pub enum Hook {
-    File(PathBuf),
-    Command(String),
+    File { file: PathBuf },
+    Command { cmd: String },
 }
 
 impl Hook {
@@ -43,23 +43,23 @@ impl Hook {
         let stderr = Stdio::inherit();
 
         match self {
-            Hook::File(path) => {
-                let file = source.join(path);
+            Hook::File { file } => {
+                let file = source.join(file);
                 run_cmd(target, file.as_os_str(), &vec![], stdin, stdout, stderr)
                     .with_context(|| format!("Failed to run hook at file '{}'", file.display()))
             }
-            Hook::Command(command) => {
-                let cmd = shell
+            Hook::Command { cmd } => {
+                let command = shell
                     .iter()
-                    .map(|s| OsString::from(s.replace(CMD_PATTERN, command)))
+                    .map(|s| OsString::from(s.replace(CMD_PATTERN, cmd)))
                     .collect::<Vec<_>>();
 
-                let (cmd, args) = cmd
+                let (command, args) = command
                     .split_first()
                     .expect("Expected at least one shell command");
 
-                run_cmd(target, cmd, args, stdin, stdout, stderr)
-                    .with_context(|| format!("Failed to run hook: '{}'", command))
+                run_cmd(target, command, args, stdin, stdout, stderr)
+                    .with_context(|| format!("Failed to run hook: '{}'", cmd))
             }
         }
     }
