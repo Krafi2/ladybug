@@ -91,7 +91,7 @@ impl FromStr for Hook {
     type Err = Void;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        Ok(Self::Command(s.to_owned()))
+        Ok(Self::Command { cmd: s.to_owned() })
     }
 }
 
