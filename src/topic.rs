@@ -1,8 +1,12 @@
 mod deploy;
+mod hook;
 pub mod registry;
 pub use deploy::{Env, TemplateContext};
 
-use self::registry::{Registry, Storage, TopicId};
+use self::{
+    hook::HookConfig,
+    registry::{Registry, Storage, TopicId},
+};
 use crate::{
     config::{paths, Config},
     glob::GlobBuilder,
@@ -32,10 +36,8 @@ pub struct TopicConfig {
     template: Vec<String>,
     /// Globs for files to be linked to the target directory
     link: Vec<String>,
-    /// A command to run before deploying
-    pre_hook: Vec<String>,
-    /// A command to run after deploying
-    post_hook: Vec<String>,
+    /// Hooks to run at various stages of the deployment process
+    hook: HookConfig,
     /// What to do if a file already exists
     duplicates: Duplicates,
     /// These values are injected into the tera enviroment
@@ -57,8 +59,7 @@ impl Default for TopicConfig {
             kind: Kind::Deep,
             template: Vec::new(),
             link: vec!["**".to_owned()],
-            pre_hook: Vec::new(),
-            post_hook: Vec::new(),
+            hook: HookConfig::default(),
             duplicates: Duplicates::Rename,
             env: EnvConfig::default(),
         }
@@ -122,8 +123,7 @@ pub struct Topic {
     links: GlobBuilder,
     template: TemplateContext,
     duplicates: Duplicates,
-    pre_hook: Vec<String>,
-    post_hook: Vec<String>,
+    hook: HookConfig,
 }
 
 impl Topic {
@@ -178,8 +178,7 @@ impl Topic {
             deps,
             template: TemplateContext::new(templates, config.env),
             duplicates: config.duplicates,
-            pre_hook: config.pre_hook,
-            post_hook: config.post_hook,
+            hook: config.hook,
         })
     }
 

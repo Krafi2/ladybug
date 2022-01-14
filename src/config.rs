@@ -12,9 +12,11 @@ use std::path::{Path, PathBuf};
 pub struct Config {
     /// The directory where topics are located
     pub dotfile_dir: PathBuf,
+    /// The command used to invoke the shell
+    pub shell: Vec<String>,
     // This figment contains the default values to construct a [`TopicConfig`], however it may not
-    // contain all of them so we can't rely on being able to deserialize it into a one. It is also
-    // quite handy as we don't need to construct a figment when it comes to it.
+    // contain all of them so we can't rely on being able to deserialize it into one. It is also
+    // quite handy as we don't need to construct a figment later.
     /// Default topic config
     pub topic: TopicOverride,
 }
@@ -67,6 +69,10 @@ impl Default for Config {
         Self {
             dotfile_dir: paths::dotfile_dir(),
             topic: TopicOverride::default(),
+            shell: vec!["sh", "-c", "{{cmd}}"]
+                .into_iter()
+                .map(ToOwned::to_owned)
+                .collect(),
         }
     }
 }

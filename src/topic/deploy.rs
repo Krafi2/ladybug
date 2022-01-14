@@ -1,11 +1,10 @@
 use super::{Dict, Duplicates, Topic};
-use crate::glob::GlobBuilder;
+use crate::{config::Config, glob::GlobBuilder};
 use anyhow::{anyhow, Context, Result};
 use globwalk::GlobWalker;
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
-    process::{Command, ExitStatus, Stdio},
 };
 use tera::Tera;
 
@@ -15,10 +14,12 @@ pub struct Env {
 }
 
 impl Topic {
-    pub fn deploy(self, dry_run: bool) -> Result<Env> {
+    pub fn deploy(self, dry_run: bool, config: &Config) -> Result<Env> {
         if !dry_run {
             log::info!("Running pre-hook");
-            run_hook(&self.target, &self.pre_hook)
+            self.hook
+                .pre
+                .map(|hook| hook.run(&self.dir, &self.target, &config.shell))
                 .transpose()
                 .context("Failed to run pre-hook")?;
         }
@@ -33,7 +34,9 @@ impl Topic {
 
         if !dry_run {
             log::info!("Running post-hook");
-            run_hook(&self.target, &self.post_hook)
+            self.hook
+                .post
+                .map(|hook| hook.run(&self.dir, &self.target, &config.shell))
                 .transpose()
                 .context("Failed to run post-hook")?;
         }
@@ -86,47 +89,6 @@ fn deploy_links(
     }
 
     Ok(())
-}
-
-fn run_cmd(
-    dir: &Path,
-    cmd: &[String],
-    stdin: Stdio,
-    stdout: Stdio,
-    stderr: Stdio,
-) -> Option<Result<ExitStatus>> {
-    let cmd_ = cmd;
-    // Make `cmd` `None` if the slice is empty, or `(cmd, None)` if the commands is available
-    // but there are no args, or finally `(cmd, args)` if both are available.
-    let cmd = cmd
-        .split_first()
-        .map(|(cmd, args)| (cmd, Some(args)))
-        .or_else(|| cmd.first().map(|first| (first, None)));
-
-    cmd.map(|(cmd, args)| {
-        let args = args.unwrap_or(&[]);
-        Command::new(cmd)
-            .args(args)
-            .current_dir(dir)
-            .stdin(stdin)
-            .stdout(stdout)
-            .stderr(stderr)
-            .status()
-            .map_err(anyhow::Error::new)
-            .and_then(|status| match status.success() {
-                true => Ok(status),
-                false => Err(anyhow!("Process exited with status: {}", status)),
-            })
-            .with_context(|| format!("Failed to run command: '{:?}'", cmd_))
-    })
-}
-
-fn run_hook(dir: &Path, cmd: &[String]) -> Option<Result<ExitStatus>> {
-    let stdin = Stdio::inherit();
-    let stdout = Stdio::inherit();
-    let stderr = Stdio::inherit();
-
-    run_cmd(dir, cmd, stdin, stdout, stderr)
 }
 
 #[derive(Debug)]

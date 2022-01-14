@@ -4,6 +4,7 @@ mod fs;
 mod glob;
 mod print;
 mod resolver;
+mod serde;
 mod topic;
 
 use crate::config::Config;

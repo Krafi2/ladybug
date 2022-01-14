@@ -36,7 +36,7 @@ impl<'a> resolver::Interface for InterfaceImpl<'a> {
     }
 
     fn close(&mut self, topic: Self::Open) -> Result<Self::Closed, Self::CloseError> {
-        topic.deploy(self.dry_run)
+        topic.deploy(self.dry_run, self.config)
     }
 
     fn dependencies<'b>(&'b mut self, topic: &'b Self::Open) -> &'b [TopicId] {
