@@ -27,7 +27,8 @@ fn free_file(path: &Path, duplicates: Duplicates) -> Result<()> {
         Duplicates::Rename => {
             let mut name = path.file_name().expect("Expected a file").to_owned();
             name.push(".old");
-            let new = path.join(name);
+            let mut new = path.to_owned();
+            new.set_file_name(name);
 
             fs::rename(path, &new).with_context(|| {
                 format!(
