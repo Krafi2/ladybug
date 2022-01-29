@@ -1,6 +1,6 @@
-use clap::Clap;
+use clap::{Parser, Subcommand};
 
-#[derive(Clap)]
+#[derive(Parser)]
 pub(super) struct Topic {
     #[clap(subcommand)]
     subcmd: SubCommand,
@@ -16,14 +16,14 @@ impl Topic {
     }
 }
 
-#[derive(Clap)]
+#[derive(Subcommand)]
 enum SubCommand {
     Add(Add),
     Remove(Remove),
     Edit(Edit),
 }
 
-#[derive(Clap)]
+#[derive(Parser)]
 struct Add {
     #[clap(short, long)]
     dry_run: bool,
@@ -31,13 +31,13 @@ struct Add {
     root: Option<String>,
 }
 
-#[derive(Clap)]
+#[derive(Parser)]
 struct Remove {
     #[clap(short, long)]
     dry_run: bool,
 }
 
-#[derive(Clap)]
+#[derive(Parser)]
 struct Edit {
     #[clap(short, long)]
     root: Option<String>,

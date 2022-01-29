@@ -6,11 +6,11 @@ use crate::{
     topic::{registry::TopicId, DescRegistry, Env, Topic, TopicDesc},
 };
 use anyhow::{Context, Result};
-use clap::Clap;
+use clap::Parser;
 use std::fmt::Write;
 use std::path::Path;
 
-#[derive(Clap)]
+#[derive(Parser)]
 pub(super) struct Deploy {
     #[clap(short, long)]
     dry_run: bool,

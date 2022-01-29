@@ -1,6 +1,6 @@
-use clap::Clap;
+use clap::Parser;
 
-#[derive(Clap)]
+#[derive(Parser)]
 pub(super) struct Add {
     #[clap(short, long)]
     dry_run: bool,

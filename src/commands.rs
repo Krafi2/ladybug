@@ -3,17 +3,16 @@ mod deploy;
 mod topic;
 
 use crate::config::Config;
-use clap::{AppSettings, Clap};
+use clap::{Parser, Subcommand};
 
-#[derive(Clap)]
+#[derive(Parser)]
 #[clap(version = "0.1", author = "Krafi")]
-#[clap(setting = AppSettings::ColoredHelp)]
 pub(super) struct Opts {
     #[clap(subcommand)]
     subcmd: SubCommand,
 }
 
-#[derive(Clap)]
+#[derive(Subcommand)]
 enum SubCommand {
     Topic(topic::Topic),
     Add(add::Add),
