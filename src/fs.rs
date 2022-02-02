@@ -116,15 +116,19 @@ where
         match reader1.read(&mut buf1) {
             Ok(len1) => match reader2.read(&mut buf2) {
                 Ok(len2) => {
+                    dbg!(len1, len2);
                     // The readers might have reached the end at a different lenght
                     if len1 != len2 {
+                        println!("here1");
                         break false;
                     }
                     // We might have reached the end of both readers, which means they are equal
                     if len1 == 0 {
+                        println!("here2");
                         break true;
                     }
                     if &buf1[..len1] != &buf2[..len2] {
+                        println!("here3");
                         break false;
                     }
                 }
@@ -143,4 +147,107 @@ mod imp {
 #[cfg(windows)]
 mod imp {
     pub use std::os::windows::fs::symlink_file;
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        fs::File,
+        io::{Seek, Write},
+    };
+
+    use super::free_file;
+    use crate::topic::Duplicates;
+    use tempfile::{tempdir, tempfile, NamedTempFile};
+
+    #[test]
+    fn delete_conficting_file() {
+        let dir = tempdir().expect("Failed to create tempdir");
+        let file = NamedTempFile::new_in(&dir).expect("Failed to create tempfile");
+        free_file(file.path(), Duplicates::Delete).expect("Failed to free file");
+
+        assert!(
+            dir.path()
+                .read_dir()
+                .expect("Failed to read dir")
+                .next()
+                .is_none(),
+            "Directory should be empty"
+        );
+    }
+
+    #[test]
+    fn rename_conflicting_file() {
+        const NAME: &'static str = "test.test";
+        const NEW_NAME: &'static str = "test.test.old";
+
+        let dir = tempdir().expect("Failed to create tempdir");
+        let path = dir.path().join(NAME);
+        std::fs::write(&path, []).expect("Failed to create file");
+        free_file(&path, Duplicates::Rename).expect("Failed to free file");
+
+        assert_eq!(
+            dir.path()
+                .read_dir()
+                .expect("Failed to read dir")
+                .next()
+                .expect("Expected a file")
+                .expect("Failed to read entry")
+                .file_name(),
+            NEW_NAME
+        );
+    }
+
+    #[test]
+    fn keep_conficting_file() {
+        let dir = tempdir().expect("Failed to create tempdir");
+        let file = NamedTempFile::new_in(&dir).expect("Failed to create tempfile");
+        let res = free_file(file.path(), Duplicates::Keep);
+        assert!(res.is_err());
+
+        assert_eq!(
+            dir.path()
+                .read_dir()
+                .expect("Failed to read dir")
+                .next()
+                .expect("Expected a file")
+                .expect("Failed to read entry")
+                .path(),
+            file.path()
+        );
+    }
+
+    #[test]
+    fn contents_equal() {
+        const DATA: &[u8] = "This is data that should be equal.".as_bytes();
+
+        let mut file1 = tempfile().expect("Failed to create file");
+        let mut file2 = tempfile().expect("Failed to create file");
+
+        file1.write_all(DATA).expect("Failed to write data");
+        file2.write_all(DATA).expect("Failed to write data");
+
+        let res = super::contents_equal(file1, file2);
+        assert!(res, "File contents should be detected as equal");
+    }
+
+    #[test]
+    fn contents_not_equal() {
+        const DATA1: &[u8] = "This is data that should be equal.".as_bytes();
+        const DATA2: &[u8] = "This data is different.".as_bytes();
+
+        fn make_file(data: &[u8]) -> File {
+            let mut file = tempfile().expect("Failed to create file");
+            file.write_all(data).expect("Failed to write data");
+            file.flush().unwrap();
+            file.rewind().unwrap();
+            file
+        }
+
+        let file1 = make_file(DATA1);
+        let file2 = make_file(DATA2);
+
+        let res = super::contents_equal(file1, file2);
+        assert!(!res, "File contents should be detected as different");
+    }
 }
