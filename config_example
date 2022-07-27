@@ -1,0 +1,32 @@
+# my_app.topic
+topic {
+    name: My App
+    desc: deploy My App
+    target: ~
+    shell: bash -c %c
+}
+
+env {
+    arch: x64
+}
+
+packages(provider: zypper, bla: a) {
+    myapp(lock: true)
+}
+
+files(method: link, conflicts: rename, source: ${arch}, target: there) {
+    hello.txt
+    hi.txt
+}
+
+deploy(stdin: false, stdout: true, shell: python -c %c) {
+    echo "1" > ~/hello
+}
+
+remove {
+    rm ~/hello
+}
+
+capture {
+    save "hello"
+}

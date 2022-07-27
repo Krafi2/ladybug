@@ -2,14 +2,14 @@ mod add;
 mod deploy;
 mod topic;
 
-use crate::config::Context;
+use crate::config::Config;
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
-#[clap(author = "Krafi", version = "0.1.0", about = "A cute dotfile manager", long_about = None)]
+#[clap(version = "0.1", author = "Krafi")]
 pub(super) struct Opts {
     #[clap(subcommand)]
-    command: SubCommand,
+    subcmd: SubCommand,
 }
 
 #[derive(Subcommand)]
@@ -19,11 +19,9 @@ enum SubCommand {
     Deploy(deploy::Deploy),
 }
 
-type CmdResult = color_eyre::Result<()>;
-
-pub(super) fn run(config: &Context) -> CmdResult {
+pub(super) fn run(config: &Config) -> Result<(), ()> {
     let opts = Opts::parse();
-    match opts.command {
+    match opts.subcmd {
         SubCommand::Topic(topic) => topic.run(),
         SubCommand::Add(add) => add.run(),
         SubCommand::Deploy(deploy) => deploy.run(config),

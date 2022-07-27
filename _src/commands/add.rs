@@ -9,7 +9,7 @@ pub(super) struct Add {
 }
 
 impl Add {
-    pub(super) fn run(self) -> super::CmdResult {
+    pub(super) fn run(self) -> Result<(), ()> {
         todo!()
     }
 }

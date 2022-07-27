@@ -1,50 +1,33 @@
 mod commands;
 mod config;
-mod fs;
-mod glob;
-mod print;
-mod resolver;
+mod rel_path;
 mod serde;
+mod shell;
 mod topic;
-
-use crate::config::Config;
-use anyhow::{anyhow, Context, Result};
-
-pub enum CmdStatus {
-    Ok,
-    Err,
-}
 
 fn main() {
     match run() {
-        Ok(CmdStatus::Ok) => (),
-        Ok(CmdStatus::Err) => std::process::exit(1),
-        Err(e) => {
-            log::error!("{:?}", e);
+        Ok(_) => std::process::exit(0),
+        Err(err) => {
+            eprintln!("{}", err);
             std::process::exit(1);
         }
     }
 }
 
-fn run() -> Result<CmdStatus> {
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn")).init();
-
-    check_dirs()?;
-    let config = Config::new().context("Failed to load config")?;
-    match commands::run(&config) {
-        Ok(_) => Ok(CmdStatus::Ok),
-        Err(_) => Ok(CmdStatus::Err),
-    }
+fn run() -> color_eyre::Result<()> {
+    setup_log()?;
+    Ok(())
 }
 
-fn check_dirs() -> Result<()> {
-    let dir = config::paths::dotfile_dir();
-    match dir.metadata() {
-        Ok(metadata) => match metadata.is_dir() {
-            true => Ok(()),
-            false => Err(anyhow!("'{}' isn't a directory", dir.display())),
-        },
-        Err(err) => Err(anyhow!(err))
-            .with_context(|| format!("The dotfile directory '{}' isn't accessible", dir.display())),
+fn setup_log() -> color_eyre::Result<()> {
+    // Disable eyre's spantrace
+    if std::env::var("RUST_SPANTRACE").is_err() {
+        std::env::set_var("RUST_SPANTRACE", "0");
     }
+
+    // Set global subscriber
+    let subscriber = tracing_subscriber::FmtSubscriber::new();
+    tracing::subscriber::set_global_default(subscriber)?;
+    Ok(())
 }

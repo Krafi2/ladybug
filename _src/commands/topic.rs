@@ -7,7 +7,7 @@ pub(super) struct Topic {
 }
 
 impl Topic {
-    pub(super) fn run(self) -> super::CmdResult {
+    pub(super) fn run(self) -> Result<(), ()> {
         match self.subcmd {
             SubCommand::Add(_) => todo!(),
             SubCommand::Remove(_) => todo!(),
