@@ -2,7 +2,7 @@
 
 use chumsky::{
     prelude::*,
-    text::{ident, keyword, Character},
+    text::{ident, Character},
 };
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -133,11 +133,8 @@ fn lexer() -> impl Parser<char, Vec<Token>, Error = Simple<char>> {
     .labelled("list");
 
     // An expression can be either a string, a list, or a variable.
-    let expression = variable
-        .clone()
-        .or(list.clone())
-        .or(spaced_string.clone())
-        .labelled("expression");
+    let expression =
+        choice((variable.clone(), list.clone(), spaced_string.clone())).labelled("expression");
 
     let ident = ident().with_span(Token::Ident);
 
@@ -156,37 +153,36 @@ fn lexer() -> impl Parser<char, Vec<Token>, Error = Simple<char>> {
     .collect()
     .with_span(Token::Params);
 
-    let map = keyword("topic")
-        .to("topic".to_owned())
-        .or(keyword("env").to("env".to_owned()))
+    let map = choice((just("topic"), just("env")))
+        .map(ToOwned::to_owned)
         .with_span(Token::Ident)
         .chain(space.clone().repeated())
         .chain(params.clone().repeated().at_most(1))
         .chain(space.clone().repeated())
         .chain(
-            space
-                .clone()
-                .or(line.clone())
-                .or(comment.clone())
-                .or(ident
+            choice((
+                space.clone(),
+                line.clone(),
+                comment.clone(),
+                ident
                     .clone()
                     .chain(space.clone().repeated())
                     .chain(just(':').with_span(Token::Ctrl))
                     .chain(space.clone().repeated())
                     .chain(expression.clone())
                     .collect()
-                    .with_span(Token::Param))
-                .repeated()
-                .delimited_by(just('{'), just('}'))
-                .with_span(Token::Body)
-                .labelled("map"),
+                    .with_span(Token::Param),
+            ))
+            .repeated()
+            .delimited_by(just('{'), just('}'))
+            .with_span(Token::Body)
+            .labelled("map"),
         )
         .collect()
         .with_span(Token::Block);
 
-    let items = keyword("files")
-        .to("files".to_owned())
-        .or(keyword("packages").to("packages".to_owned()))
+    let items = choice((just("files"), just("packages")))
+        .map(ToOwned::to_owned)
         .with_span(Token::Ident)
         .chain(space.clone().repeated())
         .chain(params.clone().repeated().at_most(1))
@@ -207,11 +203,13 @@ fn lexer() -> impl Parser<char, Vec<Token>, Error = Simple<char>> {
         .with_span(Token::Block);
 
     let content = recursive(|content| {
-        just(vec!['{', '}'])
-            .or(just('{')
+        choice((
+            just(vec!['{', '}']),
+            just('{')
                 .chain(content.repeated().flatten())
-                .chain(just('}')))
-            .or(none_of("{}").repeated().at_least(1))
+                .chain(just('}')),
+            none_of("{}").repeated().at_least(1),
+        ))
     })
     .repeated()
     .flatten()
@@ -222,8 +220,9 @@ fn lexer() -> impl Parser<char, Vec<Token>, Error = Simple<char>> {
     .with_span(Token::Body)
     .labelled("content");
 
-    let routine = ident
-        .clone()
+    let routine = choice((just("deploy"), just("remove"), just("capture")))
+        .map(ToOwned::to_owned)
+        .with_span(Token::Ident)
         .chain(space.clone().repeated())
         .chain(params.clone().repeated().at_most(1))
         .chain(space.clone().repeated())
