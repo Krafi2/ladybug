@@ -5,27 +5,43 @@ use chumsky::{
     text::{ident, Character},
 };
 
+/// Tokens for the lexer.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 enum Token {
+    /// Control character
     Ctrl(Span<char>),
+    /// String
     Str(Span<String>),
+    /// String delimited by `"`
     DelimStr(Span<String>),
+    /// A variable
     Var(Span<String>),
+    /// A list
     List(Span<Vec<Token>>),
+    /// An identifier
     Ident(Span<String>),
+    /// A comment
     Comment(Span<String>),
+    /// One or more whitespace characters
     Space(Span<String>),
+    /// One newline
     Line(Span<()>),
+    /// A single key value pair
     Param(Span<Vec<Token>>),
+    /// A list of params
     Params(Span<Vec<Token>>),
+    /// The body of a block
     Body(Span<Vec<Token>>),
+    /// A top-level block
     Block(Span<Vec<Token>>),
 }
 
+/// Span within the input
 type Span<T> = spanner::Span<T, std::ops::Range<usize>>;
+
 use spanner::Spanner;
 
-/// A utility module for binding tokens with their spans
+/// A utility module for working with spans.
 mod spanner {
     use chumsky::{
         combinator::{Map, MapWithSpan},
@@ -35,10 +51,25 @@ mod spanner {
     #[derive(Clone, Debug, PartialEq, Eq, Hash)]
     pub struct Span<T, S>(T, S);
 
+    /// A utility module for binding tokens with their spans.
     pub trait Spanner<I: Clone, O>: Parser<I, O>
     where
         Self: Sized,
     {
+        /// Wrap the parser's output in a `Span` and apply `F`.
+        ///
+        /// # Examples
+        /// ```
+        /// # use chumsky::prelude::*;
+        /// enum Token {
+        ///     Ident(Span<String, std::ops::Range<usize>),
+        /// }
+        ///
+        /// let ident =
+        /// text::whitespace().ignore_then(text::ident()).with_span(Token::Ident).then_ignore(end());
+        ///
+        /// assert_eq!(ident.parse("  hi"), Token::Ident(Span("hi".to_owned(), 2..4)))
+        /// ```
         fn with_span<F, T>(
             self,
             f: F,
@@ -136,23 +167,37 @@ fn lexer() -> impl Parser<char, Vec<Token>, Error = Simple<char>> {
     let expression =
         choice((variable.clone(), list.clone(), spaced_string.clone())).labelled("expression");
 
+    // A C-like identifier
     let ident = ident().with_span(Token::Ident);
 
+    // A parameter takes the form of `ident~:~ expr`. `~` signifies optional whitespace.
+    let param = ident
+        .clone()
+        .chain(space.clone().repeated())
+        .chain(just(':').with_span(Token::Ctrl))
+        .chain(space.clone().repeated())
+        .chain(expression.clone())
+        .collect()
+        .with_span(Token::Param);
+
     // Parameters are a parentheses-delimited, comma-separated list of params with optional
-    // newlines in-between.
+    // newlines and comments in-between.
     let params = choice((
-        one_of(":,").with_span(Token::Ctrl),
-        ident.clone(),
+        one_of(",").with_span(Token::Ctrl),
+        param.clone(),
+        comment.clone(),
         line.clone(),
         space.clone(),
-        expression.clone(),
     ))
     .repeated()
-    .at_least(1)
     .delimited_by(just('('), just(')'))
     .collect()
     .with_span(Token::Params);
 
+    // A block is `ident~(params)~{body}`
+
+    // A block containing key-value pairs in the form `key~:~value`, separated by newlines and
+    // optional comments.
     let map = choice((just("topic"), just("env")))
         .map(ToOwned::to_owned)
         .with_span(Token::Ident)
@@ -160,27 +205,17 @@ fn lexer() -> impl Parser<char, Vec<Token>, Error = Simple<char>> {
         .chain(params.clone().repeated().at_most(1))
         .chain(space.clone().repeated())
         .chain(
-            choice((
-                space.clone(),
-                line.clone(),
-                comment.clone(),
-                ident
-                    .clone()
-                    .chain(space.clone().repeated())
-                    .chain(just(':').with_span(Token::Ctrl))
-                    .chain(space.clone().repeated())
-                    .chain(expression.clone())
-                    .collect()
-                    .with_span(Token::Param),
-            ))
-            .repeated()
-            .delimited_by(just('{'), just('}'))
-            .with_span(Token::Body)
-            .labelled("map"),
+            choice((space.clone(), line.clone(), comment.clone(), param.clone()))
+                .repeated()
+                .delimited_by(just('{'), just('}'))
+                .with_span(Token::Body)
+                .labelled("map"),
         )
         .collect()
         .with_span(Token::Block);
 
+    // A block of items, which are word-strings with an optional `params` block, separated by
+    // newlines with optional comments.
     let items = choice((just("files"), just("packages")))
         .map(ToOwned::to_owned)
         .with_span(Token::Ident)
@@ -202,6 +237,7 @@ fn lexer() -> impl Parser<char, Vec<Token>, Error = Simple<char>> {
         .collect()
         .with_span(Token::Block);
 
+    // Captures all input between braces as a string.
     let content = recursive(|content| {
         choice((
             just(vec!['{', '}']),
@@ -220,6 +256,7 @@ fn lexer() -> impl Parser<char, Vec<Token>, Error = Simple<char>> {
     .with_span(Token::Body)
     .labelled("content");
 
+    // A block which capture all of its body's content a a string.
     let routine = choice((just("deploy"), just("remove"), just("capture")))
         .map(ToOwned::to_owned)
         .with_span(Token::Ident)
