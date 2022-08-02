@@ -5,29 +5,66 @@ use chumsky::{
     text::{ident, keyword, Character},
 };
 
-pub type Span = std::ops::Range<usize>;
-
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 enum Token {
-    Ctrl(char),
-    Str(String),
-    DelimStr(String),
-    Var(String),
-    List(Vec<Token>),
-    Ident(String),
-    Comment(String),
-    Space(String),
-    Line,
-    Param(Vec<Token>),
-    Params(Vec<Token>),
-    Body(Vec<Token>),
-    Block(Vec<Token>),
+    Ctrl(Span<char>),
+    Str(Span<String>),
+    DelimStr(Span<String>),
+    Var(Span<String>),
+    List(Span<Vec<Token>>),
+    Ident(Span<String>),
+    Comment(Span<String>),
+    Space(Span<String>),
+    Line(Span<()>),
+    Param(Span<Vec<Token>>),
+    Params(Span<Vec<Token>>),
+    Body(Span<Vec<Token>>),
+    Block(Span<Vec<Token>>),
+}
+
+type Span<T> = spanner::Span<T, std::ops::Range<usize>>;
+use spanner::Spanner;
+
+/// A utility module for binding tokens with their spans
+mod spanner {
+    use chumsky::{
+        combinator::{Map, MapWithSpan},
+        Error, Parser,
+    };
+
+    #[derive(Clone, Debug, PartialEq, Eq, Hash)]
+    pub struct Span<T, S>(T, S);
+
+    pub trait Spanner<I: Clone, O>: Parser<I, O>
+    where
+        Self: Sized,
+    {
+        fn with_span<F, T>(
+            self,
+            f: F,
+        ) -> Map<
+            MapWithSpan<
+                Self,
+                fn(O, <Self::Error as Error<I>>::Span) -> Span<O, <Self::Error as Error<I>>::Span>,
+                O,
+            >,
+            F,
+            Span<O, <Self::Error as Error<I>>::Span>,
+        >
+        where
+            F: Fn(Span<O, <Self::Error as Error<I>>::Span>) -> T,
+        {
+            self.map_with_span(Span as fn(_, _) -> _).map(f)
+        }
+    }
+
+    impl<P, I: Clone, O> Spanner<I, O> for P where P: Parser<I, O> {}
 }
 
 /// Lex text input into tokens for use by the parser. The lexer capture some extra information that
 /// isn't required by the parser, so that the text can be later re-serialized without ruining the
 /// user's formatting.
-fn lexer() -> impl Parser<char, Vec<(Token, Span)>, Error = Simple<char>> {
+fn lexer() -> impl Parser<char, Vec<Token>, Error = Simple<char>> {
     let reserved_chars = [
         ':', ',', ';', '(', ')', '[', ']', '{', '}', '"', '\'', '#', '\n', '$',
     ];
@@ -37,21 +74,21 @@ fn lexer() -> impl Parser<char, Vec<(Token, Span)>, Error = Simple<char>> {
         .repeated()
         .at_least(1)
         .collect()
-        .map(Token::Space);
+        .with_span(Token::Space);
 
-    let line = text::newline().map(|_| Token::Line);
+    let line = text::newline().with_span(Token::Line);
 
     // Comments start with `#` and end in a newline
     let comment = just('#')
         .chain(take_until(text::newline()).map(|(a, _)| a))
         .collect()
-        .map(Token::Comment)
+        .with_span(Token::Comment)
         .labelled("comment");
 
     // Variables are in the form `$identifier`
     let variable = just('$')
         .ignore_then(text::ident())
-        .map(Token::Var)
+        .with_span(Token::Var)
         .labelled("variable");
 
     // A string can either be delimited by `"` or or be undelimited if it doesn't contain any
@@ -62,12 +99,12 @@ fn lexer() -> impl Parser<char, Vec<(Token, Span)>, Error = Simple<char>> {
         .repeated()
         .delimited_by(just('\"'), just('\"'))
         .collect()
-        .map(Token::DelimStr)
+        .with_span(Token::DelimStr)
         .or(filter(move |c: &char| !reserved_chars.contains(c))
             .repeated()
             .at_least(1)
             .collect()
-            .map(Token::Str))
+            .with_span(Token::Str))
         .labelled("string");
 
     // Strings inside lists are a bit more limited since they are delimited by spaces.
@@ -75,13 +112,13 @@ fn lexer() -> impl Parser<char, Vec<(Token, Span)>, Error = Simple<char>> {
         .repeated()
         .delimited_by(just('\"'), just('\"'))
         .collect()
-        .map(Token::DelimStr)
+        .with_span(Token::DelimStr)
         .or(
             filter(move |c: &char| !reserved_chars.contains(c) && !c.is_whitespace())
                 .repeated()
                 .at_least(1)
                 .collect()
-                .map(Token::Str),
+                .with_span(Token::Str),
         )
         .labelled("word_string");
 
@@ -91,7 +128,7 @@ fn lexer() -> impl Parser<char, Vec<(Token, Span)>, Error = Simple<char>> {
             .repeated()
             .delimited_by(just('['), just(']'))
             .collect()
-            .map(Token::List)
+            .with_span(Token::List)
     })
     .labelled("list");
 
@@ -102,12 +139,12 @@ fn lexer() -> impl Parser<char, Vec<(Token, Span)>, Error = Simple<char>> {
         .or(spaced_string.clone())
         .labelled("expression");
 
-    let ident = ident().map(Token::Ident);
+    let ident = ident().with_span(Token::Ident);
 
     // Parameters are a parentheses-delimited, comma-separated list of params with optional
     // newlines in-between.
     let params = choice((
-        one_of(":,").map(Token::Ctrl),
+        one_of(":,").with_span(Token::Ctrl),
         ident.clone(),
         line.clone(),
         space.clone(),
@@ -117,12 +154,12 @@ fn lexer() -> impl Parser<char, Vec<(Token, Span)>, Error = Simple<char>> {
     .at_least(1)
     .delimited_by(just('('), just(')'))
     .collect()
-    .map(Token::Params);
+    .with_span(Token::Params);
 
     let map = keyword("topic")
         .to("topic".to_owned())
         .or(keyword("env").to("env".to_owned()))
-        .map(Token::Ident)
+        .with_span(Token::Ident)
         .chain(space.clone().repeated())
         .chain(params.clone().repeated().at_most(1))
         .chain(space.clone().repeated())
@@ -134,23 +171,23 @@ fn lexer() -> impl Parser<char, Vec<(Token, Span)>, Error = Simple<char>> {
                 .or(ident
                     .clone()
                     .chain(space.clone().repeated())
-                    .chain(just(':').map(Token::Ctrl))
+                    .chain(just(':').with_span(Token::Ctrl))
                     .chain(space.clone().repeated())
                     .chain(expression.clone())
                     .collect()
-                    .map(Token::Param))
+                    .with_span(Token::Param))
                 .repeated()
                 .delimited_by(just('{'), just('}'))
-                .map(Token::Body)
+                .with_span(Token::Body)
                 .labelled("map"),
         )
         .collect()
-        .map(Token::Block);
+        .with_span(Token::Block);
 
     let items = keyword("files")
         .to("files".to_owned())
         .or(keyword("packages").to("packages".to_owned()))
-        .map(Token::Ident)
+        .with_span(Token::Ident)
         .chain(space.clone().repeated())
         .chain(params.clone().repeated().at_most(1))
         .chain(space.clone().repeated())
@@ -167,7 +204,7 @@ fn lexer() -> impl Parser<char, Vec<(Token, Span)>, Error = Simple<char>> {
             .labelled("items"),
         )
         .collect()
-        .map(Token::Block);
+        .with_span(Token::Block);
 
     let content = recursive(|content| {
         just(vec!['{', '}'])
@@ -178,10 +215,11 @@ fn lexer() -> impl Parser<char, Vec<(Token, Span)>, Error = Simple<char>> {
     })
     .repeated()
     .flatten()
-    .delimited_by(just('{'), just('}'))
     .collect()
-    .map(Token::Str)
-    .map(|s| Token::Body(vec![s]))
+    .with_span(Token::Str)
+    .delimited_by(just('{'), just('}'))
+    .map(|s| vec![s])
+    .with_span(Token::Body)
     .labelled("content");
 
     let routine = ident
@@ -191,11 +229,10 @@ fn lexer() -> impl Parser<char, Vec<(Token, Span)>, Error = Simple<char>> {
         .chain(space.clone().repeated())
         .chain(content)
         .collect()
-        .map(Token::Block);
+        .with_span(Token::Block);
 
     choice((space, line, comment, map, items, routine))
-        // .recover_with(skip_then_retry_until([]))
-        .map_with_span(|tok, span| (tok, span))
+        .recover_with(skip_then_retry_until([]))
         .repeated()
         .then_ignore(end())
 }
