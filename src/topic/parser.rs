@@ -2,10 +2,205 @@
 
 use chumsky::{
     prelude::*,
-    text::{keyword, Character},
+    text::{ident, keyword, Character},
 };
 
-#[derive(Debug, Clone)]
+pub type Span = std::ops::Range<usize>;
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+enum Token {
+    Ctrl(char),
+    Str(String),
+    DelimStr(String),
+    Var(String),
+    List(Vec<Token>),
+    Ident(String),
+    Comment(String),
+    Space(String),
+    Line,
+    Param(Vec<Token>),
+    Params(Vec<Token>),
+    Body(Vec<Token>),
+    Block(Vec<Token>),
+}
+
+/// Lex text input into tokens for use by the parser. The lexer capture some extra information that
+/// isn't required by the parser, so that the text can be later re-serialized without ruining the
+/// user's formatting.
+fn lexer() -> impl Parser<char, Vec<(Token, Span)>, Error = Simple<char>> {
+    let reserved_chars = [
+        ':', ',', ';', '(', ')', '[', ']', '{', '}', '"', '\'', '#', '\n', '$',
+    ];
+
+    // Characters allowed as whitespace
+    let space = one_of(" \t")
+        .repeated()
+        .at_least(1)
+        .collect()
+        .map(Token::Space);
+
+    let line = text::newline().map(|_| Token::Line);
+
+    // Comments start with `#` and end in a newline
+    let comment = just('#')
+        .chain(take_until(text::newline()).map(|(a, _)| a))
+        .collect()
+        .map(Token::Comment)
+        .labelled("comment");
+
+    // Variables are in the form `$identifier`
+    let variable = just('$')
+        .ignore_then(text::ident())
+        .map(Token::Var)
+        .labelled("variable");
+
+    // A string can either be delimited by `"` or or be undelimited if it doesn't contain any
+    // reserved characters. Some of the reserved characters could be allowed without parser
+    // ambiguity, but the user might be confused by which characters are allowd, so we take a more
+    // conservative approach.
+    let spaced_string = none_of('"')
+        .repeated()
+        .delimited_by(just('\"'), just('\"'))
+        .collect()
+        .map(Token::DelimStr)
+        .or(filter(move |c: &char| !reserved_chars.contains(c))
+            .repeated()
+            .at_least(1)
+            .collect()
+            .map(Token::Str))
+        .labelled("string");
+
+    // Strings inside lists are a bit more limited since they are delimited by spaces.
+    let word_string = none_of('"')
+        .repeated()
+        .delimited_by(just('\"'), just('\"'))
+        .collect()
+        .map(Token::DelimStr)
+        .or(
+            filter(move |c: &char| !reserved_chars.contains(c) && !c.is_whitespace())
+                .repeated()
+                .at_least(1)
+                .collect()
+                .map(Token::Str),
+        )
+        .labelled("word_string");
+
+    // Lists are delimited by `[]` and contain whitespace-separated expressions.
+    let list = recursive(|list| {
+        choice((list, variable.clone(), word_string.clone(), space.clone()))
+            .repeated()
+            .delimited_by(just('['), just(']'))
+            .collect()
+            .map(Token::List)
+    })
+    .labelled("list");
+
+    // An expression can be either a string, a list, or a variable.
+    let expression = variable
+        .clone()
+        .or(list.clone())
+        .or(spaced_string.clone())
+        .labelled("expression");
+
+    let ident = ident().map(Token::Ident);
+
+    // Parameters are a parentheses-delimited, comma-separated list of params with optional
+    // newlines in-between.
+    let params = choice((
+        one_of(":,").map(Token::Ctrl),
+        ident.clone(),
+        line.clone(),
+        space.clone(),
+        expression.clone(),
+    ))
+    .repeated()
+    .at_least(1)
+    .delimited_by(just('('), just(')'))
+    .collect()
+    .map(Token::Params);
+
+    let map = keyword("topic")
+        .to("topic".to_owned())
+        .or(keyword("env").to("env".to_owned()))
+        .map(Token::Ident)
+        .chain(space.clone().repeated())
+        .chain(params.clone().repeated().at_most(1))
+        .chain(space.clone().repeated())
+        .chain(
+            space
+                .clone()
+                .or(line.clone())
+                .or(comment.clone())
+                .or(ident
+                    .clone()
+                    .chain(space.clone().repeated())
+                    .chain(just(':').map(Token::Ctrl))
+                    .chain(space.clone().repeated())
+                    .chain(expression.clone())
+                    .collect()
+                    .map(Token::Param))
+                .repeated()
+                .delimited_by(just('{'), just('}'))
+                .map(Token::Body)
+                .labelled("map"),
+        )
+        .collect()
+        .map(Token::Block);
+
+    let items = keyword("files")
+        .to("files".to_owned())
+        .or(keyword("packages").to("packages".to_owned()))
+        .map(Token::Ident)
+        .chain(space.clone().repeated())
+        .chain(params.clone().repeated().at_most(1))
+        .chain(space.clone().repeated())
+        .chain::<Token, _, _>(
+            choice((
+                space.clone(),
+                line.clone(),
+                comment.clone(),
+                params.clone(),
+                word_string.clone(),
+            ))
+            .repeated()
+            .delimited_by(just('{'), just('}'))
+            .labelled("items"),
+        )
+        .collect()
+        .map(Token::Block);
+
+    let content = recursive(|content| {
+        just(vec!['{', '}'])
+            .or(just('{')
+                .chain(content.repeated().flatten())
+                .chain(just('}')))
+            .or(none_of("{}").repeated().at_least(1))
+    })
+    .repeated()
+    .flatten()
+    .delimited_by(just('{'), just('}'))
+    .collect()
+    .map(Token::Str)
+    .map(|s| Token::Body(vec![s]))
+    .labelled("content");
+
+    let routine = ident
+        .clone()
+        .chain(space.clone().repeated())
+        .chain(params.clone().repeated().at_most(1))
+        .chain(space.clone().repeated())
+        .chain(content)
+        .collect()
+        .map(Token::Block);
+
+    choice((space, line, comment, map, items, routine))
+        // .recover_with(skip_then_retry_until([]))
+        .map_with_span(|tok, span| (tok, span))
+        .repeated()
+        .then_ignore(end())
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 enum Expression {
     Variable(String),
     String(String),
@@ -56,225 +251,21 @@ enum Block {
     },
 }
 
-fn parser() -> impl Parser<char, Vec<Block>, Error = Simple<char>> {
-    let reserved_chars = [
-        ':', ',', ';', '(', ')', '[', ']', '{', '}', '"', '\'', '#', '\n', '$',
-    ];
-    let space_chars = one_of(" \t").repeated();
-
-    let string = none_of('"')
-        .repeated()
-        .delimited_by(just('\"'), just('\"'))
-        .or(filter(move |c: &char| !reserved_chars.contains(c)).repeated())
-        .padded_by(space_chars.clone())
-        .collect()
-        .map(Expression::String)
-        .labelled("string");
-
-    let variable = just('$')
-        .ignore_then(text::ident())
-        .padded_by(space_chars.clone())
-        .map(Expression::Variable)
-        .labelled("variable");
-
-    let list_string = none_of('"')
-        .repeated()
-        .delimited_by(just('\"'), just('\"'))
-        .or(
-            filter(move |c: &char| !reserved_chars.contains(c) && !c.is_whitespace())
-                .repeated()
-                .at_least(1),
-        )
-        .padded_by(space_chars.clone())
-        .collect()
-        .map(Expression::String)
-        .labelled("list_string");
-
-    let list = recursive(|list| {
-        variable
-            .clone()
-            .or(list)
-            .or(list_string)
-            .padded_by(space_chars.clone())
-            .repeated()
-            .delimited_by(just('['), just(']'))
-            .padded_by(space_chars.clone())
-            .collect()
-            .map(Expression::List)
-    })
-    .labelled("list");
-
-    let expression = variable
-        .clone()
-        .or(list.clone())
-        .or(string.clone())
-        .labelled("expression");
-
-    let comment = just('#')
-        .ignore_then(take_until(text::newline()).ignored())
-        .padded_by(space_chars.clone())
-        .labelled("comment");
-
-    let param = text::ident()
-        .padded_by(space_chars.clone())
-        .then_ignore(just(':'))
-        .padded_by(space_chars.clone())
-        .then(expression)
-        .padded_by(space_chars.clone())
-        .map(|(param, val)| Param { param, val })
-        .labelled("param");
-
-    let params = param
-        .clone()
-        .padded_by(text::whitespace())
-        .separated_by(just(','))
-        .allow_trailing()
-        .padded_by(text::whitespace())
-        .delimited_by(just('('), just(')'))
-        .or_not()
-        .map(|o| o.unwrap_or_default())
-        .padded_by(space_chars.clone())
-        .labelled("params");
-
-    let map = param
-        .clone()
-        .padded_by(comment.clone().repeated())
-        .separated_by(text::newline().repeated().at_least(1))
-        .allow_leading()
-        .allow_trailing()
-        .padded_by(comment.clone().repeated())
-        .delimited_by(just('{'), just('}'))
-        .labelled("map");
-
-    let topic = text::keyword("topic")
-        .ignore_then(params.clone())
-        .then(map.clone())
-        .map(|(params, body)| Block::Topic { params, body })
-        .labelled("topic");
-
-    let env = text::keyword("env")
-        .ignore_then(params.clone())
-        .then(map.clone())
-        .map(|(params, body)| Block::Env { params, body })
-        .labelled("env");
-
-    let item = none_of('"')
-        .repeated()
-        .delimited_by(just('\"'), just('\"'))
-        .or(filter(|c: &char| c.is_alphanumeric() || ['_', '-', '.'].contains(c)).repeated())
-        .collect()
-        .padded_by(space_chars.clone())
-        .labelled("item");
-
-    let items = item
-        .then(params.clone())
-        .map(|(name, params)| Package { name, params })
-        .padded_by(comment.clone().repeated())
-        .padded_by(space_chars.clone())
-        .separated_by(text::newline().repeated().at_least(1))
-        .allow_leading()
-        .allow_trailing()
-        .padded_by(comment.clone().repeated())
-        .delimited_by(just('{'), just('}'))
-        .labelled("items");
-
-    let files = keyword("files")
-        .ignore_then(params.clone())
-        .then(items.clone())
-        .map(|(params, files)| Block::Files { params, files })
-        .labelled("files");
-
-    let packages = keyword("packages")
-        .ignore_then(params.clone())
-        .then(items.clone())
-        .map(|(params, packages)| Block::Packages { params, packages })
-        .labelled("packages");
-
-    // TODO: This may have poor performance?
-    // Capture all input between curly braces.
-    // This has to match braces.
-    let content = recursive(|content| {
-        just(vec!['{', '}'])
-            .or(just('{')
-                .chain(content.repeated().flatten())
-                .chain(just('}')))
-            .or(none_of("{}").repeated().at_least(1))
-    })
-    .repeated()
-    .flatten()
-    .delimited_by(just('{'), just('}'))
-    .labelled("content")
-    .collect::<String>();
-
-    let deploy = keyword("deploy")
-        .ignore_then(params.clone())
-        .then(content.clone())
-        .map(|(params, content)| Block::Deploy { params, content })
-        .labelled("deploy");
-
-    let remove = keyword("remove")
-        .ignore_then(params.clone())
-        .then(content.clone())
-        .map(|(params, content)| Block::Remove { params, content })
-        .labelled("remove");
-
-    let capture = keyword("capture")
-        .ignore_then(params.clone())
-        .then(content.clone())
-        .map(|(params, content)| Block::Capture { params, content })
-        .labelled("capture");
-
-    topic
-        .padded()
-        .padded_by(comment.clone().repeated())
-        .chain(
-            choice((env, files, packages, deploy, remove, capture))
-                .padded()
-                .padded_by(comment.clone().repeated())
-                .repeated(),
-        )
-        .then_ignore(end())
-}
-
-fn main() {
-    let input = std::fs::read_to_string(std::env::args().nth(1).unwrap()).unwrap();
-    let out = parser().parse(input);
-    println!("{:#?}", out);
-}
-
 #[cfg(test)]
 mod tests {
     use chumsky::Parser;
 
     #[test]
-    fn parser() {
-        let input = r#" topic { name: My } "#;
-        //             env {
-        //                 arch: x64
-        //             }
-        //
-        //             packages(provider: zypper, bla: a) {
-        //                 myapp(lock: true)
-        //             }
-        //
-        //             files(method: link, conflicts: rename, source: ${arch}, target: there) {
-        //                 hello.txt
-        //                 hi.txt
-        //             }
-        //
-        //             deploy(stdin: false, stdout: true, shell: [python -c %c]) {
-        //                 echo "1" > ~/hello
-        //             }
-        //
-        //             remove {
-        //                 rm ~/hello
-        //             }
-        //
-        //             capture {
-        //                 save "hello"
-        // }
-
-        let ast = super::parser().parse(input);
+    fn lexer() {
+        let input = std::fs::read_to_string("config_example").unwrap();
+        let ast = super::lexer().parse(input);
         println!("{:#?}", ast);
     }
+
+    // #[test]
+    // fn parser() {
+    //     let input = std::fs::read_to_string("config_example").unwrap();
+    //     let ast = super::parser().parse(input);
+    //     println!("{:#?}", ast);
+    // }
 }

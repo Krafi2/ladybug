@@ -22,10 +22,9 @@ packages(provider: zypper, bla: a) {
 files(method: link, conflicts: rename, source: $arch, target: there) {
     hello.txt
 
-    hi.txt
+    hi.txt(a: a)
 }
 
-# This is deploy
 deploy(stdin: false, stdout: true, shell: [python -c %c]) {
     echo "1" > ~/hello
 }
@@ -35,5 +34,6 @@ remove {
 }
 
 capture {
-    
+    {} braces {{{}}} {
+    }   
 }
