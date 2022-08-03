@@ -5,41 +5,43 @@ use chumsky::{
     text::{ident, Character},
 };
 
+type Span = std::ops::Range<usize>;
+type Spanned<T> = (T, Span);
+
 /// Tokens for the lexer.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 enum Token {
     /// Control character
-    Ctrl(Span<char>),
+    Ctrl(char),
     /// String
-    Str(Span<String>),
+    Str(String),
     /// String delimited by `"`
-    DelimStr(Span<String>),
+    DelimStr(String),
     /// A variable
-    Var(Span<String>),
+    Var(String),
     /// A list
-    List(Span<Vec<Token>>),
+    List(Vec<Spanned<Token>>),
     /// An identifier
-    Ident(Span<String>),
+    Ident(String),
     /// A comment
-    Comment(Span<String>),
+    Comment(String),
     /// One or more whitespace characters
-    Space(Span<String>),
+    Space(String),
     /// One newline
-    Line(Span<()>),
+    Line,
     /// A single key value pair
-    Param(Span<Vec<Token>>),
+    Param(Vec<Spanned<Token>>),
     /// A list of params
-    Params(Span<Vec<Token>>),
+    Params(Vec<Spanned<Token>>),
     /// The body of a block
-    Body(Span<Vec<Token>>),
+    Body(Vec<Spanned<Token>>),
     /// A top-level block
-    Block(Span<Vec<Token>>),
+    Block(Vec<Spanned<Token>>),
 }
 
-/// Span within the input
-type Span<T> = spanner::Span<T, std::ops::Range<usize>>;
-
 use spanner::Spanner;
+
+use self::spanner::SpanExt;
 
 /// A utility module for working with spans.
 mod spanner {
@@ -48,54 +50,49 @@ mod spanner {
         Error, Parser,
     };
 
-    #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-    pub struct Span<T, S>(T, S);
-
     /// A utility module for binding tokens with their spans.
     pub trait Spanner<I: Clone, O>: Parser<I, O>
     where
         Self: Sized,
     {
-        /// Wrap the parser's output in a `Span` and apply `F`.
-        ///
-        /// # Examples
-        /// ```
-        /// # use chumsky::prelude::*;
-        /// enum Token {
-        ///     Ident(Span<String, std::ops::Range<usize>),
-        /// }
-        ///
-        /// let ident =
-        /// text::whitespace().ignore_then(text::ident()).with_span(Token::Ident).then_ignore(end());
-        ///
-        /// assert_eq!(ident.parse("  hi"), Token::Ident(Span("hi".to_owned(), 2..4)))
-        /// ```
         fn with_span<F, T>(
             self,
             f: F,
-        ) -> Map<
-            MapWithSpan<
-                Self,
-                fn(O, <Self::Error as Error<I>>::Span) -> Span<O, <Self::Error as Error<I>>::Span>,
-                O,
-            >,
-            F,
-            Span<O, <Self::Error as Error<I>>::Span>,
+        ) -> MapWithSpan<
+            Map<Self, F, O>,
+            fn(T, <Self::Error as Error<I>>::Span) -> (T, <Self::Error as Error<I>>::Span),
+            T,
         >
         where
-            F: Fn(Span<O, <Self::Error as Error<I>>::Span>) -> T,
+            F: Fn(O) -> T,
         {
-            self.map_with_span(Span as fn(_, _) -> _).map(f)
+            self.map(f).map_with_span(|tok, span| (tok, span))
         }
     }
 
     impl<P, I: Clone, O> Spanner<I, O> for P where P: Parser<I, O> {}
+
+    pub trait SpanExt<T, S> {
+        fn token(&self) -> &T;
+        fn span(&self) -> &S;
+    }
+
+    /// A utility trait for accessing the `token` and `span` components of a `Spanned` token.
+    impl<T> SpanExt<T, super::Span> for super::Spanned<T> {
+        fn token(&self) -> &T {
+            &self.0
+        }
+
+        fn span(&self) -> &super::Span {
+            &self.1
+        }
+    }
 }
 
 /// Lex text input into tokens for use by the parser. The lexer capture some extra information that
 /// isn't required by the parser, so that the text can be later re-serialized without ruining the
 /// user's formatting.
-fn lexer() -> impl Parser<char, Vec<Token>, Error = Simple<char>> {
+fn lexer() -> impl Parser<char, Vec<Spanned<Token>>, Error = Simple<char>> {
     let reserved_chars = [
         ':', ',', ';', '(', ')', '[', ']', '{', '}', '"', '\'', '#', '\n', '$',
     ];
@@ -107,7 +104,7 @@ fn lexer() -> impl Parser<char, Vec<Token>, Error = Simple<char>> {
         .collect()
         .with_span(Token::Space);
 
-    let line = text::newline().with_span(Token::Line);
+    let line = text::newline().with_span(|_| Token::Line);
 
     // Comments start with `#` and end in a newline
     let comment = just('#')
@@ -222,7 +219,7 @@ fn lexer() -> impl Parser<char, Vec<Token>, Error = Simple<char>> {
         .chain(space.clone().repeated())
         .chain(params.clone().repeated().at_most(1))
         .chain(space.clone().repeated())
-        .chain::<Token, _, _>(
+        .chain(
             choice((
                 space.clone(),
                 line.clone(),
@@ -324,21 +321,75 @@ enum Block {
     },
 }
 
+use filter_ext::filter_tokens;
+mod filter_ext {
+    use chumsky::Stream;
+
+    use super::{Span, SpanExt, Spanned, Token};
+
+    /// A utility iterator which filters `Token`s. The lifetime `'a` is present so that the
+    /// type checker is satisfied when we create a `Stream`.
+    pub(super) struct TokenFilter<'a>(
+        std::iter::Filter<std::vec::IntoIter<(Token, Span)>, fn(&(Token, Span)) -> bool>,
+        std::marker::PhantomData<&'a ()>,
+    );
+
+    impl<'a> Iterator for TokenFilter<'a> {
+        type Item = (Token, Span);
+
+        fn next(&mut self) -> Option<Self::Item> {
+            self.0.next()
+        }
+    }
+
+    /// Filter out tokens with no impact on parsing, such as spaces, lines, and comments.
+    fn token_filter(t: &Spanned<Token>) -> bool {
+        match t.token() {
+            Token::Space(_) | Token::Comment(_) | Token::Line => false,
+            _ => true,
+        }
+    }
+
+    /// Convert a vector of tokens into a stream which discards superfluous tokens.
+    pub(super) fn filter_tokens<'a>(
+        tokens: Vec<Spanned<Token>>,
+    ) -> Stream<'a, Token, Span, TokenFilter<'a>> {
+        let end = tokens.last().unwrap().span().end;
+
+        Stream::from_iter(
+            end..end + 1,
+            TokenFilter(
+                tokens.into_iter().filter(token_filter),
+                std::marker::PhantomData,
+            ),
+        )
+    }
+}
+
+fn parser() {
+    let source = std::fs::read_to_string("config_example").unwrap();
+    let res = lexer().parse_recovery(source);
+    let (tokens, errors) = match res {
+        (Some(tokens), errors) => (tokens, errors),
+        (None, _errors) => todo!(),
+    };
+
+    let tokens = filter_tokens(tokens);
+}
+
 #[cfg(test)]
 mod tests {
     use chumsky::Parser;
 
     #[test]
     fn lexer() {
-        let input = std::fs::read_to_string("config_example").unwrap();
-        let ast = super::lexer().parse(input);
+        let source = std::fs::read_to_string("config_example").unwrap();
+        let ast = super::lexer().parse(source);
         println!("{:#?}", ast);
     }
 
-    // #[test]
-    // fn parser() {
-    //     let input = std::fs::read_to_string("config_example").unwrap();
-    //     let ast = super::parser().parse(input);
-    //     println!("{:#?}", ast);
-    // }
+    #[test]
+    fn parser() {
+        super::parser()
+    }
 }
