@@ -1,5 +1,8 @@
 #![allow(dead_code)]
 
+use std::{collections::vec_deque, path::Path, str::FromStr};
+
+use ariadne::{Color, Fmt, Label, Report, ReportKind, Source};
 use chumsky::{
     prelude::*,
     text::{ident, Character},
@@ -7,6 +10,51 @@ use chumsky::{
 
 type Span = std::ops::Range<usize>;
 type Spanned<T> = (T, Span);
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+enum Name {
+    Topic,
+    Env,
+    Packages,
+    Files,
+    Deploy,
+    Remove,
+    Capture,
+    Other(String),
+}
+
+impl FromStr for Name {
+    type Err = ();
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let res = match s {
+            "topic" => Self::Topic,
+            "env" => Self::Env,
+            "packages" => Self::Packages,
+            "files" => Self::Files,
+            "deploy" => Self::Deploy,
+            "remove" => Self::Remove,
+            "capture" => Self::Capture,
+            _ => Self::Other(s.to_owned()),
+        };
+        Ok(res)
+    }
+}
+
+impl std::fmt::Display for Name {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Name::Topic => f.write_str("topic"),
+            Name::Env => f.write_str("env"),
+            Name::Packages => f.write_str("packages"),
+            Name::Files => f.write_str("files"),
+            Name::Deploy => f.write_str("deploy"),
+            Name::Remove => f.write_str("remove"),
+            Name::Capture => f.write_str("capture"),
+            Name::Other(other) => f.write_str(&other),
+        }
+    }
+}
 
 /// Tokens for the lexer.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -35,13 +83,81 @@ enum Token {
     Params(Vec<Spanned<Token>>),
     /// The body of a block
     Body(Vec<Spanned<Token>>),
+    /// The name of a block
+    Name(Name),
     /// A top-level block
     Block(Vec<Spanned<Token>>),
+    Error,
 }
 
-use spanner::Spanner;
+impl Token {
+    fn kind(&self) -> TokenKind {
+        self.into()
+    }
+}
 
-use self::spanner::SpanExt;
+#[derive(Debug, Clone, Copy)]
+enum TokenKind {
+    Ctrl(char),
+    Str,
+    Var,
+    List,
+    Ident,
+    Comment,
+    Space,
+    Line,
+    Param,
+    Params,
+    Body,
+    Name,
+    Block,
+    Error,
+}
+
+impl From<&Token> for TokenKind {
+    fn from(token: &Token) -> Self {
+        match token {
+            Token::Ctrl(char) => TokenKind::Ctrl(*char),
+            Token::Str(_) => TokenKind::Str,
+            Token::DelimStr(_) => TokenKind::Str,
+            Token::Var(_) => TokenKind::Var,
+            Token::List(_) => TokenKind::List,
+            Token::Ident(_) => TokenKind::Ident,
+            Token::Comment(_) => TokenKind::Comment,
+            Token::Space(_) => TokenKind::Space,
+            Token::Line => TokenKind::Line,
+            Token::Param(_) => TokenKind::Param,
+            Token::Params(_) => TokenKind::Params,
+            Token::Body(_) => TokenKind::Body,
+            Token::Name(_) => TokenKind::Name,
+            Token::Block(_) => TokenKind::Block,
+            Token::Error => TokenKind::Error,
+        }
+    }
+}
+
+impl std::fmt::Display for TokenKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TokenKind::Ctrl(char) => write!(f, "'{}'", char),
+            TokenKind::Str => f.write_str("String"),
+            TokenKind::Var => f.write_str("Variable"),
+            TokenKind::List => f.write_str("List"),
+            TokenKind::Ident => f.write_str("Identifier"),
+            TokenKind::Comment => f.write_str("Comment"),
+            TokenKind::Space => f.write_str("Space"),
+            TokenKind::Line => f.write_str("Newline"),
+            TokenKind::Param => f.write_str("Parameter"),
+            TokenKind::Params => f.write_str("Parameters"),
+            TokenKind::Body => f.write_str("Body"),
+            TokenKind::Name => f.write_str("Identifier"),
+            TokenKind::Block => f.write_str("Block"),
+            TokenKind::Error => f.write_str("Error"),
+        }
+    }
+}
+
+use spanner::{SpanExt, Spanner};
 
 /// A utility module for working with spans.
 mod spanner {
@@ -55,6 +171,18 @@ mod spanner {
     where
         Self: Sized,
     {
+        /// Map the parser's output from `O` to to `(O, Span)`
+        fn spanned(
+            self,
+        ) -> MapWithSpan<
+            Self,
+            fn(O, <Self::Error as Error<I>>::Span) -> (O, <Self::Error as Error<I>>::Span),
+            O,
+        > {
+            self.map_with_span(|tok, span| (tok, span))
+        }
+
+        /// Map the parser's output with `f` and place it into a tuplu with its span.
         fn with_span<F, T>(
             self,
             f: F,
@@ -66,7 +194,7 @@ mod spanner {
         where
             F: Fn(O) -> T,
         {
-            self.map(f).map_with_span(|tok, span| (tok, span))
+            self.map(f).spanned()
         }
     }
 
@@ -157,6 +285,7 @@ fn lexer() -> impl Parser<char, Vec<Spanned<Token>>, Error = Simple<char>> {
             .delimited_by(just('['), just(']'))
             .collect()
             .with_span(Token::List)
+            .recover_with(nested_delimiters('[', ']', [], |span| (Token::Error, span)))
     })
     .labelled("list");
 
@@ -189,15 +318,20 @@ fn lexer() -> impl Parser<char, Vec<Spanned<Token>>, Error = Simple<char>> {
     .repeated()
     .delimited_by(just('('), just(')'))
     .collect()
-    .with_span(Token::Params);
+    .with_span(Token::Params)
+    .recover_with(nested_delimiters('(', ')', [('[', ']')], |span| {
+        (Token::Error, span)
+    }))
+    .labelled("params");
 
     // A block is `ident~(params)~{body}`
 
     // A block containing key-value pairs in the form `key~:~value`, separated by newlines and
     // optional comments.
     let map = choice((just("topic"), just("env")))
-        .map(ToOwned::to_owned)
-        .with_span(Token::Ident)
+        .from_str()
+        .unwrapped()
+        .with_span(Token::Name)
         .chain(space.clone().repeated())
         .chain(params.clone().repeated().at_most(1))
         .chain(space.clone().repeated())
@@ -206,6 +340,9 @@ fn lexer() -> impl Parser<char, Vec<Spanned<Token>>, Error = Simple<char>> {
                 .repeated()
                 .delimited_by(just('{'), just('}'))
                 .with_span(Token::Body)
+                .recover_with(nested_delimiters('{', '}', [('[', ']')], |span| {
+                    (Token::Error, span)
+                }))
                 .labelled("map"),
         )
         .collect()
@@ -214,8 +351,9 @@ fn lexer() -> impl Parser<char, Vec<Spanned<Token>>, Error = Simple<char>> {
     // A block of items, which are word-strings with an optional `params` block, separated by
     // newlines with optional comments.
     let items = choice((just("files"), just("packages")))
-        .map(ToOwned::to_owned)
-        .with_span(Token::Ident)
+        .from_str()
+        .unwrapped()
+        .with_span(Token::Name)
         .chain(space.clone().repeated())
         .chain(params.clone().repeated().at_most(1))
         .chain(space.clone().repeated())
@@ -229,6 +367,13 @@ fn lexer() -> impl Parser<char, Vec<Spanned<Token>>, Error = Simple<char>> {
             ))
             .repeated()
             .delimited_by(just('{'), just('}'))
+            .with_span(Token::Body)
+            .recover_with(nested_delimiters(
+                '{',
+                '}',
+                [('(', ')'), ('[', ']')],
+                |span| (Token::Error, span),
+            ))
             .labelled("items"),
         )
         .collect()
@@ -251,12 +396,19 @@ fn lexer() -> impl Parser<char, Vec<Spanned<Token>>, Error = Simple<char>> {
     .delimited_by(just('{'), just('}'))
     .map(|s| vec![s])
     .with_span(Token::Body)
+    .recover_with(nested_delimiters(
+        '{',
+        '}',
+        [('(', ')'), ('[', ']')],
+        |span| (Token::Error, span),
+    ))
     .labelled("content");
 
     // A block which capture all of its body's content a a string.
-    let routine = choice((just("deploy"), just("remove"), just("capture")))
-        .map(ToOwned::to_owned)
-        .with_span(Token::Ident)
+    let routine = text::ident()
+        .from_str()
+        .unwrapped()
+        .with_span(Token::Name)
         .chain(space.clone().repeated())
         .chain(params.clone().repeated().at_most(1))
         .chain(space.clone().repeated())
@@ -265,77 +417,22 @@ fn lexer() -> impl Parser<char, Vec<Spanned<Token>>, Error = Simple<char>> {
         .with_span(Token::Block);
 
     choice((space, line, comment, map, items, routine))
-        .recover_with(skip_then_retry_until([]))
         .repeated()
         .then_ignore(end())
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-enum Expression {
-    Variable(String),
-    String(String),
-    List(Vec<Expression>),
-}
-
-#[derive(Debug, Clone)]
-struct Param {
-    param: String,
-    val: Expression,
-}
-
-#[derive(Debug, Clone)]
-struct Package {
-    name: String,
-    params: Vec<Param>,
-}
-
-#[derive(Debug, Clone)]
-enum Block {
-    Topic {
-        params: Vec<Param>,
-        body: Vec<Param>,
-    },
-    Env {
-        params: Vec<Param>,
-        body: Vec<Param>,
-    },
-    Packages {
-        params: Vec<Param>,
-        packages: Vec<Package>,
-    },
-    Files {
-        params: Vec<Param>,
-        files: Vec<Package>,
-    },
-    Deploy {
-        params: Vec<Param>,
-        content: String,
-    },
-    Remove {
-        params: Vec<Param>,
-        content: String,
-    },
-    Capture {
-        params: Vec<Param>,
-        content: String,
-    },
-}
-
-use filter_ext::filter_tokens;
-mod filter_ext {
+use stream_ext::{map_tokens, token_filter, token_filter_enumerator};
+mod stream_ext {
     use chumsky::Stream;
 
     use super::{Span, SpanExt, Spanned, Token};
 
     /// A utility iterator which filters `Token`s. The lifetime `'a` is present so that the
     /// type checker is satisfied when we create a `Stream`.
-    pub(super) struct TokenFilter<'a>(
-        std::iter::Filter<std::vec::IntoIter<(Token, Span)>, fn(&(Token, Span)) -> bool>,
-        std::marker::PhantomData<&'a ()>,
-    );
+    pub(super) struct TokenFilter<'a, I: Iterator>(I, std::marker::PhantomData<&'a ()>);
 
-    impl<'a> Iterator for TokenFilter<'a> {
-        type Item = (Token, Span);
+    impl<'a, I: Iterator> Iterator for TokenFilter<'a, I> {
+        type Item = I::Item;
 
         fn next(&mut self) -> Option<Self::Item> {
             self.0.next()
@@ -343,38 +440,586 @@ mod filter_ext {
     }
 
     /// Filter out tokens with no impact on parsing, such as spaces, lines, and comments.
-    fn token_filter(t: &Spanned<Token>) -> bool {
-        match t.token() {
-            Token::Space(_) | Token::Comment(_) | Token::Line => false,
-            _ => true,
-        }
+    pub(super) fn token_filter(
+        tokens: Vec<Spanned<Token>>,
+    ) -> impl Iterator<Item = Spanned<Token>> {
+        tokens.into_iter().filter_map(|(token, span)| match token {
+            Token::Space(_) | Token::Comment(_) | Token::Line => None,
+            Token::DelimStr(s) => Some((Token::Str(s), span)),
+            _ => Some((token, span)),
+        })
     }
 
-    /// Convert a vector of tokens into a stream which discards superfluous tokens.
-    pub(super) fn filter_tokens<'a>(
+    /// Filter out tokens with no impact on parsing, such as spaces, lines, and comments, and
+    /// enumerate the result.
+    pub(super) fn token_filter_enumerator(
         tokens: Vec<Spanned<Token>>,
-    ) -> Stream<'a, Token, Span, TokenFilter<'a>> {
-        let end = tokens.last().unwrap().span().end;
+    ) -> impl Iterator<Item = Spanned<(usize, Token)>> {
+        token_filter(tokens)
+            .enumerate()
+            .map(|(i, (token, span))| ((i, token), span))
+    }
 
+    /// Convert a vector of tokens into a stream through an iterator.
+    pub(super) fn map_tokens<
+        'a,
+        F: FnOnce(Vec<Spanned<Token>>) -> I,
+        I: Iterator<Item = Spanned<T>>,
+        T,
+    >(
+        tokens: Vec<Spanned<Token>>,
+        span: Span,
+        func: F,
+    ) -> Stream<'a, T, Span, TokenFilter<'a, I>> {
+        let end = span.end;
         Stream::from_iter(
             end..end + 1,
-            TokenFilter(
-                tokens.into_iter().filter(token_filter),
-                std::marker::PhantomData,
-            ),
+            TokenFilter(func(tokens), std::marker::PhantomData),
         )
     }
 }
 
-fn parser() {
-    let source = std::fs::read_to_string("config_example").unwrap();
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+enum Expression {
+    Variable(Spanned<String>),
+    String(Spanned<String>),
+    List(Spanned<Vec<Expression>>),
+}
+
+#[derive(Debug, Clone)]
+struct Param {
+    param: Spanned<String>,
+    val: Expression,
+}
+
+type Params = Spanned<Vec<Spanned<Param>>>;
+
+#[derive(Debug, Clone)]
+struct Item {
+    item: Spanned<String>,
+    params: Params,
+}
+
+#[derive(Debug, Clone)]
+enum Block {
+    Map {
+        name: Name,
+        params: Params,
+        body: Vec<Spanned<Param>>,
+    },
+    Items {
+        name: Name,
+        params: Params,
+        items: Vec<Item>,
+    },
+    Routine {
+        name: Name,
+        params: Params,
+        content: String,
+    },
+}
+
+#[derive(Debug, Clone)]
+enum Error {
+    Unexpected(Span, Vec<Option<TokenKind>>, Option<TokenKind>),
+    Multiple(Vec<Error>),
+    ExpectedTopic(Span, Name),
+    MisplacedTopic(Span),
+    MisplacedEnv(Span),
+    UnexpectedBlock(Span, Name),
+    LexError(Simple<char>),
+}
+
+impl Error {
+    fn expected(expected: Vec<TokenKind>, found: TokenKind, span: Span) -> Self {
+        Self::Unexpected(
+            span,
+            expected.into_iter().map(Option::Some).collect(),
+            Some(found),
+        )
+    }
+
+    fn multiple(errors: Vec<Self>) -> Self {
+        Self::Multiple(errors)
+    }
+
+    fn span(&self) -> Option<Span> {
+        match self {
+            Error::Unexpected(span, _, _) => Some(span).cloned(),
+            Error::Multiple(_) => None,
+            Error::ExpectedTopic(span, _) => Some(span).cloned(),
+            Error::MisplacedTopic(span) => Some(span).cloned(),
+            Error::MisplacedEnv(span) => Some(span).cloned(),
+            Error::UnexpectedBlock(span, _) => Some(span).cloned(),
+            Error::LexError(err) => Some(err.span()),
+        }
+    }
+}
+
+impl chumsky::error::Error<Token> for Error {
+    type Span = Span;
+    type Label = ();
+
+    fn expected_input_found<Iter: IntoIterator<Item = Option<Token>>>(
+        span: Self::Span,
+        expected: Iter,
+        found: Option<Token>,
+    ) -> Self {
+        Self::expected(
+            expected
+                .into_iter()
+                .map(|t| t.as_ref().map(Token::kind).unwrap_or(TokenKind::Error))
+                .collect(),
+            found.as_ref().map(Token::kind).unwrap_or(TokenKind::Error),
+            span,
+        )
+    }
+
+    fn with_label(self, label: Self::Label) -> Self {
+        unimplemented!()
+    }
+
+    fn merge(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::Multiple(mut e1), Self::Multiple(e2)) => {
+                e1.extend_from_slice(&e2);
+                Self::Multiple(e1)
+            }
+            (Self::Unexpected(span, mut expected1, found), Self::Unexpected(_, expected2, _)) => {
+                expected1.extend_from_slice(&expected2);
+                Self::Unexpected(span, expected1, found)
+            }
+            (err, Self::Unexpected(_, _, _)) => err,
+            (Self::Unexpected(_, _, _), err) => err,
+            (err1, _) => err1,
+        }
+    }
+}
+
+impl chumsky::error::Error<(usize, Token)> for Error {
+    type Span = Span;
+    type Label = ();
+
+    fn expected_input_found<Iter: IntoIterator<Item = Option<(usize, Token)>>>(
+        span: Self::Span,
+        expected: Iter,
+        found: Option<(usize, Token)>,
+    ) -> Self {
+        Self::expected_input_found(
+            span,
+            expected.into_iter().map(|t| t.map(|(_, t)| t)),
+            found.map(|(_, t)| t),
+        )
+    }
+
+    fn with_label(self, label: Self::Label) -> Self {
+        chumsky::error::Error::<Token>::with_label(self, label)
+    }
+
+    fn merge(self, other: Self) -> Self {
+        chumsky::error::Error::<Token>::merge(self, other)
+    }
+}
+
+fn block_parser() -> impl Parser<Token, Block, Error = Error> {
+    // They said that I should flatten the input and I am starting to see why, but it WORKS!
+
+    // # Expr
+
+    let expr = recursive(|expr| {
+        let list_parser = expr.repeated().spanned();
+
+        filter_map(move |span, token| match token {
+            Token::Str(s) => Ok(Expression::String((s, span))),
+            Token::List(list) => {
+                let tokens = map_tokens(list, span, token_filter);
+                list_parser
+                    .parse(tokens)
+                    .map(Expression::List)
+                    .map_err(Error::multiple)
+            }
+            Token::Var(var) => Ok(Expression::Variable((var, span))),
+            token => Err(Error::expected(
+                vec![TokenKind::Str, TokenKind::List, TokenKind::Var],
+                token.kind(),
+                span,
+            )),
+        })
+    });
+
+    // # Param
+
+    let param = filter_map(|span, token| match token {
+        Token::Ident(ident) => Ok((ident, span)),
+        token => Err(Error::expected(vec![TokenKind::Ident], token.kind(), span)),
+    })
+    .then_ignore(just(Token::Ctrl(':')))
+    .then(expr)
+    .map(|(param, val)| Param { param, val })
+    .spanned();
+
+    let params_iner_parser = param
+        .clone()
+        .separated_by(just(Token::Ctrl(',')))
+        .allow_trailing();
+
+    let params_parser = filter_map(move |span, token| match token {
+        Token::Param(tokens) => {
+            let tokens = map_tokens(tokens, span, token_filter);
+            params_iner_parser.parse(tokens).map_err(Error::multiple)
+        }
+        token => Err(Error::expected(vec![TokenKind::Params], token.kind(), span)),
+    });
+
+    let params = filter_map(move |span, token| match token {
+        Token::Params(params) => {
+            let tokens = map_tokens(params, span, token_filter);
+            params_parser.parse(tokens).map_err(Error::multiple)
+        }
+        token => Err(Error::expected(vec![TokenKind::Params], token.kind(), span)),
+    })
+    .or_not()
+    .map(Option::unwrap_or_default)
+    .spanned();
+
+    // # Map
+
+    let map_body_parser = param.clone().repeated();
+
+    let map = filter_map(|span, token| match token {
+        Token::Name(name @ Name::Topic) | Token::Name(name @ Name::Env) => Ok(name),
+        token => Err(Error::expected(vec![TokenKind::Name], token.kind(), span)),
+    })
+    .then(params.clone())
+    .then(filter_map(move |span, token| match token {
+        Token::Body(body) => {
+            let tokens = map_tokens(body, span, token_filter);
+            map_body_parser.parse(tokens).map_err(Error::multiple)
+        }
+        token => Err(Error::expected(vec![TokenKind::Body], token.kind(), span)),
+    }))
+    .map(|((name, params), body)| Block::Map { name, params, body });
+
+    // # Items
+
+    let items_body_parser = filter_map(|span, token| match token {
+        Token::Str(s) => Ok((s, span)),
+        token => Err(Error::expected(vec![TokenKind::Str], token.kind(), span)),
+    })
+    .then(params.clone())
+    .map(|(item, params)| Item { item, params })
+    .repeated();
+
+    let items = filter_map(|span, token| match token {
+        Token::Name(name @ Name::Packages) | Token::Name(name @ Name::Files) => Ok(name),
+        token => Err(Error::expected(vec![TokenKind::Name], token.kind(), span)),
+    })
+    .then(params.clone())
+    .then(filter_map(move |span, token| match token {
+        Token::Body(body) => {
+            let tokens = map_tokens(body, span, token_filter);
+            items_body_parser.parse(tokens).map_err(Error::multiple)
+        }
+        token => Err(Error::expected(vec![TokenKind::Body], token.kind(), span)),
+    }))
+    .map(|((name, params), items)| Block::Items {
+        name,
+        params,
+        items,
+    });
+
+    // # Routines
+
+    let routine_content_parser = filter_map(|span, token| match token {
+        Token::Str(s) => Ok(s),
+        _ => Err(Error::expected(vec![TokenKind::Str], token.kind(), span)),
+    });
+
+    let routines = filter_map(|span, token| match token {
+        Token::Name(name @ Name::Deploy)
+        | Token::Name(name @ Name::Remove)
+        | Token::Name(name @ Name::Capture) => Ok(name),
+        token => Err(Error::expected(vec![TokenKind::Name], token.kind(), span)),
+    })
+    .then(params.clone())
+    .then(filter_map(move |span, token| match token {
+        Token::Body(body) => {
+            let tokens = map_tokens(body, span, token_filter);
+            routine_content_parser
+                .parse(tokens)
+                .map_err(Error::multiple)
+        }
+        token => Err(Error::expected(vec![TokenKind::Body], token.kind(), span)),
+    }))
+    .map(|((name, params), content)| Block::Routine {
+        name,
+        params,
+        content,
+    });
+
+    // # Other handling
+
+    let other = filter_map(|span, token| match token {
+        Token::Name(name @ Name::Other(_)) => Err(Error::UnexpectedBlock(span, name)),
+        token => Err(Error::expected(vec![TokenKind::Name], token.kind(), span)),
+    });
+
+    choice((map, items, routines, other))
+}
+
+fn parser() -> impl Parser<(usize, Token), Vec<Option<Block>>, Error = Error> {
+    let block_parser = block_parser();
+
+    any()
+        .validate(move |token, span, emit| match token {
+            (n, Token::Block(tokens)) => {
+                let mut stream = map_tokens(tokens, span, token_filter);
+                let first = stream.fetch_tokens().next().expect("Found empty block");
+
+                // Check if the order of the blocks is correct
+                match first {
+                    (Token::Name(name), name_span) => {
+                        // The first block should be a topic declaration
+                        if name != Name::Topic && n == 0 {
+                            emit(Error::ExpectedTopic(name_span.clone(), name.clone()));
+                        }
+
+                        // The topic block should be the first in file
+                        if name == Name::Topic && n > 0 {
+                            emit(Error::MisplacedTopic(name_span.clone()));
+                        }
+
+                        // The env block should follow the topic declaration
+                        if name == Name::Env && n > 1 {
+                            emit(Error::MisplacedEnv(name_span.clone()));
+                        }
+                    }
+                    (token, span) => {
+                        emit(Error::expected(vec![TokenKind::Name], token.kind(), span))
+                    }
+                }
+
+                match block_parser.parse(stream) {
+                    Ok(block) => Some(block),
+                    Err(errors) => {
+                        emit(Error::multiple(errors));
+                        None
+                    }
+                }
+            }
+            (_, token) => {
+                emit(Error::expected(vec![TokenKind::Block], token.kind(), span));
+                None
+            }
+        })
+        .repeated()
+        .then_ignore(end())
+}
+
+fn gen_report<'a>(err: Error, filename: &'a str) -> Report<(&'a str, Span)> {
+    let span = err.span().expect("Expected spanned error");
+    let report = Report::build(ReportKind::Error, filename, span.start);
+
+    fn token_or_end<T: ToString>(t: &Option<T>) -> String {
+        match t {
+            Some(t) => t.to_string(),
+            None => "end of file".to_string(),
+        }
+    }
+
+    fn some_or_end<'a, T: ToString>(t: &Option<T>, s: &'a str) -> &'a str {
+        match t {
+            Some(_) => s,
+            None => "end of file",
+        }
+    }
+
+    match err {
+        Error::Unexpected(span, expected, found) => report
+            .with_message(format!(
+                "Unexpected {}, expected {}",
+                some_or_end(&found, "token"),
+                match expected.len() {
+                    0 => "something else".to_string(),
+                    1 => token_or_end(&expected[0]),
+                    _ => format!(
+                        "one of {}",
+                        expected
+                            .iter()
+                            .map(|t| format!("'{}'", token_or_end(t)))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ),
+                }
+            ))
+            .with_label(
+                Label::new((filename, span))
+                    .with_message(format!(
+                        "Unexpected{} '{}'",
+                        some_or_end(&found, " token"),
+                        token_or_end(&found).fg(Color::Red)
+                    ))
+                    .with_color(Color::Red),
+            )
+            .finish(),
+        Error::ExpectedTopic(span, name) => report
+            .with_message("The file should start with the topic declaration")
+            .with_label(
+                Label::new((filename, span))
+                    .with_message(format!("Expected 'topic', found '{}'", name).fg(Color::Red))
+                    .with_color(Color::Red),
+            )
+            .finish(),
+        Error::MisplacedTopic(span) => report
+            .with_message("The topic declaration should be located at the start of the file")
+            .with_label(
+                Label::new((filename, span))
+                    .with_message("'topic' expected at the top of file".fg(Color::Red))
+                    .with_color(Color::Red),
+            )
+            .finish(),
+        Error::MisplacedEnv(span) => report
+            .with_message("The env block should be placed directly after the topic declaration")
+            .with_label(
+                Label::new((filename, span))
+                    .with_message("Unexpected 'env'".fg(Color::Red))
+                    .with_color(Color::Red),
+            )
+            .finish(),
+        Error::UnexpectedBlock(span, name) => report
+            .with_message(format!("Unknown block '{}'", name))
+            .with_label(
+                Label::new((filename, span))
+                    .with_message(
+                        format!(
+                            "Expected one of {}, found '{}'",
+                            [
+                                Name::Topic,
+                                Name::Env,
+                                Name::Packages,
+                                Name::Files,
+                                Name::Deploy,
+                                Name::Remove,
+                                Name::Capture,
+                            ]
+                            .map(|name| format!("'{}'", name))
+                            .join(","),
+                            name,
+                        )
+                        .fg(Color::Red),
+                    )
+                    .with_color(Color::Red),
+            )
+            .finish(),
+        Error::Multiple(_) => panic!("Expected flat error"),
+        Error::LexError(err) => match err.reason() {
+            chumsky::error::SimpleReason::Unclosed { span, delimiter } => report
+                .with_message(format!("Unclosed delimiter {}", delimiter.fg(Color::Red)))
+                .with_label(
+                    Label::new((filename, span.clone()))
+                        .with_message(format!("Unclosed delimiter {}", delimiter.fg(Color::Red)))
+                        .with_color(Color::Red),
+                )
+                .with_label(
+                    Label::new((filename, err.span()))
+                        .with_message(format!(
+                            "Must be closed before '{}'",
+                            err.found()
+                                .map(ToString::to_string)
+                                .unwrap_or("end of file".to_string())
+                                .fg(Color::Red)
+                        ))
+                        .with_color(Color::Red),
+                )
+                .finish(),
+            chumsky::error::SimpleReason::Unexpected => report
+                .with_message(format!(
+                    "Unexpected {}, expected {}",
+                    some_or_end(&err.found(), "token"),
+                    match err.expected().len() {
+                        0 => "something else".to_string(),
+                        1 => token_or_end(&err.expected().next().unwrap()),
+                        _ => format!(
+                            "one of {}",
+                            err.expected()
+                                .map(|t| format!("'{}'", token_or_end(t)))
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        ),
+                    }
+                ))
+                .with_label(
+                    Label::new((filename, err.span()))
+                        .with_message(format!(
+                            "Unexpected token {}",
+                            err.found()
+                                .map(ToString::to_string)
+                                .unwrap_or("end of file".to_string())
+                                .fg(Color::Red)
+                        ))
+                        .with_color(Color::Red),
+                )
+                .finish(),
+            chumsky::error::SimpleReason::Custom(msg) => report
+                .with_message(msg)
+                .with_label(
+                    Label::new((filename, err.span()))
+                        .with_message(format!("{}", msg.fg(Color::Red)))
+                        .with_color(Color::Red),
+                )
+                .finish(),
+        },
+    }
+}
+
+fn parse(source: &str, filename: &Path) -> color_eyre::Result<()> {
     let res = lexer().parse_recovery(source);
-    let (tokens, errors) = match res {
+    let (tokens, lex_errors) = match res {
         (Some(tokens), errors) => (tokens, errors),
-        (None, _errors) => todo!(),
+        (None, errors) => (vec![], errors),
     };
 
-    let tokens = filter_tokens(tokens);
+    let span = match tokens.len() {
+        0 => 0..0,
+        _ => {
+            tokens.first().expect("Expected tokens").span().start
+                ..tokens.last().expect("Expected tokens").span().end
+        }
+    };
+    let tokens = map_tokens(tokens, span, token_filter_enumerator);
+    let parser = parser();
+    let (blocks, parse_errors) = parser.parse_recovery(tokens);
+
+    fn flatten(err: Error, vec: &mut Vec<Error>) {
+        match err {
+            Error::Multiple(errors) => {
+                for err in errors {
+                    flatten(err, vec)
+                }
+            }
+            err => vec.push(err),
+        }
+    }
+
+    let mut errors = Vec::new();
+    for err in parse_errors {
+        flatten(err, &mut errors);
+    }
+
+    errors.extend(lex_errors.into_iter().map(|err| Error::LexError(err)));
+
+    // Sort the errors based on the start of their spans
+    errors.sort_unstable_by_key(|err| err.span().expect("Expected spanned error").start);
+    let filename = filename.display().to_string();
+    let filename = filename.as_str();
+    let mut source = (filename, Source::from(&source));
+
+    for err in errors {
+        let report = gen_report(err, filename);
+        report.eprint(&mut source)?;
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]
@@ -384,12 +1029,14 @@ mod tests {
     #[test]
     fn lexer() {
         let source = std::fs::read_to_string("config_example").unwrap();
-        let ast = super::lexer().parse(source);
-        println!("{:#?}", ast);
+        let tokens = super::lexer().parse(source);
+        println!("{:#?}", tokens);
     }
 
     #[test]
     fn parser() {
-        super::parser()
+        let path = std::path::PathBuf::from("config_example");
+        let source = std::fs::read_to_string(&path).unwrap();
+        super::parse(&source, &path).unwrap();
     }
 }

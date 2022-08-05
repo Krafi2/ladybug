@@ -16,6 +16,7 @@ figment = {version = "0.10.6", features = ["toml"]}
 tracing = "0.1.35"
 tracing-subscriber = "0.3.15"
 chumsky = "0.8.0"
+ariadne = "0.1.5"
 
 [dev-dependencies]
 tempfile = "3.3.0"
