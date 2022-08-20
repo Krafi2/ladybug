@@ -1,6 +1,5 @@
 #[macro_use]
 pub mod structures;
-mod parser;
 mod provider;
 
 pub use provider::Transaction;

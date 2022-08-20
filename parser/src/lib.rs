@@ -1,6 +1,3 @@
-#![allow(dead_code)]
-
-use super::{Span, Spanned};
 use ariadne::{Color, Fmt, Label, Report, ReportKind};
 use chumsky::{
     prelude::*,
@@ -8,8 +5,11 @@ use chumsky::{
 };
 use std::str::FromStr;
 
+type Span = std::ops::Range<usize>;
+type Spanned<T> = (T, Span);
+
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub(super) enum Name {
+pub enum Name {
     Topic,
     Env,
     Packages,
@@ -169,7 +169,7 @@ mod spanner {
     };
 
     /// A utility module for binding tokens with their spans.
-    pub trait Spanner<I: Clone, O>: Parser<I, O>
+    pub(super) trait Spanner<I: Clone, O>: Parser<I, O>
     where
         Self: Sized,
     {
@@ -202,7 +202,7 @@ mod spanner {
 
     impl<P, I: Clone, O> Spanner<I, O> for P where P: Parser<I, O> {}
 
-    pub trait SpanExt<T, S> {
+    pub(super) trait SpanExt<T, S> {
         fn token(&self) -> &T;
         fn span(&self) -> &S;
     }
@@ -441,7 +441,7 @@ mod stream_ext {
 
     /// A utility iterator which filters `Token`s. The lifetime `'a` is present so that the
     /// type checker is satisfied when we create a `Stream`.
-    pub(super) struct TokenFilter<'a, I: Iterator>(I, std::marker::PhantomData<&'a ()>);
+    pub struct TokenFilter<'a, I: Iterator>(I, std::marker::PhantomData<&'a ()>);
 
     impl<'a, I: Iterator> Iterator for TokenFilter<'a, I> {
         type Item = I::Item;
@@ -492,7 +492,7 @@ mod stream_ext {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub(super) enum Expr {
+pub enum Expr {
     Variable(Spanned<String>),
     String(Spanned<String>),
     Bool(Spanned<bool>),
@@ -500,7 +500,7 @@ pub(super) enum Expr {
 }
 
 #[derive(Debug, Clone)]
-pub(super) struct Param {
+pub struct Param {
     pub name: Spanned<String>,
     pub val: Expr,
 }
@@ -508,13 +508,13 @@ pub(super) struct Param {
 type Params = Spanned<Vec<Spanned<Param>>>;
 
 #[derive(Debug, Clone)]
-pub(super) struct Item {
+pub struct Item {
     pub name: Spanned<String>,
     pub args: Params,
 }
 
 #[derive(Debug, Clone)]
-pub(super) enum Block {
+pub enum Block {
     Map {
         name: Name,
         params: Params,
@@ -588,7 +588,7 @@ impl chumsky::error::Error<Token> for ErrorKind {
         )
     }
 
-    fn with_label(self, label: Self::Label) -> Self {
+    fn with_label(self, _label: Self::Label) -> Self {
         unimplemented!()
     }
 
@@ -890,10 +890,10 @@ fn parser() -> impl Parser<(usize, Token), Vec<Option<Block>>, Error = ErrorKind
         .then_ignore(end())
 }
 
-pub(super) struct Error(ErrorKind);
+pub struct Error(ErrorKind);
 
 impl Error {
-    pub(super) fn gen_report<'a>(self, filename: &'a str) -> Report<(&'a str, Span)> {
+    pub fn gen_report<'a>(self, filename: &'a str) -> Report<(&'a str, Span)> {
         let span = self.0.span().expect("Expected spanned error");
         let report = Report::build(ReportKind::Error, filename, span.start);
 
@@ -1053,7 +1053,7 @@ impl Error {
     }
 }
 
-pub(super) fn parse(source: &str) -> (Vec<Block>, Vec<Error>) {
+pub fn parse(source: &str) -> (Vec<Block>, Vec<Error>) {
     let res = lexer().parse_recovery(source);
     let (tokens, lex_errors) = match res {
         (Some(tokens), errors) => (tokens, errors),
