@@ -1,31 +1,31 @@
-mod add;
 mod deploy;
-mod topic;
 
-use crate::config::Context;
+use std::path::PathBuf;
+
+use crate::context::Context;
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
 #[clap(author = "Krafi", version = "0.1.0", about = "A cute dotfile manager", long_about = None)]
 pub(super) struct Opts {
+    #[clap(action)]
+    pub no_root: bool,
+    #[clap(value_parser)]
+    pub config: Option<PathBuf>,
     #[clap(subcommand)]
-    command: SubCommand,
+    pub command: SubCommand,
 }
 
 #[derive(Subcommand)]
-enum SubCommand {
-    Topic(topic::Topic),
-    Add(add::Add),
+pub enum SubCommand {
     Deploy(deploy::Deploy),
 }
 
 type CmdResult = color_eyre::Result<()>;
 
-pub(super) fn run(config: &Context) -> CmdResult {
+pub(super) fn run(context: &Context) -> CmdResult {
     let opts = Opts::parse();
     match opts.command {
-        SubCommand::Topic(topic) => topic.run(),
-        SubCommand::Add(add) => add.run(),
-        SubCommand::Deploy(deploy) => deploy.run(config),
+        SubCommand::Deploy(deploy) => deploy.run(context),
     }
 }

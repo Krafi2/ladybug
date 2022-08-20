@@ -9,6 +9,10 @@ impl Shell {
     pub fn new(cmd: String, args: Vec<String>) -> Self {
         Self { cmd, args }
     }
+
+    pub fn from_vec(cmd: Vec<String>) -> Self {
+        todo!()
+    }
 }
 
 impl<'de> Deserialize<'de> for Shell {

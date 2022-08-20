@@ -1,34 +1,19 @@
-mod parser;
+mod interpreter;
 
 use crate::{rel_path::RelPath, shell::Shell};
-use std::{collections::HashMap, path::PathBuf};
+use std::path::PathBuf;
 
 pub struct Topic {
     name: String,
     desc: String,
-    env: HashMap<String, String>,
-    packages: Vec<Packages>,
-    files: Vec<Files>,
-    deploy: Routine,
-    remove: Routine,
-    capture: Routine,
+    target: RelPath,
+    shell: Option<Shell>,
     children: Vec<tree::TopicId>,
-}
-
-struct Package {
-    name: String,
-    version: String,
-}
-
-trait Provider {
-    fn is_installed(&self, package: &Package) -> color_eyre::Result<bool>;
-    fn install(&self, package: &Package) -> color_eyre::Result<()>;
-    fn remove(&self, package: &Package) -> color_eyre::Result<()>;
-}
-
-struct Packages {
-    provider: Box<dyn Provider>,
-    packages: Vec<Package>,
+    env: interpreter::Env,
+    transactions: Vec<interpreter::Transaction>,
+    deploy: Option<Routine>,
+    remove: Option<Routine>,
+    capture: Option<Routine>,
 }
 
 enum DeployMethod {
@@ -52,7 +37,7 @@ struct Files {
 }
 
 struct Routine {
-    shell: Shell,
+    shell: Option<Shell>,
     stdin: bool,
     stdout: bool,
     code: String,
@@ -66,5 +51,13 @@ mod tree {
 
     pub struct TopicTree {
         topics: Vec<Topic>,
+    }
+}
+
+struct EvalContext {}
+
+impl EvalContext {
+    fn register_topic(&mut self, name: String) -> TopicId {
+        todo!()
     }
 }

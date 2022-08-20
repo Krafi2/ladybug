@@ -4,6 +4,7 @@ topic {
     desc: deploy My App
     target: ~
     shell: [bash -c %c]
+    children: [my_app your_app]
 }
 
 env {
