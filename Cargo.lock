@@ -403,13 +403,13 @@ name = "ladybug"
 version = "0.1.0"
 dependencies = [
  "ariadne",
- "chumsky",
  "clap",
  "color-eyre",
  "directories-next",
  "figment",
  "globwalk",
  "nix",
+ "parser",
  "serde",
  "tempfile",
  "thiserror",
@@ -491,6 +491,14 @@ name = "owo-colors"
 version = "3.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "decf7381921fea4dcb2549c5667eda59b3ec297ab7e2b5fc33eac69d2e7da87b"
+
+[[package]]
+name = "parser"
+version = "0.1.0"
+dependencies = [
+ "ariadne",
+ "chumsky",
+]
 
 [[package]]
 name = "pin-project-lite"
