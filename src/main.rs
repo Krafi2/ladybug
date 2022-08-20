@@ -1,9 +1,13 @@
 mod commands;
-mod config;
+mod context;
 mod rel_path;
 mod serde;
 mod shell;
 mod topic;
+
+use clap::Parser;
+use color_eyre::eyre::WrapErr;
+use std::os::unix::process::CommandExt;
 
 fn main() {
     match run() {
@@ -16,8 +20,22 @@ fn main() {
 }
 
 fn run() -> color_eyre::Result<()> {
+    let opts = commands::Opts::try_parse()?;
+
+    // Try to elevate the process to root privileges using polkit if it's running as a user and the
+    // `no-root` option isn't set.
+    if !context::detect_root() && !opts.no_root {
+        let err = std::process::Command::new("pkexec")
+            .args(std::env::args_os())
+            .exec();
+
+        Err(err).wrap_err("Failed to elevate to root privileges")?
+    }
+
     setup_log()?;
-    Ok(())
+
+    let context = context::Context::new(opts.config)?;
+    commands::run(&context)
 }
 
 fn setup_log() -> color_eyre::Result<()> {

@@ -1,18 +1,15 @@
 #![allow(dead_code)]
 
-use std::{collections::vec_deque, path::Path, str::FromStr};
-
-use ariadne::{Color, Fmt, Label, Report, ReportKind, Source};
+use super::{Span, Spanned};
+use ariadne::{Color, Fmt, Label, Report, ReportKind};
 use chumsky::{
     prelude::*,
-    text::{ident, Character},
+    text::{ident, keyword, Character},
 };
-
-type Span = std::ops::Range<usize>;
-type Spanned<T> = (T, Span);
+use std::str::FromStr;
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-enum Name {
+pub(super) enum Name {
     Topic,
     Env,
     Packages,
@@ -63,6 +60,8 @@ enum Token {
     Ctrl(char),
     /// String
     Str(String),
+    /// Bool
+    Bool(bool),
     /// String delimited by `"`
     DelimStr(String),
     /// A variable
@@ -100,6 +99,7 @@ impl Token {
 enum TokenKind {
     Ctrl(char),
     Str,
+    Bool,
     Var,
     List,
     Ident,
@@ -119,6 +119,7 @@ impl From<&Token> for TokenKind {
         match token {
             Token::Ctrl(char) => TokenKind::Ctrl(*char),
             Token::Str(_) => TokenKind::Str,
+            Token::Bool(_) => TokenKind::Bool,
             Token::DelimStr(_) => TokenKind::Str,
             Token::Var(_) => TokenKind::Var,
             Token::List(_) => TokenKind::List,
@@ -141,6 +142,7 @@ impl std::fmt::Display for TokenKind {
         match self {
             TokenKind::Ctrl(char) => write!(f, "'{}'", char),
             TokenKind::Str => f.write_str("String"),
+            TokenKind::Bool => f.write_str("Boolean"),
             TokenKind::Var => f.write_str("Variable"),
             TokenKind::List => f.write_str("List"),
             TokenKind::Ident => f.write_str("Identifier"),
@@ -278,6 +280,11 @@ fn lexer() -> impl Parser<char, Vec<Spanned<Token>>, Error = Simple<char>> {
         )
         .labelled("word_string");
 
+    let bool = keyword("yes")
+        .to(Token::Bool(true))
+        .or(keyword("no").to(Token::Bool(false)))
+        .spanned();
+
     // Lists are delimited by `[]` and contain whitespace-separated expressions.
     let list = recursive(|list| {
         choice((list, variable.clone(), word_string.clone(), space.clone()))
@@ -290,8 +297,13 @@ fn lexer() -> impl Parser<char, Vec<Spanned<Token>>, Error = Simple<char>> {
     .labelled("list");
 
     // An expression can be either a string, a list, or a variable.
-    let expression =
-        choice((variable.clone(), list.clone(), spaced_string.clone())).labelled("expression");
+    let expression = choice((
+        variable.clone(),
+        list.clone(),
+        bool.clone(),
+        spaced_string.clone(),
+    ))
+    .labelled("expression");
 
     // A C-like identifier
     let ident = ident().with_span(Token::Ident);
@@ -425,7 +437,7 @@ use stream_ext::{map_tokens, token_filter, token_filter_enumerator};
 mod stream_ext {
     use chumsky::Stream;
 
-    use super::{Span, SpanExt, Spanned, Token};
+    use super::{Span, Spanned, Token};
 
     /// A utility iterator which filters `Token`s. The lifetime `'a` is present so that the
     /// type checker is satisfied when we create a `Stream`.
@@ -480,37 +492,38 @@ mod stream_ext {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-enum Expression {
+pub(super) enum Expr {
     Variable(Spanned<String>),
     String(Spanned<String>),
-    List(Spanned<Vec<Expression>>),
+    Bool(Spanned<bool>),
+    List(Spanned<Vec<Expr>>),
 }
 
 #[derive(Debug, Clone)]
-struct Param {
-    param: Spanned<String>,
-    val: Expression,
+pub(super) struct Param {
+    pub name: Spanned<String>,
+    pub val: Expr,
 }
 
 type Params = Spanned<Vec<Spanned<Param>>>;
 
 #[derive(Debug, Clone)]
-struct Item {
-    item: Spanned<String>,
-    params: Params,
+pub(super) struct Item {
+    pub name: Spanned<String>,
+    pub args: Params,
 }
 
 #[derive(Debug, Clone)]
-enum Block {
+pub(super) enum Block {
     Map {
         name: Name,
         params: Params,
-        body: Vec<Spanned<Param>>,
+        body: Params,
     },
     Items {
         name: Name,
         params: Params,
-        items: Vec<Item>,
+        items: Spanned<Vec<Item>>,
     },
     Routine {
         name: Name,
@@ -520,9 +533,9 @@ enum Block {
 }
 
 #[derive(Debug, Clone)]
-enum Error {
+enum ErrorKind {
     Unexpected(Span, Vec<Option<TokenKind>>, Option<TokenKind>),
-    Multiple(Vec<Error>),
+    Multiple(Vec<ErrorKind>),
     ExpectedTopic(Span, Name),
     MisplacedTopic(Span),
     MisplacedEnv(Span),
@@ -530,7 +543,7 @@ enum Error {
     LexError(Simple<char>),
 }
 
-impl Error {
+impl ErrorKind {
     fn expected(expected: Vec<TokenKind>, found: TokenKind, span: Span) -> Self {
         Self::Unexpected(
             span,
@@ -545,18 +558,18 @@ impl Error {
 
     fn span(&self) -> Option<Span> {
         match self {
-            Error::Unexpected(span, _, _) => Some(span).cloned(),
-            Error::Multiple(_) => None,
-            Error::ExpectedTopic(span, _) => Some(span).cloned(),
-            Error::MisplacedTopic(span) => Some(span).cloned(),
-            Error::MisplacedEnv(span) => Some(span).cloned(),
-            Error::UnexpectedBlock(span, _) => Some(span).cloned(),
-            Error::LexError(err) => Some(err.span()),
+            ErrorKind::Unexpected(span, _, _) => Some(span).cloned(),
+            ErrorKind::Multiple(_) => None,
+            ErrorKind::ExpectedTopic(span, _) => Some(span).cloned(),
+            ErrorKind::MisplacedTopic(span) => Some(span).cloned(),
+            ErrorKind::MisplacedEnv(span) => Some(span).cloned(),
+            ErrorKind::UnexpectedBlock(span, _) => Some(span).cloned(),
+            ErrorKind::LexError(err) => Some(err.span()),
         }
     }
 }
 
-impl chumsky::error::Error<Token> for Error {
+impl chumsky::error::Error<Token> for ErrorKind {
     type Span = Span;
     type Label = ();
 
@@ -596,7 +609,7 @@ impl chumsky::error::Error<Token> for Error {
     }
 }
 
-impl chumsky::error::Error<(usize, Token)> for Error {
+impl chumsky::error::Error<(usize, Token)> for ErrorKind {
     type Span = Span;
     type Label = ();
 
@@ -621,7 +634,7 @@ impl chumsky::error::Error<(usize, Token)> for Error {
     }
 }
 
-fn block_parser() -> impl Parser<Token, Block, Error = Error> {
+fn block_parser() -> impl Parser<Token, Block, Error = ErrorKind> {
     // They said that I should flatten the input and I am starting to see why, but it WORKS!
 
     // # Expr
@@ -630,16 +643,17 @@ fn block_parser() -> impl Parser<Token, Block, Error = Error> {
         let list_parser = expr.repeated().spanned();
 
         filter_map(move |span, token| match token {
-            Token::Str(s) => Ok(Expression::String((s, span))),
+            Token::Str(s) => Ok(Expr::String((s, span))),
+            Token::Bool(b) => Ok(Expr::Bool((b, span))),
             Token::List(list) => {
                 let tokens = map_tokens(list, span, token_filter);
                 list_parser
                     .parse(tokens)
-                    .map(Expression::List)
-                    .map_err(Error::multiple)
+                    .map(Expr::List)
+                    .map_err(ErrorKind::multiple)
             }
-            Token::Var(var) => Ok(Expression::Variable((var, span))),
-            token => Err(Error::expected(
+            Token::Var(var) => Ok(Expr::Variable((var, span))),
+            token => Err(ErrorKind::expected(
                 vec![TokenKind::Str, TokenKind::List, TokenKind::Var],
                 token.kind(),
                 span,
@@ -651,11 +665,15 @@ fn block_parser() -> impl Parser<Token, Block, Error = Error> {
 
     let param = filter_map(|span, token| match token {
         Token::Ident(ident) => Ok((ident, span)),
-        token => Err(Error::expected(vec![TokenKind::Ident], token.kind(), span)),
+        token => Err(ErrorKind::expected(
+            vec![TokenKind::Ident],
+            token.kind(),
+            span,
+        )),
     })
     .then_ignore(just(Token::Ctrl(':')))
     .then(expr)
-    .map(|(param, val)| Param { param, val })
+    .map(|(param, val)| Param { name: param, val })
     .spanned();
 
     let params_iner_parser = param
@@ -666,17 +684,27 @@ fn block_parser() -> impl Parser<Token, Block, Error = Error> {
     let params_parser = filter_map(move |span, token| match token {
         Token::Param(tokens) => {
             let tokens = map_tokens(tokens, span, token_filter);
-            params_iner_parser.parse(tokens).map_err(Error::multiple)
+            params_iner_parser
+                .parse(tokens)
+                .map_err(ErrorKind::multiple)
         }
-        token => Err(Error::expected(vec![TokenKind::Params], token.kind(), span)),
+        token => Err(ErrorKind::expected(
+            vec![TokenKind::Params],
+            token.kind(),
+            span,
+        )),
     });
 
     let params = filter_map(move |span, token| match token {
         Token::Params(params) => {
             let tokens = map_tokens(params, span, token_filter);
-            params_parser.parse(tokens).map_err(Error::multiple)
+            params_parser.parse(tokens).map_err(ErrorKind::multiple)
         }
-        token => Err(Error::expected(vec![TokenKind::Params], token.kind(), span)),
+        token => Err(ErrorKind::expected(
+            vec![TokenKind::Params],
+            token.kind(),
+            span,
+        )),
     })
     .or_not()
     .map(Option::unwrap_or_default)
@@ -684,19 +712,27 @@ fn block_parser() -> impl Parser<Token, Block, Error = Error> {
 
     // # Map
 
-    let map_body_parser = param.clone().repeated();
+    let map_body_parser = param.clone().repeated().spanned();
 
     let map = filter_map(|span, token| match token {
         Token::Name(name @ Name::Topic) | Token::Name(name @ Name::Env) => Ok(name),
-        token => Err(Error::expected(vec![TokenKind::Name], token.kind(), span)),
+        token => Err(ErrorKind::expected(
+            vec![TokenKind::Name],
+            token.kind(),
+            span,
+        )),
     })
     .then(params.clone())
     .then(filter_map(move |span, token| match token {
         Token::Body(body) => {
             let tokens = map_tokens(body, span, token_filter);
-            map_body_parser.parse(tokens).map_err(Error::multiple)
+            map_body_parser.parse(tokens).map_err(ErrorKind::multiple)
         }
-        token => Err(Error::expected(vec![TokenKind::Body], token.kind(), span)),
+        token => Err(ErrorKind::expected(
+            vec![TokenKind::Body],
+            token.kind(),
+            span,
+        )),
     }))
     .map(|((name, params), body)| Block::Map { name, params, body });
 
@@ -704,23 +740,39 @@ fn block_parser() -> impl Parser<Token, Block, Error = Error> {
 
     let items_body_parser = filter_map(|span, token| match token {
         Token::Str(s) => Ok((s, span)),
-        token => Err(Error::expected(vec![TokenKind::Str], token.kind(), span)),
+        token => Err(ErrorKind::expected(
+            vec![TokenKind::Str],
+            token.kind(),
+            span,
+        )),
     })
     .then(params.clone())
-    .map(|(item, params)| Item { item, params })
-    .repeated();
+    .map(|(item, params)| Item {
+        name: item,
+        args: params,
+    })
+    .repeated()
+    .spanned();
 
     let items = filter_map(|span, token| match token {
         Token::Name(name @ Name::Packages) | Token::Name(name @ Name::Files) => Ok(name),
-        token => Err(Error::expected(vec![TokenKind::Name], token.kind(), span)),
+        token => Err(ErrorKind::expected(
+            vec![TokenKind::Name],
+            token.kind(),
+            span,
+        )),
     })
     .then(params.clone())
     .then(filter_map(move |span, token| match token {
         Token::Body(body) => {
             let tokens = map_tokens(body, span, token_filter);
-            items_body_parser.parse(tokens).map_err(Error::multiple)
+            items_body_parser.parse(tokens).map_err(ErrorKind::multiple)
         }
-        token => Err(Error::expected(vec![TokenKind::Body], token.kind(), span)),
+        token => Err(ErrorKind::expected(
+            vec![TokenKind::Body],
+            token.kind(),
+            span,
+        )),
     }))
     .map(|((name, params), items)| Block::Items {
         name,
@@ -732,14 +784,22 @@ fn block_parser() -> impl Parser<Token, Block, Error = Error> {
 
     let routine_content_parser = filter_map(|span, token| match token {
         Token::Str(s) => Ok(s),
-        _ => Err(Error::expected(vec![TokenKind::Str], token.kind(), span)),
+        _ => Err(ErrorKind::expected(
+            vec![TokenKind::Str],
+            token.kind(),
+            span,
+        )),
     });
 
     let routines = filter_map(|span, token| match token {
         Token::Name(name @ Name::Deploy)
         | Token::Name(name @ Name::Remove)
         | Token::Name(name @ Name::Capture) => Ok(name),
-        token => Err(Error::expected(vec![TokenKind::Name], token.kind(), span)),
+        token => Err(ErrorKind::expected(
+            vec![TokenKind::Name],
+            token.kind(),
+            span,
+        )),
     })
     .then(params.clone())
     .then(filter_map(move |span, token| match token {
@@ -747,9 +807,13 @@ fn block_parser() -> impl Parser<Token, Block, Error = Error> {
             let tokens = map_tokens(body, span, token_filter);
             routine_content_parser
                 .parse(tokens)
-                .map_err(Error::multiple)
+                .map_err(ErrorKind::multiple)
         }
-        token => Err(Error::expected(vec![TokenKind::Body], token.kind(), span)),
+        token => Err(ErrorKind::expected(
+            vec![TokenKind::Body],
+            token.kind(),
+            span,
+        )),
     }))
     .map(|((name, params), content)| Block::Routine {
         name,
@@ -760,14 +824,18 @@ fn block_parser() -> impl Parser<Token, Block, Error = Error> {
     // # Other handling
 
     let other = filter_map(|span, token| match token {
-        Token::Name(name @ Name::Other(_)) => Err(Error::UnexpectedBlock(span, name)),
-        token => Err(Error::expected(vec![TokenKind::Name], token.kind(), span)),
+        Token::Name(name @ Name::Other(_)) => Err(ErrorKind::UnexpectedBlock(span, name)),
+        token => Err(ErrorKind::expected(
+            vec![TokenKind::Name],
+            token.kind(),
+            span,
+        )),
     });
 
     choice((map, items, routines, other))
 }
 
-fn parser() -> impl Parser<(usize, Token), Vec<Option<Block>>, Error = Error> {
+fn parser() -> impl Parser<(usize, Token), Vec<Option<Block>>, Error = ErrorKind> {
     let block_parser = block_parser();
 
     any()
@@ -781,34 +849,40 @@ fn parser() -> impl Parser<(usize, Token), Vec<Option<Block>>, Error = Error> {
                     (Token::Name(name), name_span) => {
                         // The first block should be a topic declaration
                         if name != Name::Topic && n == 0 {
-                            emit(Error::ExpectedTopic(name_span.clone(), name.clone()));
+                            emit(ErrorKind::ExpectedTopic(name_span.clone(), name.clone()));
                         }
 
                         // The topic block should be the first in file
                         if name == Name::Topic && n > 0 {
-                            emit(Error::MisplacedTopic(name_span.clone()));
+                            emit(ErrorKind::MisplacedTopic(name_span.clone()));
                         }
 
                         // The env block should follow the topic declaration
                         if name == Name::Env && n > 1 {
-                            emit(Error::MisplacedEnv(name_span.clone()));
+                            emit(ErrorKind::MisplacedEnv(name_span.clone()));
                         }
                     }
-                    (token, span) => {
-                        emit(Error::expected(vec![TokenKind::Name], token.kind(), span))
-                    }
+                    (token, span) => emit(ErrorKind::expected(
+                        vec![TokenKind::Name],
+                        token.kind(),
+                        span,
+                    )),
                 }
 
                 match block_parser.parse(stream) {
                     Ok(block) => Some(block),
                     Err(errors) => {
-                        emit(Error::multiple(errors));
+                        emit(ErrorKind::multiple(errors));
                         None
                     }
                 }
             }
             (_, token) => {
-                emit(Error::expected(vec![TokenKind::Block], token.kind(), span));
+                emit(ErrorKind::expected(
+                    vec![TokenKind::Block],
+                    token.kind(),
+                    span,
+                ));
                 None
             }
         })
@@ -816,132 +890,39 @@ fn parser() -> impl Parser<(usize, Token), Vec<Option<Block>>, Error = Error> {
         .then_ignore(end())
 }
 
-fn gen_report<'a>(err: Error, filename: &'a str) -> Report<(&'a str, Span)> {
-    let span = err.span().expect("Expected spanned error");
-    let report = Report::build(ReportKind::Error, filename, span.start);
+pub(super) struct Error(ErrorKind);
 
-    fn token_or_end<T: ToString>(t: &Option<T>) -> String {
-        match t {
-            Some(t) => t.to_string(),
-            None => "end of file".to_string(),
+impl Error {
+    pub(super) fn gen_report<'a>(self, filename: &'a str) -> Report<(&'a str, Span)> {
+        let span = self.0.span().expect("Expected spanned error");
+        let report = Report::build(ReportKind::Error, filename, span.start);
+
+        fn token_or_end<T: ToString>(t: &Option<T>) -> String {
+            match t {
+                Some(t) => t.to_string(),
+                None => "end of file".to_string(),
+            }
         }
-    }
 
-    fn some_or_end<'a, T: ToString>(t: &Option<T>, s: &'a str) -> &'a str {
-        match t {
-            Some(_) => s,
-            None => "end of file",
+        fn some_or_end<'a, T: ToString>(t: &Option<T>, s: &'a str) -> &'a str {
+            match t {
+                Some(_) => s,
+                None => "end of file",
+            }
         }
-    }
 
-    match err {
-        Error::Unexpected(span, expected, found) => report
-            .with_message(format!(
-                "Unexpected {}, expected {}",
-                some_or_end(&found, "token"),
-                match expected.len() {
-                    0 => "something else".to_string(),
-                    1 => token_or_end(&expected[0]),
-                    _ => format!(
-                        "one of {}",
-                        expected
-                            .iter()
-                            .map(|t| format!("'{}'", token_or_end(t)))
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    ),
-                }
-            ))
-            .with_label(
-                Label::new((filename, span))
-                    .with_message(format!(
-                        "Unexpected{} '{}'",
-                        some_or_end(&found, " token"),
-                        token_or_end(&found).fg(Color::Red)
-                    ))
-                    .with_color(Color::Red),
-            )
-            .finish(),
-        Error::ExpectedTopic(span, name) => report
-            .with_message("The file should start with the topic declaration")
-            .with_label(
-                Label::new((filename, span))
-                    .with_message(format!("Expected 'topic', found '{}'", name).fg(Color::Red))
-                    .with_color(Color::Red),
-            )
-            .finish(),
-        Error::MisplacedTopic(span) => report
-            .with_message("The topic declaration should be located at the start of the file")
-            .with_label(
-                Label::new((filename, span))
-                    .with_message("'topic' expected at the top of file".fg(Color::Red))
-                    .with_color(Color::Red),
-            )
-            .finish(),
-        Error::MisplacedEnv(span) => report
-            .with_message("The env block should be placed directly after the topic declaration")
-            .with_label(
-                Label::new((filename, span))
-                    .with_message("Unexpected 'env'".fg(Color::Red))
-                    .with_color(Color::Red),
-            )
-            .finish(),
-        Error::UnexpectedBlock(span, name) => report
-            .with_message(format!("Unknown block '{}'", name))
-            .with_label(
-                Label::new((filename, span))
-                    .with_message(
-                        format!(
-                            "Expected one of {}, found '{}'",
-                            [
-                                Name::Topic,
-                                Name::Env,
-                                Name::Packages,
-                                Name::Files,
-                                Name::Deploy,
-                                Name::Remove,
-                                Name::Capture,
-                            ]
-                            .map(|name| format!("'{}'", name))
-                            .join(","),
-                            name,
-                        )
-                        .fg(Color::Red),
-                    )
-                    .with_color(Color::Red),
-            )
-            .finish(),
-        Error::Multiple(_) => panic!("Expected flat error"),
-        Error::LexError(err) => match err.reason() {
-            chumsky::error::SimpleReason::Unclosed { span, delimiter } => report
-                .with_message(format!("Unclosed delimiter {}", delimiter.fg(Color::Red)))
-                .with_label(
-                    Label::new((filename, span.clone()))
-                        .with_message(format!("Unclosed delimiter {}", delimiter.fg(Color::Red)))
-                        .with_color(Color::Red),
-                )
-                .with_label(
-                    Label::new((filename, err.span()))
-                        .with_message(format!(
-                            "Must be closed before '{}'",
-                            err.found()
-                                .map(ToString::to_string)
-                                .unwrap_or("end of file".to_string())
-                                .fg(Color::Red)
-                        ))
-                        .with_color(Color::Red),
-                )
-                .finish(),
-            chumsky::error::SimpleReason::Unexpected => report
+        match self.0 {
+            ErrorKind::Unexpected(span, expected, found) => report
                 .with_message(format!(
                     "Unexpected {}, expected {}",
-                    some_or_end(&err.found(), "token"),
-                    match err.expected().len() {
+                    some_or_end(&found, "token"),
+                    match expected.len() {
                         0 => "something else".to_string(),
-                        1 => token_or_end(&err.expected().next().unwrap()),
+                        1 => token_or_end(&expected[0]),
                         _ => format!(
                             "one of {}",
-                            err.expected()
+                            expected
+                                .iter()
                                 .map(|t| format!("'{}'", token_or_end(t)))
                                 .collect::<Vec<_>>()
                                 .join(", ")
@@ -949,30 +930,130 @@ fn gen_report<'a>(err: Error, filename: &'a str) -> Report<(&'a str, Span)> {
                     }
                 ))
                 .with_label(
-                    Label::new((filename, err.span()))
+                    Label::new((filename, span))
                         .with_message(format!(
-                            "Unexpected token {}",
-                            err.found()
-                                .map(ToString::to_string)
-                                .unwrap_or("end of file".to_string())
-                                .fg(Color::Red)
+                            "Unexpected{} '{}'",
+                            some_or_end(&found, " token"),
+                            token_or_end(&found).fg(Color::Red)
                         ))
                         .with_color(Color::Red),
                 )
                 .finish(),
-            chumsky::error::SimpleReason::Custom(msg) => report
-                .with_message(msg)
+            ErrorKind::ExpectedTopic(span, name) => report
+                .with_message("The file should start with the topic declaration")
                 .with_label(
-                    Label::new((filename, err.span()))
-                        .with_message(format!("{}", msg.fg(Color::Red)))
+                    Label::new((filename, span))
+                        .with_message(format!("Expected 'topic', found '{}'", name).fg(Color::Red))
                         .with_color(Color::Red),
                 )
                 .finish(),
-        },
+            ErrorKind::MisplacedTopic(span) => report
+                .with_message("The topic declaration should be located at the start of the file")
+                .with_label(
+                    Label::new((filename, span))
+                        .with_message("'topic' expected at the top of file".fg(Color::Red))
+                        .with_color(Color::Red),
+                )
+                .finish(),
+            ErrorKind::MisplacedEnv(span) => report
+                .with_message("The env block should be placed directly after the topic declaration")
+                .with_label(
+                    Label::new((filename, span))
+                        .with_message("Unexpected 'env'".fg(Color::Red))
+                        .with_color(Color::Red),
+                )
+                .finish(),
+            ErrorKind::UnexpectedBlock(span, name) => report
+                .with_message(format!("Unknown block '{}'", name))
+                .with_label(
+                    Label::new((filename, span))
+                        .with_message(
+                            format!(
+                                "Expected one of {}, found '{}'",
+                                [
+                                    Name::Topic,
+                                    Name::Env,
+                                    Name::Packages,
+                                    Name::Files,
+                                    Name::Deploy,
+                                    Name::Remove,
+                                    Name::Capture,
+                                ]
+                                .map(|name| format!("'{}'", name))
+                                .join(","),
+                                name,
+                            )
+                            .fg(Color::Red),
+                        )
+                        .with_color(Color::Red),
+                )
+                .finish(),
+            ErrorKind::Multiple(_) => panic!("Expected flat error"),
+            ErrorKind::LexError(err) => match err.reason() {
+                chumsky::error::SimpleReason::Unclosed { span, delimiter } => report
+                    .with_message(format!("Unclosed delimiter {}", delimiter.fg(Color::Red)))
+                    .with_label(
+                        Label::new((filename, span.clone()))
+                            .with_message(format!(
+                                "Unclosed delimiter {}",
+                                delimiter.fg(Color::Red)
+                            ))
+                            .with_color(Color::Red),
+                    )
+                    .with_label(
+                        Label::new((filename, err.span()))
+                            .with_message(format!(
+                                "Must be closed before '{}'",
+                                err.found()
+                                    .map(ToString::to_string)
+                                    .unwrap_or("end of file".to_string())
+                                    .fg(Color::Red)
+                            ))
+                            .with_color(Color::Red),
+                    )
+                    .finish(),
+                chumsky::error::SimpleReason::Unexpected => report
+                    .with_message(format!(
+                        "Unexpected {}, expected {}",
+                        some_or_end(&err.found(), "token"),
+                        match err.expected().len() {
+                            0 => "something else".to_string(),
+                            1 => token_or_end(&err.expected().next().unwrap()),
+                            _ => format!(
+                                "one of {}",
+                                err.expected()
+                                    .map(|t| format!("'{}'", token_or_end(t)))
+                                    .collect::<Vec<_>>()
+                                    .join(", ")
+                            ),
+                        }
+                    ))
+                    .with_label(
+                        Label::new((filename, err.span()))
+                            .with_message(format!(
+                                "Unexpected token {}",
+                                err.found()
+                                    .map(ToString::to_string)
+                                    .unwrap_or("end of file".to_string())
+                                    .fg(Color::Red)
+                            ))
+                            .with_color(Color::Red),
+                    )
+                    .finish(),
+                chumsky::error::SimpleReason::Custom(msg) => report
+                    .with_message(msg)
+                    .with_label(
+                        Label::new((filename, err.span()))
+                            .with_message(format!("{}", msg.fg(Color::Red)))
+                            .with_color(Color::Red),
+                    )
+                    .finish(),
+            },
+        }
     }
 }
 
-fn parse(source: &str, filename: &Path) -> color_eyre::Result<()> {
+pub(super) fn parse(source: &str) -> (Vec<Block>, Vec<Error>) {
     let res = lexer().parse_recovery(source);
     let (tokens, lex_errors) = match res {
         (Some(tokens), errors) => (tokens, errors),
@@ -990,14 +1071,14 @@ fn parse(source: &str, filename: &Path) -> color_eyre::Result<()> {
     let parser = parser();
     let (blocks, parse_errors) = parser.parse_recovery(tokens);
 
-    fn flatten(err: Error, vec: &mut Vec<Error>) {
+    fn flatten(err: ErrorKind, vec: &mut Vec<Error>) {
         match err {
-            Error::Multiple(errors) => {
+            ErrorKind::Multiple(errors) => {
                 for err in errors {
                     flatten(err, vec)
                 }
             }
-            err => vec.push(err),
+            err => vec.push(Error(err)),
         }
     }
 
@@ -1006,20 +1087,19 @@ fn parse(source: &str, filename: &Path) -> color_eyre::Result<()> {
         flatten(err, &mut errors);
     }
 
-    errors.extend(lex_errors.into_iter().map(|err| Error::LexError(err)));
-
-    // Sort the errors based on the start of their spans
-    errors.sort_unstable_by_key(|err| err.span().expect("Expected spanned error").start);
-    let filename = filename.display().to_string();
-    let filename = filename.as_str();
-    let mut source = (filename, Source::from(&source));
-
-    for err in errors {
-        let report = gen_report(err, filename);
-        report.eprint(&mut source)?;
-    }
-
-    Ok(())
+    errors.extend(
+        lex_errors
+            .into_iter()
+            .map(|err| Error(ErrorKind::LexError(err))),
+    );
+    (
+        blocks
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|b| b)
+            .collect(),
+        errors,
+    )
 }
 
 #[cfg(test)]
@@ -1037,6 +1117,6 @@ mod tests {
     fn parser() {
         let path = std::path::PathBuf::from("config_example");
         let source = std::fs::read_to_string(&path).unwrap();
-        super::parse(&source, &path).unwrap();
+        super::parse(&source);
     }
 }
