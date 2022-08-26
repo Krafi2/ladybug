@@ -95,7 +95,7 @@ impl Token {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TokenKind {
     Ctrl(char),
     Str,
@@ -223,7 +223,7 @@ pub enum Expr {
     List(Spanned<Vec<Expr>>),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Param {
     pub name: Spanned<String>,
     pub val: Expr,
@@ -231,13 +231,13 @@ pub struct Param {
 
 type Params = Spanned<Vec<Spanned<Param>>>;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Item {
     pub name: Spanned<String>,
     pub args: Params,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Block {
     Map {
         name: Name,
@@ -265,6 +265,24 @@ enum ErrorKind {
     MisplacedEnv(Span),
     UnexpectedBlock(Span, Name),
     LexError(Simple<char>),
+}
+
+impl PartialEq for ErrorKind {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Unexpected(l0, l1, l2), Self::Unexpected(r0, r1, r2)) => {
+                l0 == r0 && l1 == r1 && l2 == r2
+            }
+            (Self::Multiple(l0), Self::Multiple(r0)) => l0 == r0,
+            (Self::ExpectedTopic(l0, l1), Self::ExpectedTopic(r0, r1)) => l0 == r0 && l1 == r1,
+            (Self::MisplacedTopic(l0), Self::MisplacedTopic(r0)) => l0 == r0,
+            (Self::MisplacedEnv(l0), Self::MisplacedEnv(r0)) => l0 == r0,
+            (Self::UnexpectedBlock(l0, l1), Self::UnexpectedBlock(r0, r1)) => l0 == r0 && l1 == r1,
+            // Not comparable
+            (Self::LexError(_), Self::LexError(_)) => false,
+            _ => false,
+        }
+    }
 }
 
 impl ErrorKind {
@@ -568,23 +586,4 @@ pub fn parse(source: &str) -> (Vec<Block>, Vec<Error>) {
             .collect(),
         errors,
     )
-}
-
-#[cfg(test)]
-mod tests {
-    use chumsky::Parser;
-
-    #[test]
-    fn lexer() {
-        let source = std::fs::read_to_string("config_example").unwrap();
-        let tokens = crate::lexer::lexer().parse(source);
-        println!("{:#?}", tokens);
-    }
-
-    #[test]
-    fn parser() {
-        let path = std::path::PathBuf::from("config_example");
-        let source = std::fs::read_to_string(&path).unwrap();
-        super::parse(&source);
-    }
 }
