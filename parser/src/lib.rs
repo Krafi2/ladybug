@@ -10,7 +10,7 @@ type Spanned<T> = (T, Span);
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Name {
-    Topic,
+    Unit,
     Env,
     Packages,
     Files,
@@ -25,7 +25,7 @@ impl FromStr for Name {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let res = match s {
-            "topic" => Self::Topic,
+            "unit" => Self::Unit,
             "env" => Self::Env,
             "packages" => Self::Packages,
             "files" => Self::Files,
@@ -41,7 +41,7 @@ impl FromStr for Name {
 impl std::fmt::Display for Name {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Name::Topic => f.write_str("topic"),
+            Name::Unit => f.write_str("unit"),
             Name::Env => f.write_str("env"),
             Name::Packages => f.write_str("packages"),
             Name::Files => f.write_str("files"),
@@ -260,8 +260,8 @@ pub enum Block {
 enum ErrorKind {
     Unexpected(Span, Vec<Option<TokenKind>>, Option<TokenKind>),
     Multiple(Vec<ErrorKind>),
-    ExpectedTopic(Span, Name),
-    MisplacedTopic(Span),
+    ExpectedUnit(Span, Name),
+    MisplacedUnit(Span),
     MisplacedEnv(Span),
     UnexpectedBlock(Span, Name),
     LexError(Simple<char>),
@@ -274,8 +274,8 @@ impl PartialEq for ErrorKind {
                 l0 == r0 && l1 == r1 && l2 == r2
             }
             (Self::Multiple(l0), Self::Multiple(r0)) => l0 == r0,
-            (Self::ExpectedTopic(l0, l1), Self::ExpectedTopic(r0, r1)) => l0 == r0 && l1 == r1,
-            (Self::MisplacedTopic(l0), Self::MisplacedTopic(r0)) => l0 == r0,
+            (Self::ExpectedUnit(l0, l1), Self::ExpectedUnit(r0, r1)) => l0 == r0 && l1 == r1,
+            (Self::MisplacedUnit(l0), Self::MisplacedUnit(r0)) => l0 == r0,
             (Self::MisplacedEnv(l0), Self::MisplacedEnv(r0)) => l0 == r0,
             (Self::UnexpectedBlock(l0, l1), Self::UnexpectedBlock(r0, r1)) => l0 == r0 && l1 == r1,
             // Not comparable
@@ -302,8 +302,8 @@ impl ErrorKind {
         match self {
             ErrorKind::Unexpected(span, _, _) => Some(span).cloned(),
             ErrorKind::Multiple(_) => None,
-            ErrorKind::ExpectedTopic(span, _) => Some(span).cloned(),
-            ErrorKind::MisplacedTopic(span) => Some(span).cloned(),
+            ErrorKind::ExpectedUnit(span, _) => Some(span).cloned(),
+            ErrorKind::MisplacedUnit(span) => Some(span).cloned(),
             ErrorKind::MisplacedEnv(span) => Some(span).cloned(),
             ErrorKind::UnexpectedBlock(span, _) => Some(span).cloned(),
             ErrorKind::LexError(err) => Some(err.span()),
@@ -425,24 +425,24 @@ impl Error {
                         .with_color(Color::Red),
                 )
                 .finish(),
-            ErrorKind::ExpectedTopic(span, name) => report
-                .with_message("The file should start with the topic declaration")
+            ErrorKind::ExpectedUnit(span, name) => report
+                .with_message("The file should start with the unit declaration")
                 .with_label(
                     Label::new((filename, span))
-                        .with_message(format!("Expected 'topic', found '{}'", name).fg(Color::Red))
+                        .with_message(format!("Expected 'unit', found '{}'", name).fg(Color::Red))
                         .with_color(Color::Red),
                 )
                 .finish(),
-            ErrorKind::MisplacedTopic(span) => report
-                .with_message("The topic declaration should be located at the start of the file")
+            ErrorKind::MisplacedUnit(span) => report
+                .with_message("The unit declaration should be located at the start of the file")
                 .with_label(
                     Label::new((filename, span))
-                        .with_message("'topic' expected at the top of file".fg(Color::Red))
+                        .with_message("'unit' expected at the top of file".fg(Color::Red))
                         .with_color(Color::Red),
                 )
                 .finish(),
             ErrorKind::MisplacedEnv(span) => report
-                .with_message("The env block should be placed directly after the topic declaration")
+                .with_message("The env block should be placed directly after the unit declaration")
                 .with_label(
                     Label::new((filename, span))
                         .with_message("Unexpected 'env'".fg(Color::Red))
@@ -457,7 +457,7 @@ impl Error {
                             format!(
                                 "Expected one of {}, found '{}'",
                                 [
-                                    Name::Topic,
+                                    Name::Unit,
                                     Name::Env,
                                     Name::Packages,
                                     Name::Files,

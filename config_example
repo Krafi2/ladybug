@@ -1,10 +1,11 @@
 # This is a comment :)
-topic {
+unit {
     name: My App
     desc: deploy My App
     target: ~
+    topic: development
     shell: [bash -c %c]
-    children: [my_app your_app]
+    members: [my_app your_app]
 }
 
 env {

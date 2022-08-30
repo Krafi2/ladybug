@@ -118,7 +118,7 @@ impl Iterator for Packages {
 #[derive(Debug, Clone)]
 struct Arg {
     name: Spanned<String>,
-    value: crate::topic::interpreter::Value,
+    value: crate::unit::interpreter::Value,
 }
 
 impl Arg {
@@ -237,12 +237,13 @@ impl Emitter {
 params! { struct NoParams {} }
 
 params! {
-    struct TopicData {
+    struct UnitData {
         name: String,
         desc: String,
         target: crate::rel_path::RelPath,
+        topic: Option<String>,
         shell: Vec<String>,
-        children: Vec<String>,
+        members: Vec<String>,
     }
 }
 
@@ -260,15 +261,20 @@ fn eval(
     mut env: Env,
     eval_ctx: &mut super::EvalContext,
     context: &crate::context::Context,
-) -> Result<super::Topic, Vec<Error>> {
+) -> Result<super::Unit, Vec<Error>> {
     let mut emitter = Emitter { errors: Vec::new() };
 
     let (blocks, errors) = parser::parse(src);
-    let mut topic_name = None;
+    for err in errors {
+        emitter.emit(err);
+    }
+
+    let mut unit_name = None;
     let mut desc = None;
     let mut target = None;
+    let mut topic = None;
     let mut shell = None;
-    let mut children = None;
+    let mut members = None;
     let mut transactions = Vec::new();
     let mut deploy = None;
     let mut remove = None;
@@ -277,16 +283,16 @@ fn eval(
     for block in blocks {
         match block {
             parser::Block::Map { name, params, body } => match name {
-                parser::Name::Topic => {
+                parser::Name::Unit => {
                     let _ = parse_args::<NoParams>(params, &env, &mut emitter, context);
-                    if let Ok(topic_data) =
-                        parse_args::<TopicData>(body, &env, &mut emitter, context)
+                    if let Ok(unit_data) = parse_args::<UnitData>(body, &env, &mut emitter, context)
                     {
-                        topic_name = Some(topic_data.name);
-                        desc = Some(topic_data.desc);
-                        target = Some(topic_data.target);
-                        shell = Some(topic_data.shell);
-                        children = Some(topic_data.children);
+                        unit_name = Some(unit_data.name);
+                        desc = Some(unit_data.desc);
+                        target = Some(unit_data.target);
+                        topic = unit_data.topic;
+                        shell = Some(unit_data.shell);
+                        members = Some(unit_data.members);
                     }
                 }
                 parser::Name::Env => {
@@ -371,21 +377,17 @@ fn eval(
         }
     }
 
-    // let target = crate::rel_path::RelPath::new(target.unwrap().0, context) {
-    //     Ok(target) => target,
-    //     Err(_) => todo!(),
-    // }
-
     if emitter.errors.is_empty() {
-        Ok(super::Topic {
-            name: topic_name.unwrap(),
+        Ok(super::Unit {
+            name: unit_name.unwrap(),
             desc: desc.unwrap(),
             target: target.unwrap(),
+            topic,
             shell: shell.map(crate::shell::Shell::from_vec),
-            children: children
+            members: members
                 .unwrap()
                 .into_iter()
-                .map(|topic| eval_ctx.register_topic(topic))
+                .map(|unit| eval_ctx.register_unit(unit))
                 .collect(),
             env,
             transactions,

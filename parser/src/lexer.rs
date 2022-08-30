@@ -134,7 +134,7 @@ fn params() -> impl MyParser {
 // A block containing key-value pairs in the form `key~:~value`, separated by newlines and
 // optional comments.
 fn map() -> impl MyParser {
-    choice((just("topic"), just("env")))
+    choice((just("unit"), just("env")))
         .from_str()
         .unwrapped()
         .with_span(Token::Name)

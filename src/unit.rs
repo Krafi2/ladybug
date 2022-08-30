@@ -3,12 +3,13 @@ mod interpreter;
 use crate::{rel_path::RelPath, shell::Shell};
 use std::path::PathBuf;
 
-pub struct Topic {
+pub struct Unit {
     name: String,
     desc: String,
     target: RelPath,
+    topic: Option<String>,
     shell: Option<Shell>,
-    children: Vec<tree::TopicId>,
+    members: Vec<tree::UnitId>,
     env: interpreter::Env,
     transactions: Vec<interpreter::Transaction>,
     deploy: Option<Routine>,
@@ -43,21 +44,21 @@ struct Routine {
     code: String,
 }
 
-pub use tree::{TopicId, TopicTree};
+pub use tree::{UnitId, UnitTree};
 mod tree {
-    use super::Topic;
+    use super::Unit;
 
-    pub struct TopicId(u32);
+    pub struct UnitId(u32);
 
-    pub struct TopicTree {
-        topics: Vec<Topic>,
+    pub struct UnitTree {
+        units: Vec<Unit>,
     }
 }
 
 struct EvalContext {}
 
 impl EvalContext {
-    fn register_topic(&mut self, name: String) -> TopicId {
+    fn register_unit(&mut self, name: String) -> UnitId {
         todo!()
     }
 }

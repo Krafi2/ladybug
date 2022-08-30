@@ -3,10 +3,10 @@ pub struct Provider {}
 impl super::NewTransaction for Provider {
     fn new_transaction(
         &mut self,
-        args: crate::topic::interpreter::Args,
-        packages: crate::topic::interpreter::Packages,
+        args: crate::unit::interpreter::Args,
+        packages: crate::unit::interpreter::Packages,
         context: &crate::context::Context,
-        emitter: &mut crate::topic::interpreter::Emitter,
+        emitter: &mut crate::unit::interpreter::Emitter,
     ) -> Result<super::Transaction, ()> {
         todo!()
     }
