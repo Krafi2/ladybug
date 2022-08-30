@@ -3,7 +3,7 @@ mod context;
 mod rel_path;
 mod serde;
 mod shell;
-mod topic;
+mod unit;
 
 use clap::Parser;
 use color_eyre::eyre::WrapErr;

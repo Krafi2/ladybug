@@ -253,7 +253,7 @@ macro_rules! params {
     (count) => {0usize};
 
     (parse $span:ident, $names:ident, $params:ident, $emitter:ident, $context:ident, $field:ident : $kind:ty, $($field_rest:ident : $type_rest:ty,)*) => {
-        let $field = <$kind as $crate::topic::interpreter::structures::ParseParam>::parse(
+        let $field = <$kind as $crate::unit::interpreter::structures::ParseParam>::parse(
             &$span,
             $names.next().expect("Unexpected end of iterator"),
             $params.next().expect("Unexpected end of iterator"),
@@ -268,25 +268,25 @@ macro_rules! params {
     ($where:vis $what:ident $name:ident { $($field:ident : $kind:ty),* $(,)? }) => {
         $where $what $name { $($field : $kind),* }
 
-        impl $crate::topic::interpreter::structures::FromArgs for $name {
-            fn from_args(args: $crate::topic::interpreter::Args, emitter: &mut $crate::topic::interpreter::Emitter, context: &$crate::context::Context)
+        impl $crate::unit::interpreter::structures::FromArgs for $name {
+            fn from_args(args: $crate::unit::interpreter::Args, emitter: &mut $crate::unit::interpreter::Emitter, context: &$crate::context::Context)
                     -> std::result::Result<Self, ()> {
                 #![allow(unused)]
                 let names = [$(stringify!($field)),*];
                 let span = args.span().clone();
-                let mut matchmaker = $crate::topic::interpreter::structures::Matchmaker::new(&names, args);
+                let mut matchmaker = $crate::unit::interpreter::structures::Matchmaker::new(&names, args);
                 let mut params = vec![None; params!(count $($field,)*)];
                 let mut is_err = false;
                 while let Some(res) = matchmaker.next() {
                     match res {
                         Ok((param, arg, value)) => params[param.0] = Some((arg, value)),
                         Err(err) => match err {
-                            $crate::topic::interpreter::structures::MatchError::Unused(span, arg) => {
-                                emitter.emit($crate::topic::interpreter::structures::ParamError::Unused{ span, arg });
+                            $crate::unit::interpreter::structures::MatchError::Unused(span, arg) => {
+                                emitter.emit($crate::unit::interpreter::structures::ParamError::Unused{ span, arg });
                                 is_err = true;
                             },
                             // If this really is an error, it will be reported in the parsing stage
-                            $crate::topic::interpreter::structures::MatchError::NotFound(_) => (),
+                            $crate::unit::interpreter::structures::MatchError::NotFound(_) => (),
                         }
                     }
                 }
@@ -321,7 +321,7 @@ pub struct Matchmaker {
 
 /// Not an Iterator so it doesn't leak private type
 impl Matchmaker {
-    pub(super) fn new(params: &[&'static str], args: crate::topic::interpreter::Args) -> Self {
+    pub(super) fn new(params: &[&'static str], args: crate::unit::interpreter::Args) -> Self {
         let mut args = args.collect::<Vec<_>>();
         args.sort_unstable_by(|a, b| a.1.name.0.cmp(&b.1.name.0));
 

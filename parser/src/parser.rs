@@ -131,7 +131,7 @@ fn block_parser() -> impl Parser<Token, Block, Error = ErrorKind> {
     let map_body_parser = param.clone().repeated().spanned();
 
     let map = filter_map(|span, token| match token {
-        Token::Name(name @ Name::Topic) | Token::Name(name @ Name::Env) => Ok(name),
+        Token::Name(name @ Name::Unit) | Token::Name(name @ Name::Env) => Ok(name),
         token => Err(ErrorKind::expected(
             vec![TokenKind::Name],
             token.kind(),
@@ -264,13 +264,13 @@ pub(super) fn parser() -> impl Parser<(usize, Token), Vec<Option<Block>>, Error 
                 match first {
                     (Token::Name(name), name_span) => {
                         // The first block should be a topic declaration
-                        if name != Name::Topic && n == 0 {
-                            emit(ErrorKind::ExpectedTopic(name_span.clone(), name.clone()));
+                        if name != Name::Unit && n == 0 {
+                            emit(ErrorKind::ExpectedUnit(name_span.clone(), name.clone()));
                         }
 
                         // The topic block should be the first in file
-                        if name == Name::Topic && n > 0 {
-                            emit(ErrorKind::MisplacedTopic(name_span.clone()));
+                        if name == Name::Unit && n > 0 {
+                            emit(ErrorKind::MisplacedUnit(name_span.clone()));
                         }
 
                         // The env block should follow the topic declaration

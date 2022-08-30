@@ -1,7 +1,7 @@
 use super::{PackageError, ProviderError, Transaction, TransactionError};
 use crate::{
     context::Context,
-    topic::interpreter::{structures::FromArgs, Emitter},
+    unit::interpreter::{structures::FromArgs, Emitter},
 };
 use color_eyre::{eyre::WrapErr, Result};
 use std::{
