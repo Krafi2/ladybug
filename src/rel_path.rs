@@ -21,10 +21,13 @@ impl RelPath {
         Self::relative_to(path, context.home_dir())
     }
 
-    pub fn relative_to(path: PathBuf, home: color_eyre::Result<&Path>) -> Result<Self, Error> {
+    pub fn relative_to<P: AsRef<Path>>(
+        path: PathBuf,
+        home: color_eyre::Result<P>,
+    ) -> Result<Self, Error> {
         let absolute = match path.strip_prefix("~") {
             Ok(path) => match home {
-                Ok(prefix) => Ok(prefix.join(path)),
+                Ok(prefix) => Ok(prefix.as_ref().join(path)),
                 Err(err) => Err(Error {
                     path: path.to_owned(),
                     err,
