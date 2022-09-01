@@ -6,7 +6,8 @@ mod shell;
 mod unit;
 
 use clap::Parser;
-use color_eyre::eyre::WrapErr;
+use color_eyre::eyre::{bail, WrapErr};
+use rel_path::RelPath;
 use std::os::unix::process::CommandExt;
 
 fn main() {
@@ -21,20 +22,66 @@ fn main() {
 
 fn run() -> color_eyre::Result<()> {
     let opts = commands::Opts::try_parse()?;
+    let config = opts
+        .config
+        .ok_or(())
+        .or_else(|_| context::default_config_path())
+        .and_then(|path| {
+            RelPath::relative_to(path, context::home_dir()).wrap_err("Failed to expand config path")
+        })?;
 
-    // Try to elevate the process to root privileges using polkit if it's running as a user and the
-    // `no-root` option isn't set.
-    if !context::detect_root() && !opts.no_root {
-        let err = std::process::Command::new("pkexec")
-            .args(std::env::args_os())
-            .exec();
+    let dotfiles = opts.dotfiles.map(|path| {
+        RelPath::relative_to(path, context::home_dir())
+            .wrap_err("Failed to expand dotfile directory path")
+    });
 
-        Err(err).wrap_err("Failed to elevate to root privileges")?
+    if context::detect_root() {
+        if !opts.root {
+            bail!(
+                "Running as root is not recommended! Please note that ladybug will use polkit to request\
+                 root access if neccessary, but if you are certain that you want to do this, add the `--root` flag."
+            )
+        }
+    } else {
+        if !opts.no_root {
+            // Try to elevate the process to root privileges using polkit if it's running as a user and the
+            // `no-root` option isn't set.
+            let mut command = std::process::Command::new("pkexec");
+            let mut new_args = Vec::<std::ffi::OsString>::new();
+            let mut args = std::env::args();
+
+            new_args.push(args.next().unwrap().into());
+
+            new_args.push("--config".into());
+            new_args.push(config.relative().into());
+
+            let dotfiles = dotfiles.unwrap_or_else(|| context::default_dotfile_dir())?;
+            new_args.push("--dotfiles".into());
+            new_args.push(dotfiles.relative().into());
+
+            new_args.push("--root".into());
+
+            let mut skip = true;
+            while let Some(arg) = args.next() {
+                if skip {
+                    if !arg.starts_with('-') {
+                        new_args.push(arg.into());
+                        skip = false;
+                    }
+                } else {
+                    new_args.push(arg.into());
+                }
+            }
+
+            command.args(new_args);
+            let err = command.exec();
+            return Err(err).wrap_err("Failed to elevate to root privileges");
+        }
     }
 
     setup_log()?;
 
-    let context = context::Context::new(opts.config)?;
+    let context = context::Context::new(config, dotfiles.map(|inner| inner.ok()).flatten())?;
     commands::run(&context)
 }
 

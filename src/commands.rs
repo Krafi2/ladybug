@@ -10,8 +10,12 @@ use clap::{Parser, Subcommand};
 pub(super) struct Opts {
     #[clap(action)]
     pub no_root: bool,
+    #[clap(action)]
+    pub root: bool,
     #[clap(value_parser)]
     pub config: Option<PathBuf>,
+    #[clap(value_parser)]
+    pub dotfiles: Option<PathBuf>,
     #[clap(subcommand)]
     pub command: SubCommand,
 }
