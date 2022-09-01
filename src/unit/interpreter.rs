@@ -7,7 +7,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use crate::{context::Context, rel_path::RelPath, shell::Shell};
+use crate::{context::Context, shell::Shell};
 
 use super::{Routine, Unit};
 
@@ -222,7 +222,7 @@ impl From<provider::TransactionError> for ErrorKind {
 pub struct Error(ErrorKind);
 
 impl Error {
-    pub fn into_report(self, file: &Path) -> ariadne::Report {
+    pub fn into_report(self, _file: &Path) -> ariadne::Report {
         todo!()
     }
 
@@ -389,7 +389,7 @@ impl Interpreter {
                     }
                     parser::Name::Env => {
                         let _ = parse_args::<NoParams>(params, &env, &mut emitter, context);
-                        for (param, span) in body.0 {
+                        for (param, _span) in body.0 {
                             let name = param.name.0;
                             let val = Value::from_expr(param.val, &env);
 

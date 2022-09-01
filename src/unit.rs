@@ -56,7 +56,7 @@ mod tree {
     use color_eyre::eyre::WrapErr;
     use std::{
         collections::HashMap,
-        path::{Path, PathBuf},
+        path::{Path},
     };
 
     #[derive(Debug, Clone, Copy)]

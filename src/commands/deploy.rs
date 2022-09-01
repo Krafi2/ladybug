@@ -1,4 +1,4 @@
-use crate::unit::{Interpreter, Manager, Module, Provider, Status};
+use crate::unit::{Interpreter, Manager, Status};
 use color_eyre::eyre::WrapErr;
 use std::collections::{HashMap, VecDeque};
 
