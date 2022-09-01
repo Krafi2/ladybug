@@ -11,7 +11,7 @@ impl Shell {
         Self { cmd, args }
     }
 
-    pub fn from_vec(cmd: Vec<String>) -> Self {
+    pub fn from_vec(_cmd: Vec<String>) -> Self {
         todo!()
     }
 }
