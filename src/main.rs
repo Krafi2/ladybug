@@ -14,7 +14,7 @@ fn main() {
     match run() {
         Ok(_) => std::process::exit(0),
         Err(err) => {
-            eprintln!("{}", err);
+            eprintln!("{:?}", err);
             std::process::exit(1);
         }
     }
