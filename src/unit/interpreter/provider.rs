@@ -7,28 +7,61 @@ mod flatpak;
 mod zypper;
 
 #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq)]
-enum ProviderId {
+enum ProviderKind {
     Files,
     Flatpak,
     Zypper,
 }
 
+#[derive(Debug, Clone, Copy, Hash, PartialEq, Eq)]
+pub struct ProviderId(ProviderKind);
+
+impl From<ProviderKind> for ProviderId {
+    fn from(kind: ProviderKind) -> Self {
+        Self(kind)
+    }
+}
+
 impl ProviderId {
     fn from_name(name: &str) -> Option<Self> {
         match name {
-            "flatpak" => Some(Self::Flatpak),
-            "zypper" => Some(Self::Zypper),
+            "flatpak" => Some(ProviderKind::Flatpak),
+            "zypper" => Some(ProviderKind::Zypper),
             _ => None,
         }
+        .map(ProviderId)
+    }
+}
+
+impl std::fmt::Display for ProviderId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let s = match self.0 {
+            ProviderKind::Files => "files",
+            ProviderKind::Flatpak => "flatpak",
+            ProviderKind::Zypper => "zypper",
+        };
+        f.write_str(s)
     }
 }
 
 #[derive(Clone)]
-pub(super) enum ProviderError {
+pub enum ProviderError {
     // Provider is unavailable
     Unavailable(std::rc::Rc<dyn std::fmt::Display>),
     // The provider requires root privileges to function
     NeedRoot,
+}
+
+impl std::fmt::Display for ProviderError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ProviderError::Unavailable(err) => {
+                f.write_str("Provider is unavailable: ")?;
+                std::fmt::Display::fmt(&err, f)
+            }
+            ProviderError::NeedRoot => f.write_str("Provider requires root permissions"),
+        }
+    }
 }
 
 pub(super) enum PackageError {
@@ -58,6 +91,12 @@ pub struct Manager {
 }
 
 impl Manager {
+    pub fn new() -> Self {
+        Self {
+            cache: HashMap::default(),
+        }
+    }
+
     fn get_raw_provider(
         &mut self,
         id: ProviderId,
@@ -69,10 +108,10 @@ impl Manager {
             T::new(context).map(|provider| Box::new(provider) as Box<dyn ProviderUpcast>)
         }
 
-        let provider = self.cache.entry(id).or_insert_with(|| match id {
-            ProviderId::Files => new_provider::<files::Provider>(context),
-            ProviderId::Flatpak => new_provider::<flatpak::Provider>(context),
-            ProviderId::Zypper => new_provider::<zypper::Provider>(context),
+        let provider = self.cache.entry(id).or_insert_with(|| match id.0 {
+            ProviderKind::Files => new_provider::<files::Provider>(context),
+            ProviderKind::Flatpak => new_provider::<flatpak::Provider>(context),
+            ProviderKind::Zypper => new_provider::<zypper::Provider>(context),
         });
         provider
             .as_mut()
@@ -80,7 +119,7 @@ impl Manager {
             .map_err(|err| err.clone())
     }
 
-    fn get_provider(
+    pub fn get_provider(
         &mut self,
         id: ProviderId,
         context: &Context,
@@ -181,7 +220,13 @@ impl Manager {
         context: &Context,
     ) -> Result<Transaction, Error> {
         let (args, span) = args;
-        self.create_transaction(ProviderId::Files, (args, span), packages, emitter, context)
+        self.create_transaction(
+            ProviderKind::Files.into(),
+            (args, span),
+            packages,
+            emitter,
+            context,
+        )
     }
 }
 
@@ -202,7 +247,21 @@ impl<P: ProviderPrivate> ProviderUpcast for P {
 
 pub struct Transaction {
     provider: ProviderId,
-    inner: Box<dyn Any>,
+    payload: Box<dyn Any>,
+}
+
+impl Transaction {
+    pub fn provider(&self) -> ProviderId {
+        self.provider
+    }
+}
+
+impl std::fmt::Debug for Transaction {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Transaction")
+            .field("provider", &self.provider)
+            .finish()
+    }
 }
 
 trait ProviderPrivate: Provider + NewTransaction + Sized {

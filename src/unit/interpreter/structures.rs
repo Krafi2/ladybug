@@ -194,7 +194,7 @@ impl ParseParam for RelPath {
     }
 }
 
-pub struct FromString<T>(T);
+pub struct FromString<T>(pub T);
 
 impl<T: std::str::FromStr> ParseParam for FromString<T>
 where
@@ -234,6 +234,18 @@ where
         .map_err(|err| {
             emitter.emit(err);
         })
+    }
+}
+
+impl<T: ParseParam> ParseParam for Result<T, ()> {
+    fn parse(
+        span: &Span,
+        name: &'static str,
+        value: Option<(ArgId, Value)>,
+        emitter: &mut Emitter,
+        context: &Context,
+    ) -> Result<Self, ()> {
+        Ok(T::parse(span, name, value, emitter, context))
     }
 }
 

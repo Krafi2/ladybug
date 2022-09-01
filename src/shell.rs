@@ -1,5 +1,6 @@
 use serde::Deserialize;
 
+#[derive(Debug, Clone)]
 pub struct Shell {
     cmd: String,
     args: Vec<String>,

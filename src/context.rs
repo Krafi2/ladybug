@@ -1,4 +1,4 @@
-use crate::shell::Shell;
+use crate::{rel_path::RelPath, shell::Shell};
 use color_eyre::eyre::{eyre, ContextCompat, Result, WrapErr};
 use std::path::{Path, PathBuf};
 
@@ -30,6 +30,7 @@ impl Config {
 
 pub struct Context {
     config: Config,
+    dotfile_dir: RelPath,
     home_dir: Option<PathBuf>,
     root: bool,
 }
@@ -54,6 +55,18 @@ impl Context {
             });
 
         Ok(Self {
+            dotfile_dir: RelPath::relative_to(
+                config.dotfile_dir.clone(),
+                home_dir
+                    .as_deref()
+                    .ok_or_else(|| eyre!("No user home directory found")),
+            )
+            .wrap_err_with(|| {
+                format!(
+                    "Failed to expand dotfile dir path: '{}'",
+                    &config.dotfile_dir.display()
+                )
+            })?,
             config,
             home_dir,
             root: detect_root(),
@@ -69,6 +82,10 @@ impl Context {
 
     pub fn is_root(&self) -> bool {
         self.root
+    }
+
+    pub fn dotfile_dir(&self) -> &RelPath {
+        &self.dotfile_dir
     }
 
     pub fn default_shell(&self) -> &Shell {
