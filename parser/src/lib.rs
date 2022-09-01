@@ -160,7 +160,7 @@ impl std::fmt::Display for TokenKind {
 }
 
 /// A utility trait for binding tokens with their spans.
-trait Spanner<I: Clone, O>: Parser<I, O>
+trait Spanner<I: Clone, O>: chumsky::Parser<I, O>
 where
     Self: Sized,
 {
@@ -197,7 +197,7 @@ where
     }
 }
 
-impl<P, I: Clone, O> Spanner<I, O> for P where P: Parser<I, O> {}
+impl<P, I: Clone, O> Spanner<I, O> for P where P: chumsky::Parser<I, O> {}
 
 trait SpanExt<T, S> {
     fn token(&self) -> &T;
@@ -539,51 +539,70 @@ impl Error {
     }
 }
 
-pub fn parse(source: &str) -> (Vec<Block>, Vec<Error>) {
-    let res = lexer::lexer().parse_recovery(source);
-    let (tokens, lex_errors) = match res {
-        (Some(tokens), errors) => (tokens, errors),
-        (None, errors) => (vec![], errors),
-    };
+pub struct Parser {
+    lexer: Box<dyn chumsky::Parser<char, Vec<Spanned<Token>>, Error = Simple<char>>>,
+    parser: Box<dyn chumsky::Parser<(usize, Token), Vec<Option<Block>>, Error = ErrorKind>>,
+}
 
-    let span = match tokens.len() {
-        0 => 0..0,
-        _ => {
-            tokens.first().expect("Expected tokens").span().start
-                ..tokens.last().expect("Expected tokens").span().end
+impl Parser {
+    pub fn new() -> Self {
+        Self {
+            lexer: Box::new(lexer::lexer()),
+            parser: Box::new(parser::parser()),
         }
-    };
-    let tokens = parser::map_tokens(tokens, span, parser::token_filter_enumerator);
-    let parser = parser::parser();
-    let (blocks, parse_errors) = parser.parse_recovery(tokens);
+    }
 
-    fn flatten(err: ErrorKind, vec: &mut Vec<Error>) {
-        match err {
-            ErrorKind::Multiple(errors) => {
-                for err in errors {
-                    flatten(err, vec)
-                }
+    pub fn parse(&self, source: &str) -> (Vec<Block>, Vec<Error>) {
+        let res = chumsky::Parser::parse_recovery(&self.lexer, source);
+        let (tokens, lex_errors) = match res {
+            (Some(tokens), errors) => (tokens, errors),
+            (None, errors) => (vec![], errors),
+        };
+
+        let span = match tokens.len() {
+            0 => 0..0,
+            _ => {
+                tokens.first().expect("Expected tokens").span().start
+                    ..tokens.last().expect("Expected tokens").span().end
             }
-            err => vec.push(Error(err)),
+        };
+        let tokens = parser::map_tokens(tokens, span, parser::token_filter_enumerator);
+        let (blocks, parse_errors) = chumsky::Parser::parse_recovery(&self.parser, tokens);
+
+        fn flatten(err: ErrorKind, vec: &mut Vec<Error>) {
+            match err {
+                ErrorKind::Multiple(errors) => {
+                    for err in errors {
+                        flatten(err, vec)
+                    }
+                }
+                err => vec.push(Error(err)),
+            }
         }
-    }
 
-    let mut errors = Vec::new();
-    for err in parse_errors {
-        flatten(err, &mut errors);
-    }
+        let mut errors = Vec::new();
+        for err in parse_errors {
+            flatten(err, &mut errors);
+        }
 
-    errors.extend(
-        lex_errors
-            .into_iter()
-            .map(|err| Error(ErrorKind::LexError(err))),
-    );
-    (
-        blocks
-            .unwrap_or_default()
-            .into_iter()
-            .filter_map(|b| b)
-            .collect(),
-        errors,
-    )
+        errors.extend(
+            lex_errors
+                .into_iter()
+                .map(|err| Error(ErrorKind::LexError(err))),
+        );
+        (
+            blocks
+                .unwrap_or_default()
+                .into_iter()
+                .filter_map(|b| b)
+                .collect(),
+            errors,
+        )
+    }
+}
+
+impl Default for Parser {
+    fn default() -> Self {
+        Self::new()
+    }
 }

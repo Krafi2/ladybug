@@ -71,7 +71,7 @@ impl Provider {
 
     fn zypper_cmd(&mut self, cmd: &str, transaction: Transaction) -> color_eyre::Result<()> {
         let transaction = transaction
-            .inner
+            .payload
             .downcast::<TransactionInner>()
             .expect("Wrong type");
 
@@ -118,7 +118,7 @@ impl Provider {
 
     fn remove(&mut self, transaction: Transaction) -> color_eyre::Result<()> {
         let transaction = transaction
-            .inner
+            .payload
             .downcast::<TransactionInner>()
             .expect("Wrong type");
 
@@ -226,8 +226,8 @@ impl super::NewTransaction for Provider {
         }
 
         Ok(Transaction {
-            provider: super::ProviderId::Zypper,
-            inner: Box::new(TransactionInner {
+            provider: super::ProviderKind::Zypper.into(),
+            payload: Box::new(TransactionInner {
                 from: params?.from,
                 packages: packs,
             }),
