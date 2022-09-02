@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
-    dotfile_dir: Option<PathBuf>,
+    dotfiles: Option<PathBuf>,
     shell: Option<Shell>,
 }
 
@@ -34,7 +34,7 @@ impl Context {
             .ok_or(())
             .or_else(|_| {
                 config
-                    .dotfile_dir
+                    .dotfiles
                     .ok_or_else(|| eyre!("No dotfile direcory set in config"))
                     .and_then(|path| {
                         RelPath::relative_to(path, home_dir())

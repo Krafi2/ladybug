@@ -25,7 +25,7 @@ pub enum SubCommand {
     Deploy(deploy::Deploy),
 }
 
-type CmdResult = color_eyre::Result<()>;
+type CmdResult = color_eyre::Result<Result<(), ()>>;
 
 pub(super) fn run(context: &Context) -> CmdResult {
     let opts = Opts::parse();

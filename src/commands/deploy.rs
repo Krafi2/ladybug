@@ -1,6 +1,9 @@
 use crate::unit::{Interpreter, Manager, Status};
 use color_eyre::eyre::WrapErr;
-use std::collections::{HashMap, VecDeque};
+use std::{
+    collections::{HashMap, VecDeque},
+    path::Path,
+};
 
 #[derive(clap::Parser)]
 pub struct Deploy {
@@ -18,8 +21,10 @@ impl Deploy {
         let env = HashMap::new();
         let mut tree = crate::unit::ModuleTree::load(&interpreter, &mut manager, env, context);
 
-        if tree.is_degraded() {
-            return Err(color_eyre::eyre::eyre!("Deployment failed"));
+        let is_degraded = tree.is_degraded();
+        if is_degraded {
+            eprintln!("Deployment failed!");
+            // return Err(color_eyre::eyre::eyre!("Deployment failed"));
         }
 
         let mut queue = VecDeque::from([tree.root()]);
@@ -27,10 +32,12 @@ impl Deploy {
             let module = tree.get_mut(id);
             let status = std::mem::replace(
                 &mut module.status,
-                Status::Err(color_eyre::eyre::eyre!("Unit has been moved")),
+                Status::Err(color_eyre::eyre::eyre!(
+                    "Unit has been moved! This is a bug!"
+                )),
             );
             match status {
-                Status::Ok(unit) => {
+                Status::Ok(unit) if is_degraded => {
                     for transaction in unit.transactions {
                         let provider = transaction.provider();
                         let provider = manager
@@ -43,10 +50,33 @@ impl Deploy {
                     }
                     queue.extend(&module.members);
                 }
-                _ => unreachable!("The module tree wasn't supposed to be degraded"),
+                Status::Err(err) => {
+                    assert!(is_degraded);
+                    let err = err.wrap_err(format!("Failed to deploy unit {}", &module.path));
+                    eprintln!("{:?}", err);
+                }
+                Status::Degraded(_, errors, src) => {
+                    assert!(is_degraded);
+                    for err in errors {
+                        let filename = &module.path.to_string();
+                        let report = err.into_report(&filename);
+                        let res = report
+                            .eprint::<(&str, ariadne::Source)>((
+                                &filename,
+                                ariadne::Source::from(&src),
+                            ))
+                            .wrap_err("Failed to print message");
+
+                        if let Err(err) = res {
+                            tracing::warn!("{:?}", err);
+                        }
+                    }
+                    eprintln!()
+                }
+                _ => (),
             }
         }
 
-        Ok(())
+        Ok(Ok(()))
     }
 }

@@ -379,7 +379,7 @@ impl chumsky::error::Error<(usize, Token)> for ErrorKind {
 pub struct Error(ErrorKind);
 
 impl Error {
-    pub fn gen_report<'a>(self, filename: &'a str) -> Report<(&'a str, Span)> {
+    pub fn into_report<'a>(self, filename: &'a str) -> Report<(&'a str, Span)> {
         let span = self.0.span().expect("Expected spanned error");
         let report = Report::build(ReportKind::Error, filename, span.start);
 
