@@ -1,4 +1,4 @@
-use super::{structures::ParamError, Arg, Args, Emitter, PackageId, Packages};
+use super::{structures::ParamError, Arg, Args, Emitter, PackageId, Packages, Span};
 use crate::context::Context;
 use std::{any::Any, collections::HashMap};
 
@@ -44,24 +44,14 @@ impl std::fmt::Display for ProviderId {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug, thiserror::Error)]
 pub enum ProviderError {
     // Provider is unavailable
-    Unavailable(std::rc::Rc<dyn std::fmt::Display>),
+    #[error("Provider is unavailable: {0}")]
+    Unavailable(std::rc::Rc<dyn std::error::Error>),
     // The provider requires root privileges to function
+    #[error("Provider requires root permissions")]
     NeedRoot,
-}
-
-impl std::fmt::Display for ProviderError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            ProviderError::Unavailable(err) => {
-                f.write_str("Provider is unavailable: ")?;
-                std::fmt::Display::fmt(&err, f)
-            }
-            ProviderError::NeedRoot => f.write_str("Provider requires root permissions"),
-        }
-    }
 }
 
 pub(super) enum PackageError {
@@ -75,9 +65,8 @@ pub(super) enum TransactionError {
 }
 
 pub(super) enum Error {
-    Provider(ProviderError),
+    Provider(Span, ProviderError),
     Param(ParamError),
-    Emitted,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -139,17 +128,17 @@ impl Manager {
 
     fn create_transaction(
         &mut self,
-        id: ProviderId,
-        (args, span): super::Spanned<Vec<Arg>>,
+        (id, span): (ProviderId, Span),
+        (args, arg_span): super::Spanned<Vec<Arg>>,
         packages: Packages,
         emitter: &mut Emitter,
         context: &Context,
-    ) -> Result<Transaction, Error> {
+    ) -> Result<Transaction, Option<Error>> {
         match self.get_new_transaction(id, context) {
             Ok(transactor) => transactor
-                .new_transaction(Args::new(args, span), packages, context, emitter)
-                .map_err(|_| Error::Emitted),
-            Err(err) => return Err(Error::Provider(err)),
+                .new_transaction(Args::new(args, arg_span), packages, context, emitter)
+                .map_err(|_| None),
+            Err(err) => Err(Some(Error::Provider(span, err))),
         }
     }
 
@@ -159,7 +148,7 @@ impl Manager {
         packages: Packages,
         emitter: &mut Emitter,
         context: &Context,
-    ) -> Result<Transaction, Error> {
+    ) -> Result<Transaction, ()> {
         let (args, span) = args;
         let mut args_iter = args.iter().enumerate();
         let (arg_id, provider) = loop {
@@ -170,10 +159,11 @@ impl Manager {
                     }
                 }
                 None => {
-                    return Err(Error::Param(ParamError::NotFound {
+                    emitter.emit(Error::Param(ParamError::NotFound {
                         span,
                         name: "provider",
                     }));
+                    return Err(());
                 }
             }
         };
@@ -181,35 +171,49 @@ impl Manager {
         let (provider, val_span) = match provider {
             super::Value::String(s) => s,
             super::Value::Error((err, span)) => {
-                return Err(Error::Param(ParamError::EvalErr {
+                emitter.emit(Error::Param(ParamError::EvalErr {
                     span: span.clone(),
                     err: err.clone(),
                 }));
+                return Err(());
             }
             other => {
-                return Err(Error::Param(ParamError::TypeErr {
+                emitter.emit(Error::Param(ParamError::TypeErr {
                     arg: super::ArgId(arg_id),
                     span: other.span(),
                     expected: super::Type::String,
                     found: other.get_type(),
                 }));
+                return Err(());
             }
         };
 
         let provider_id = match ProviderId::from_name(&provider) {
             Some(id) => id,
             None => {
-                return Err(Error::Param(ParamError::ValueErr {
+                emitter.emit(Error::Param(ParamError::ValueErr {
                     arg: super::ArgId(arg_id),
                     span: val_span.clone(),
                     err: Box::new(InvalidProvider {
                         found: provider.clone(),
                     }),
                 }));
+                return Err(());
             }
         };
 
-        self.create_transaction(provider_id, (args, span), packages, emitter, context)
+        self.create_transaction(
+            (provider_id, val_span.clone()),
+            (args, span),
+            packages,
+            emitter,
+            context,
+        )
+        .map_err(|err| {
+            if let Some(err) = err {
+                emitter.emit(err);
+            }
+        })
     }
 
     pub(super) fn new_files(
@@ -218,15 +222,21 @@ impl Manager {
         packages: Packages,
         emitter: &mut Emitter,
         context: &Context,
-    ) -> Result<Transaction, Error> {
+    ) -> Result<Transaction, ()> {
         let (args, span) = args;
         self.create_transaction(
-            ProviderKind::Files.into(),
+            // The span is wrong but it shouldnt ever be used anyway
+            (ProviderKind::Files.into(), span.clone()),
             (args, span),
             packages,
             emitter,
             context,
         )
+        .map_err(|err| {
+            if let Some(err) = err {
+                emitter.emit(err);
+            }
+        })
     }
 }
 

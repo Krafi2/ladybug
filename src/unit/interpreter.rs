@@ -49,16 +49,7 @@ impl Value {
             )),
         }
     }
-}
-#[derive(Debug, Clone, Copy)]
-enum Type {
-    List,
-    String,
-    Bool,
-    Error,
-}
 
-impl Value {
     fn get_type(&self) -> Type {
         match self {
             Value::List(_) => Type::List,
@@ -75,6 +66,13 @@ impl Value {
             Value::Error(e) => e.1.clone(),
         }
     }
+}
+#[derive(Debug, Clone, Copy)]
+enum Type {
+    List,
+    String,
+    Bool,
+    Error,
 }
 
 #[derive(Debug, Clone)]
@@ -188,7 +186,7 @@ enum ErrorKind {
     Eval(Spanned<EvalError>),
     Parse(parser::Error),
     Param(structures::ParamError),
-    Provider(provider::ProviderError),
+    Provider(provider::Error),
     Transaction(provider::TransactionError),
     Other(color_eyre::Report),
 }
@@ -208,8 +206,8 @@ impl From<structures::ParamError> for ErrorKind {
         Self::Param(err)
     }
 }
-impl From<provider::ProviderError> for ErrorKind {
-    fn from(err: provider::ProviderError) -> Self {
+impl From<provider::Error> for ErrorKind {
+    fn from(err: provider::Error) -> Self {
         Self::Provider(err)
     }
 }
@@ -222,8 +220,11 @@ impl From<provider::TransactionError> for ErrorKind {
 pub struct Error(ErrorKind);
 
 impl Error {
-    pub fn into_report(self, _file: &Path) -> ariadne::Report {
-        todo!()
+    pub fn into_report<'a>(self, filename: &'a str) -> ariadne::Report<(&'a str, Span)> {
+        match self.0 {
+            ErrorKind::Parse(err) => err.into_report(filename),
+            _ => todo!(),
+        }
     }
 
     pub fn custom(err: color_eyre::Report) -> Self {
@@ -436,14 +437,8 @@ impl Interpreter {
                         }
                         _ => panic!("Item block has invalid name"),
                     };
-
-                    match res {
-                        Ok(trans) => transactions.push(trans),
-                        Err(err) => match err {
-                            provider::Error::Provider(_) => todo!(),
-                            provider::Error::Param(_) => todo!(),
-                            provider::Error::Emitted => (),
-                        },
+                    if let Ok(t) = res {
+                        transactions.push(t)
                     }
                 }
                 parser::Block::Routine {

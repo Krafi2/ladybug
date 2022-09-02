@@ -12,7 +12,10 @@ use std::os::unix::process::CommandExt;
 
 fn main() {
     match run() {
-        Ok(_) => std::process::exit(0),
+        Ok(res) => match res {
+            Ok(_) => std::process::exit(0),
+            Err(_) => std::process::exit(1),
+        },
         Err(err) => {
             eprintln!("{:?}", err);
             std::process::exit(1);
@@ -20,7 +23,9 @@ fn main() {
     }
 }
 
-fn run() -> color_eyre::Result<()> {
+fn run() -> color_eyre::Result<Result<(), ()>> {
+    setup_log()?;
+
     let opts = commands::Opts::try_parse()?;
     let config = opts
         .config
@@ -78,8 +83,6 @@ fn run() -> color_eyre::Result<()> {
             return Err(err).wrap_err("Failed to elevate to root privileges");
         }
     }
-
-    setup_log()?;
 
     let context = context::Context::new(config, dotfiles.map(|inner| inner.ok()).flatten())?;
     commands::run(&context)

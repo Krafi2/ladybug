@@ -49,26 +49,24 @@ pub struct Routine {
 pub use tree::{Module, ModuleTree, Status, UnitId};
 mod tree {
     use super::{
-        interpreter::{provider::Manager, Env, Interpreter, UnitFigment, Value},
+        interpreter::{self, provider::Manager, Env, Interpreter, UnitFigment, Value},
         Unit,
     };
     use crate::{context::Context, rel_path::RelPath};
     use color_eyre::eyre::WrapErr;
-    use std::{
-        collections::HashMap,
-        path::{Path},
-    };
+    use std::{collections::HashMap, path::Path};
 
     #[derive(Debug, Clone, Copy)]
     pub struct UnitId(u32);
 
     pub enum Status {
         Ok(Unit),
-        Degraded(UnitFigment),
+        Degraded(UnitFigment, Vec<interpreter::Error>, String),
         Err(color_eyre::Report),
     }
 
     pub struct Module {
+        pub path: RelPath,
         pub status: Status,
         pub env: Env,
         pub members: Vec<UnitId>,
@@ -80,6 +78,7 @@ mod tree {
     }
 
     struct Frame {
+        path: RelPath,
         status: Status,
         env: Env,
         members: Vec<UnitId>,
@@ -112,11 +111,12 @@ mod tree {
                     None => {
                         let frame = stack.pop().unwrap();
                         let unit = Module {
+                            path: frame.path,
                             status: frame.status,
                             env: frame.env,
                             members: frame.members,
                         };
-                        if let Status::Err(_) | Status::Degraded(_) = &unit.status {
+                        if let Status::Err(..) | Status::Degraded(..) = &unit.status {
                             degraded = true;
                         }
 
@@ -160,7 +160,7 @@ mod tree {
         context: &Context,
     ) -> Frame {
         let src = std::fs::read_to_string(&path)
-            .wrap_err_with(|| format!("Failed to read unit {}", path));
+            .wrap_err_with(|| format!("Failed to read unit file {}", path));
 
         let (status, env, queue) = match src {
             Ok(src) => {
@@ -172,7 +172,7 @@ mod tree {
                             .expect("There were no errors, unit generation shouldn't have failed"),
                     )
                 } else {
-                    Status::Degraded(data.figment)
+                    Status::Degraded(data.figment, data.errors, src)
                 };
                 let queue = data
                     .members
@@ -196,6 +196,7 @@ mod tree {
         };
 
         Frame {
+            path,
             status,
             env,
             members: Vec::new(),

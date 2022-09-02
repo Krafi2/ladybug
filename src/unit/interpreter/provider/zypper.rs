@@ -9,6 +9,16 @@ use std::{
     process::Stdio,
 };
 
+#[derive(Debug, thiserror::Error)]
+enum Error {
+    #[error("Failed to spawn zypper process: {0}")]
+    Spawn(std::io::Error),
+    #[error("Zypper process exited unexpectedly with: {0}")]
+    Exited(std::process::ExitStatus),
+    #[error("{0}")]
+    Other(std::io::Error),
+}
+
 /// The zypper provider spawn a persistent zypper process using `zypper shell` and uses stdio to
 /// communicate commands.
 pub struct Provider {
@@ -55,16 +65,10 @@ impl Provider {
     }
 
     /// See if the subprocess exited unexpectedly
-    fn try_wait(&mut self) -> Result<(), String> {
+    fn try_wait(&mut self) -> Result<(), Error> {
         match self.zypper.try_wait() {
-            Ok(Some(status)) => Err(format!(
-                "Zypper process exited unexpectedly with: {}",
-                status
-            )),
-            Err(e) => Err(format!(
-                "Error attempting to get zypper process status: {}",
-                e
-            )),
+            Ok(Some(status)) => Err(Error::Exited(status)),
+            Err(e) => Err(Error::Other(e)),
             Ok(None) => Ok(()),
         }
     }
@@ -257,21 +261,14 @@ impl super::ProviderPrivate for Provider {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .spawn()
-            .map_err(|e| {
-                ProviderError::Unavailable(std::rc::Rc::new(format!(
-                    "Failed to spawn zypper process: {}",
-                    e
-                )))
-            })?;
+            .map_err(|e| ProviderError::Unavailable(std::rc::Rc::new(Error::Spawn(e))))?;
 
-        let new = Ok(Self { zypper });
+        let mut new = Self { zypper };
         // See if the subprocess exited unexpectedly
-        new.and_then(|mut zypper| {
-            zypper
-                .try_wait()
-                .map(|_| zypper)
-                .map_err(|err| ProviderError::Unavailable(std::rc::Rc::new(err)))
-        })
+        match new.try_wait() {
+            Ok(_) => Ok(new),
+            Err(err) => Err(ProviderError::Unavailable(std::rc::Rc::new(err))),
+        }
     }
 }
 
