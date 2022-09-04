@@ -4,11 +4,8 @@ pub mod structures;
 pub mod error;
 pub mod provider;
 
-use self::error::IntoReport;
-
-use super::{Routine, Unit};
 use crate::{context::Context, rel_path::RelPath, shell::Shell};
-use ariadne::{Color, Fmt, Label, Report, ReportKind};
+use ariadne::{Color, Fmt, ReportKind};
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
@@ -139,7 +136,7 @@ impl Iterator for Packages {
 #[derive(Debug, Clone)]
 struct Arg {
     name: Spanned<String>,
-    value: crate::unit::interpreter::Value,
+    value: Value,
 }
 
 impl Arg {
@@ -239,10 +236,8 @@ mod eval {
         provider, Arg, Args, Env, MemberPath, Package, Packages, Spanned, Value,
     };
     use crate::{
-        context::Context,
-        rel_path::RelPath,
-        shell::Shell,
-        unit::{interpreter::structures, Routine, Transaction, Unit},
+        context::Context, provider::Transaction, rel_path::RelPath, shell::Shell, structures,
+        Routine, Unit,
     };
 
     params! { struct NoParams {} }
@@ -276,21 +271,6 @@ mod eval {
         pub deploy: Option<Routine>,
         pub remove: Option<Routine>,
         pub capture: Option<Routine>,
-    }
-
-    impl UnitFigment {
-        pub fn into_unit(self) -> Option<Unit> {
-            Some(Unit {
-                name: self.name?,
-                desc: self.desc?,
-                topic: self.topic,
-                shell: self.shell,
-                transactions: self.transactions,
-                deploy: self.deploy,
-                remove: self.remove,
-                capture: self.capture,
-            })
-        }
     }
 
     pub struct UnitData {

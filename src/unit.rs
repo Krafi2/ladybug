@@ -1,4 +1,3 @@
-mod interpreter;
 use crate::{rel_path::RelPath, shell::Shell};
 pub use interpreter::{
     provider::{Manager, Provider, Transaction},
@@ -15,6 +14,21 @@ pub struct Unit {
     pub deploy: Option<Routine>,
     pub remove: Option<Routine>,
     pub capture: Option<Routine>,
+}
+
+impl Unit {
+    pub fn from_unit(self, figment: interpreter::UnitFigment) -> Option<Unit> {
+        Some(Self {
+            name: figment.name?,
+            desc: figment.desc?,
+            topic: figment.topic,
+            shell: figment.shell,
+            transactions: figment.transactions,
+            deploy: figment.deploy,
+            remove: figment.remove,
+            capture: figment.capture,
+        })
+    }
 }
 
 #[derive(Debug)]

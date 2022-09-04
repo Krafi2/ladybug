@@ -1,5 +1,5 @@
 [workspace]
-members = ["parser"]
+members = ["parser", "interpreter"]
 
 [package]
 name = "ladybug"
@@ -9,22 +9,17 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-parser = { path = "parser" }
+interpreter = { path = "interpreter" }
 clap = { version = "3.2.15", features = ["derive", "color"] }
 toml = "0.5.9"
 serde = { version = "1.0.140", features = ["derive"] }
 directories-next = "2.0.0"
 color-eyre = "0.6.2"
-globwalk = "0.8.1"
-figment = { version = "0.10.6", features = ["toml"] }
 tracing = "0.1.35"
 tracing-subscriber = "0.3.15"
 ariadne = "0.1.5"
 nix = { version = "0.25.0", default-features = false, features = ["user"] }
 thiserror = "1.0.32"
-
-[dev-dependencies]
-tempfile = "3.3.0"
 
 [profile.dev.package.backtrace]
 opt-level = 3
