@@ -81,14 +81,14 @@ impl Emitter {
 
 macro_rules! report {
     ( $filename:ident, report ( $kind:expr , $start:expr ) $($rest:tt)* ) => {
-         report!( $filename, ariadne::Report::build($kind, $filename, $start) , $($rest)* )
+         report!( $filename, ::ariadne::Report::build($kind, $filename, $start) , $($rest)* )
     };
     ( $filename:ident, $prev:expr, label ( $span:expr , $color:expr , $($message:expr),* ) $($rest:tt)* ) => {
         report!(
             $filename,
             $prev
             .with_label(
-                ariadne::Label::new(($filename, $span))
+                ::ariadne::Label::new(($filename, $span))
                     .with_color($color)
                     .with_message(format!( $($message),* ))
             ),
@@ -105,7 +105,7 @@ macro_rules! report {
     };
     ( $filename:ident, $prev:expr, ) => { $prev.finish() };
     ( $type:ty { $( $pattern:pat => { $($atr:ident $args:tt;)* } )* } ) => {
-        impl $crate::unit::interpreter::error::IntoReport for $type {
+        impl $crate::error::IntoReport for $type {
             fn into_report(self, filename: &str) -> ::ariadne::Report<(&str, Span)> {
                 match self {
                     $($pattern => report!( filename, $($atr $args)* ) ,)*

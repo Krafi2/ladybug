@@ -8,9 +8,7 @@ use crate::{
 use color_eyre::eyre::{eyre, WrapErr};
 use std::{
     fs::OpenOptions,
-    ops::Deref,
     path::{Path, PathBuf},
-    str::FromStr,
 };
 
 pub enum Error {
@@ -21,8 +19,8 @@ pub enum Error {
     PathDoesntExist(PathBuf, Span),
 }
 
-impl Into<crate::unit::interpreter::error::Error> for Error {
-    fn into(self) -> crate::unit::interpreter::error::Error {
+impl Into<crate::error::Error> for Error {
+    fn into(self) -> crate::error::Error {
         super::TransactionError::Files(self).into()
     }
 }
@@ -83,9 +81,9 @@ pub struct Provider;
 impl super::Transactor for Provider {
     fn new_transaction(
         &mut self,
-        args: crate::unit::interpreter::Args,
-        packages: crate::unit::interpreter::Packages,
-        emitter: &mut crate::unit::interpreter::error::Emitter,
+        args: crate::Args,
+        packages: crate::Packages,
+        emitter: &mut crate::error::Emitter,
         eval_ctx: &EvalCtx,
         context: &crate::context::Context,
     ) -> Result<super::Transaction, ()> {

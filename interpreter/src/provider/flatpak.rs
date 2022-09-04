@@ -5,10 +5,10 @@ pub struct Provider {}
 impl super::Transactor for Provider {
     fn new_transaction(
         &mut self,
-        args: crate::unit::interpreter::Args,
-        packages: crate::unit::interpreter::Packages,
-        emitter: &mut crate::unit::interpreter::error::Emitter,
-        eval_ctx: &crate::unit::interpreter::EvalCtx,
+        args: crate::Args,
+        packages: crate::Packages,
+        emitter: &mut crate::error::Emitter,
+        eval_ctx: &crate::EvalCtx,
         context: &crate::context::Context,
     ) -> Result<super::Transaction, ()> {
         todo!()

@@ -1,0 +1,15 @@
+[package]
+name = "interpreter"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+parser = { path = "../parser" }
+color-eyre = "0.6.2"
+ariadne = "0.1.5"
+thiserror = "1.0.33"
+
+[dev-dependencies]
+tempfile = "3.3.0"
