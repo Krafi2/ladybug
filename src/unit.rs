@@ -9,33 +9,12 @@ use std::path::PathBuf;
 pub struct Unit {
     pub name: String,
     pub desc: String,
-    pub target: RelPath,
     pub topic: Option<String>,
     pub shell: Option<Shell>,
     pub transactions: Vec<Transaction>,
     pub deploy: Option<Routine>,
     pub remove: Option<Routine>,
     pub capture: Option<Routine>,
-}
-
-enum DeployMethod {
-    SoftLink,
-    HardLink,
-    Copy,
-}
-
-enum ConflictStrat {
-    Abort,
-    Rename,
-    Remove,
-}
-
-struct Files {
-    method: DeployMethod,
-    conflicts: ConflictStrat,
-    source: RelPath,
-    target: RelPath,
-    files: Vec<PathBuf>,
 }
 
 #[derive(Debug)]
@@ -61,7 +40,7 @@ mod tree {
 
     pub enum Status {
         Ok(Unit),
-        Degraded(UnitFigment, Vec<interpreter::Error>, String),
+        Degraded(UnitFigment, Vec<interpreter::error::Error>, String),
         Err(color_eyre::Report),
     }
 
@@ -160,11 +139,11 @@ mod tree {
         context: &Context,
     ) -> Frame {
         let src = std::fs::read_to_string(&path)
-            .wrap_err_with(|| format!("Failed to read unit file {}", path));
+            .wrap_err_with(|| format!("Failed to read unit file {}", &path));
 
         let (status, env, queue) = match src {
             Ok(src) => {
-                let data = interpreter.eval(&src, manager, env, context);
+                let data = interpreter.eval(&src, &path, manager, env, context);
                 let status = if data.errors.is_empty() {
                     Status::Ok(
                         data.figment

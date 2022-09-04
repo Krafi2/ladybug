@@ -1,4 +1,4 @@
-use super::{structures::ParamError, Arg, Args, Emitter, PackageId, Packages, Span};
+use super::{error::Emitter, structures::ParamError, Arg, Args, EvalCtx, Packages, Span};
 use crate::context::Context;
 use std::{any::Any, collections::HashMap};
 
@@ -54,19 +54,12 @@ pub enum ProviderError {
     NeedRoot,
 }
 
-pub(super) enum PackageError {
-    NotRecognized,
-}
-
 pub(super) enum TransactionError {
-    // Something went wrong with the package itself
-    PackageErr(PackageId, PackageError),
-    Other(Box<dyn std::fmt::Display>),
-}
-
-pub(super) enum Error {
-    Provider(Span, ProviderError),
     Param(ParamError),
+    Provider(Span, ProviderError),
+    Zypper(zypper::Error),
+    Files(files::Error),
+    Flatpak(flatpak::Error),
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -117,11 +110,11 @@ impl Manager {
             .map(ProviderUpcast::as_provider)
     }
 
-    fn get_new_transaction(
+    fn get_transactor(
         &mut self,
         id: ProviderId,
         context: &Context,
-    ) -> Result<&mut dyn NewTransaction, ProviderError> {
+    ) -> Result<&mut dyn Transactor, ProviderError> {
         self.get_raw_provider(id, context)
             .map(ProviderUpcast::as_new_transaction)
     }
@@ -132,13 +125,20 @@ impl Manager {
         (args, arg_span): super::Spanned<Vec<Arg>>,
         packages: Packages,
         emitter: &mut Emitter,
+        eval_ctx: &EvalCtx,
         context: &Context,
-    ) -> Result<Transaction, Option<Error>> {
-        match self.get_new_transaction(id, context) {
+    ) -> Result<Transaction, Option<TransactionError>> {
+        match self.get_transactor(id, context) {
             Ok(transactor) => transactor
-                .new_transaction(Args::new(args, arg_span), packages, context, emitter)
+                .new_transaction(
+                    Args::new(args, arg_span),
+                    packages,
+                    emitter,
+                    eval_ctx,
+                    context,
+                )
                 .map_err(|_| None),
-            Err(err) => Err(Some(Error::Provider(span, err))),
+            Err(err) => Err(Some(TransactionError::Provider(span, err))),
         }
     }
 
@@ -147,6 +147,7 @@ impl Manager {
         args: super::Spanned<Vec<Arg>>,
         packages: Packages,
         emitter: &mut Emitter,
+        eval_ctx: &EvalCtx,
         context: &Context,
     ) -> Result<Transaction, ()> {
         let (args, span) = args;
@@ -159,7 +160,7 @@ impl Manager {
                     }
                 }
                 None => {
-                    emitter.emit(Error::Param(ParamError::NotFound {
+                    emitter.emit(TransactionError::Param(ParamError::NotFound {
                         span,
                         name: "provider",
                     }));
@@ -171,14 +172,14 @@ impl Manager {
         let (provider, val_span) = match provider {
             super::Value::String(s) => s,
             super::Value::Error((err, span)) => {
-                emitter.emit(Error::Param(ParamError::EvalErr {
+                emitter.emit(TransactionError::Param(ParamError::EvalErr {
                     span: span.clone(),
                     err: err.clone(),
                 }));
                 return Err(());
             }
             other => {
-                emitter.emit(Error::Param(ParamError::TypeErr {
+                emitter.emit(TransactionError::Param(ParamError::TypeErr {
                     arg: super::ArgId(arg_id),
                     span: other.span(),
                     expected: super::Type::String,
@@ -191,7 +192,7 @@ impl Manager {
         let provider_id = match ProviderId::from_name(&provider) {
             Some(id) => id,
             None => {
-                emitter.emit(Error::Param(ParamError::ValueErr {
+                emitter.emit(TransactionError::Param(ParamError::ValueErr {
                     arg: super::ArgId(arg_id),
                     span: val_span.clone(),
                     err: Box::new(InvalidProvider {
@@ -207,6 +208,7 @@ impl Manager {
             (args, span),
             packages,
             emitter,
+            eval_ctx,
             context,
         )
         .map_err(|err| {
@@ -221,6 +223,7 @@ impl Manager {
         args: super::Spanned<Vec<Arg>>,
         packages: Packages,
         emitter: &mut Emitter,
+        eval_ctx: &EvalCtx,
         context: &Context,
     ) -> Result<Transaction, ()> {
         let (args, span) = args;
@@ -230,6 +233,7 @@ impl Manager {
             (args, span),
             packages,
             emitter,
+            eval_ctx,
             context,
         )
         .map_err(|err| {
@@ -241,12 +245,12 @@ impl Manager {
 }
 
 trait ProviderUpcast {
-    fn as_new_transaction(&mut self) -> &mut dyn NewTransaction;
+    fn as_new_transaction(&mut self) -> &mut dyn Transactor;
     fn as_provider(&mut self) -> &mut dyn Provider;
 }
 
 impl<P: ProviderPrivate> ProviderUpcast for P {
-    fn as_new_transaction(&mut self) -> &mut dyn NewTransaction {
+    fn as_new_transaction(&mut self) -> &mut dyn Transactor {
         self
     }
 
@@ -274,18 +278,19 @@ impl std::fmt::Debug for Transaction {
     }
 }
 
-trait ProviderPrivate: Provider + NewTransaction + Sized {
+trait ProviderPrivate: Provider + Transactor + Sized {
     fn new(context: &Context) -> Result<Self, ProviderError>;
 }
 
-trait NewTransaction {
+trait Transactor {
     /// Create a new transaction from the block definition.
     fn new_transaction(
         &mut self,
         args: Args,
         packages: Packages,
-        context: &Context,
         emitter: &mut Emitter,
+        eval_ctx: &EvalCtx,
+        context: &Context,
     ) -> Result<Transaction, ()>;
 }
 

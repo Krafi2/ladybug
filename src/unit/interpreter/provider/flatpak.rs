@@ -1,12 +1,15 @@
+pub struct Error;
+
 pub struct Provider {}
 
-impl super::NewTransaction for Provider {
+impl super::Transactor for Provider {
     fn new_transaction(
         &mut self,
-        _args: crate::unit::interpreter::Args,
-        _packages: crate::unit::interpreter::Packages,
-        _context: &crate::context::Context,
-        _emitter: &mut crate::unit::interpreter::Emitter,
+        args: crate::unit::interpreter::Args,
+        packages: crate::unit::interpreter::Packages,
+        emitter: &mut crate::unit::interpreter::error::Emitter,
+        eval_ctx: &crate::unit::interpreter::EvalCtx,
+        context: &crate::context::Context,
     ) -> Result<super::Transaction, ()> {
         todo!()
     }

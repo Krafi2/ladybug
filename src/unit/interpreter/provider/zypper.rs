@@ -1,16 +1,16 @@
-use super::{PackageError, ProviderError, Transaction, TransactionError};
+use super::{ProviderError, Transaction, TransactionError};
 use crate::{
     context::Context,
-    unit::interpreter::{structures::FromArgs, Emitter},
+    unit::interpreter::{error::Emitter, structures::FromArgs, EvalCtx, Package, Span},
 };
-use color_eyre::{eyre::WrapErr, Result};
+use color_eyre::eyre::WrapErr;
 use std::{
     io::{Read, Write},
     process::Stdio,
 };
 
 #[derive(Debug, thiserror::Error)]
-enum Error {
+enum ProcessError {
     #[error("Failed to spawn zypper process: {0}")]
     Spawn(std::io::Error),
     #[error("Zypper process exited unexpectedly with: {0}")]
@@ -19,7 +19,18 @@ enum Error {
     Other(std::io::Error),
 }
 
-/// The zypper provider spawn a persistent zypper process using `zypper shell` and uses stdio to
+pub enum Error {
+    PackageNotRecognized(String, Span),
+    Eyre(color_eyre::Report, Span),
+}
+
+impl Into<crate::unit::interpreter::error::Error> for Error {
+    fn into(self) -> crate::unit::interpreter::error::Error {
+        super::TransactionError::Zypper(self).into()
+    }
+}
+
+/// The zypper provider spawns a persistent zypper process using `zypper shell` and uses stdio to
 /// communicate commands.
 pub struct Provider {
     /// The zypper process
@@ -52,23 +63,26 @@ impl Provider {
     }
 
     /// Check if the package named 'package' exists
-    fn exists(&mut self, package: &str) -> Result<bool> {
-        writeln!(self.stdin(), "info {}", package)?;
+    fn exists(&mut self, package: &str) -> color_eyre::Result<bool> {
+        writeln!(self.stdin(), "info {}", &package).wrap_err("Failed to write stdin")?;
         let mut buf = Vec::new();
         self.stdout()
             .read_to_end(&mut buf)
             .wrap_err("Failed to read stdout")?;
 
         // This is what zypper says when it can't find the package
-        let unfound = contains_bytes(&buf, format!("package '{}' not found.", package).as_bytes());
+        let unfound = contains_bytes(
+            &buf,
+            format!("package '{}' not found.", &package).as_bytes(),
+        );
         Ok(!unfound)
     }
 
     /// See if the subprocess exited unexpectedly
-    fn try_wait(&mut self) -> Result<(), Error> {
+    fn try_wait(&mut self) -> Result<(), ProcessError> {
         match self.zypper.try_wait() {
-            Ok(Some(status)) => Err(Error::Exited(status)),
-            Err(e) => Err(Error::Other(e)),
+            Ok(Some(status)) => Err(ProcessError::Exited(status)),
+            Err(e) => Err(ProcessError::Other(e)),
             Ok(None) => Ok(()),
         }
     }
@@ -76,7 +90,7 @@ impl Provider {
     fn zypper_cmd(&mut self, cmd: &str, transaction: Transaction) -> color_eyre::Result<()> {
         let transaction = transaction
             .payload
-            .downcast::<TransactionInner>()
+            .downcast::<Payload>()
             .expect("Wrong type");
 
         let from = if let Some(from) = transaction.from {
@@ -119,60 +133,13 @@ impl Provider {
 
         Ok(())
     }
-
-    fn remove(&mut self, transaction: Transaction) -> color_eyre::Result<()> {
-        let transaction = transaction
-            .payload
-            .downcast::<TransactionInner>()
-            .expect("Wrong type");
-
-        let from = if let Some(from) = transaction.from {
-            from.iter()
-                .map(String::as_str)
-                .flat_map(|s| [" --from ", s])
-                .collect::<String>()
-        } else {
-            "".to_owned()
-        };
-
-        let packages =
-            transaction
-                .packages
-                .into_iter()
-                .fold(String::new(), |mut state, package| {
-                    state.push_str(" ");
-                    state.push_str(&package.name);
-                    state
-                });
-
-        writeln!(self.stdin(), "install{} {}", from, packages)
-            .wrap_err("Failed to write to stdout")?;
-
-        let mut buf = Vec::new();
-        self.stderr()
-            .read_to_end(&mut buf)
-            .wrap_err("Failed to read stderr")?;
-
-        // Check if the proccess printed anything to `stderr`. I'm not sure if this will work in
-        // all cases but let's give it a try.
-        if !buf.is_empty() {
-            return Err(color_eyre::eyre::eyre!(
-                String::from_utf8_lossy(&buf).into_owned()
-            ));
-        }
-
-        self.try_wait()
-            .map_err(|err| color_eyre::eyre::eyre!(err))?;
-
-        Ok(())
-    }
 }
 
 struct ZyppPackage {
     name: String,
 }
 
-struct TransactionInner {
+struct Payload {
     from: Option<Vec<String>>,
     packages: Vec<ZyppPackage>,
 }
@@ -180,13 +147,14 @@ struct TransactionInner {
 params! { struct ZyppParams { from: Option<Vec<String>> } }
 params! { struct PackageParams {} }
 
-impl super::NewTransaction for Provider {
+impl super::Transactor for Provider {
     fn new_transaction(
         &mut self,
         args: super::Args,
         packages: super::Packages,
-        context: &Context,
         emitter: &mut Emitter,
+        _eval_ctx: &EvalCtx,
+        context: &Context,
     ) -> Result<Transaction, ()> {
         // Parse the package block params
         let params = ZyppParams::from_args(args, emitter, context);
@@ -208,16 +176,14 @@ impl super::NewTransaction for Provider {
                             packs.push(package);
                         // The package doesn't exist
                         } else {
-                            emitter.emit(TransactionError::PackageErr(
-                                id,
-                                PackageError::NotRecognized,
-                            ));
+                            emitter
+                                .emit(Error::PackageNotRecognized(package.name.0, package.name.1));
                             is_err = true;
                         }
                     }
                     // Some other error happened while confirming the package's existence
                     Err(other) => {
-                        emitter.emit(TransactionError::Other(Box::new(other)));
+                        emitter.emit(Error::Eyre(other, package.name.1));
                         is_err = true;
                     }
                 },
@@ -231,7 +197,7 @@ impl super::NewTransaction for Provider {
 
         Ok(Transaction {
             provider: super::ProviderKind::Zypper.into(),
-            payload: Box::new(TransactionInner {
+            payload: Box::new(Payload {
                 from: params?.from,
                 packages: packs,
             }),
@@ -261,7 +227,7 @@ impl super::ProviderPrivate for Provider {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .spawn()
-            .map_err(|e| ProviderError::Unavailable(std::rc::Rc::new(Error::Spawn(e))))?;
+            .map_err(|e| ProviderError::Unavailable(std::rc::Rc::new(ProcessError::Spawn(e))))?;
 
         let mut new = Self { zypper };
         // See if the subprocess exited unexpectedly
