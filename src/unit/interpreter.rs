@@ -1,15 +1,18 @@
 #[macro_use]
 pub mod structures;
+#[macro_use]
+pub mod error;
 pub mod provider;
 
+use self::error::IntoReport;
+
+use super::{Routine, Unit};
+use crate::{context::Context, rel_path::RelPath, shell::Shell};
+use ariadne::{Color, Fmt, Label, Report, ReportKind};
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
 };
-
-use crate::{context::Context, shell::Shell};
-
-use super::{Routine, Unit};
 
 type Span = std::ops::Range<usize>;
 type Spanned<T> = (T, Span);
@@ -26,20 +29,36 @@ pub enum Value {
 #[derive(Debug, Clone)]
 pub enum EvalError {
     UnknownVar(String),
-    VarError(Box<Spanned<EvalError>>),
+    VarError(String, Box<Spanned<EvalError>>),
+}
+
+report! {
+    (EvalError, Span) {
+        (EvalError::UnknownVar(var), span) => {
+            report(ReportKind::Error, span.start);
+            message("Undefined variable ${}", var.fg(Color::Red));
+            label(span, Color::Red, "This variable is not defined");
+
+        }
+        (EvalError::VarError(var, _), span) => {
+            report(ReportKind::Error, span.start);
+            message("Encountered an error while evaluating variable ${}", var.fg(Color::Red));
+            label(span, Color::Red, "Cannot evaluate this variable");
+        }
+    }
 }
 
 impl Value {
     fn from_expr(expr: parser::Expr, env: &Env) -> Self {
         match expr {
-            parser::Expr::Variable((v, span)) => match env.get(&v) {
+            parser::Expr::Variable((var, span)) => match env.get(&var) {
                 Some(v) => match v {
                     Value::Error(e) => {
-                        Value::Error((EvalError::VarError(Box::new(e.clone())), span))
+                        Value::Error((EvalError::VarError(var, Box::new(e.clone())), span))
                     }
                     v => v.clone(),
                 },
-                None => Value::Error((EvalError::UnknownVar(v), span)),
+                None => Value::Error((EvalError::UnknownVar(var), span)),
             },
             parser::Expr::String(s) => Self::String(s),
             parser::Expr::Bool(b) => Self::Bool(b),
@@ -182,71 +201,8 @@ impl Iterator for Args {
     }
 }
 
-enum ErrorKind {
-    Eval(Spanned<EvalError>),
-    Parse(parser::Error),
-    Param(structures::ParamError),
-    Provider(provider::Error),
-    Transaction(provider::TransactionError),
-    Other(color_eyre::Report),
-}
-
-impl From<Spanned<EvalError>> for ErrorKind {
-    fn from(err: Spanned<EvalError>) -> Self {
-        Self::Eval(err)
-    }
-}
-impl From<parser::Error> for ErrorKind {
-    fn from(err: parser::Error) -> Self {
-        Self::Parse(err)
-    }
-}
-impl From<structures::ParamError> for ErrorKind {
-    fn from(err: structures::ParamError) -> Self {
-        Self::Param(err)
-    }
-}
-impl From<provider::Error> for ErrorKind {
-    fn from(err: provider::Error) -> Self {
-        Self::Provider(err)
-    }
-}
-impl From<provider::TransactionError> for ErrorKind {
-    fn from(err: provider::TransactionError) -> Self {
-        Self::Transaction(err)
-    }
-}
-
-pub struct Error(ErrorKind);
-
-impl Error {
-    pub fn into_report<'a>(self, filename: &'a str) -> ariadne::Report<(&'a str, Span)> {
-        match self.0 {
-            ErrorKind::Parse(err) => err.into_report(filename),
-            _ => todo!(),
-        }
-    }
-
-    pub fn custom(err: color_eyre::Report) -> Self {
-        Error(ErrorKind::Other(err))
-    }
-}
-
-struct ErrorId(usize);
-
-struct Emitter {
-    errors: Vec<Error>,
-}
-
-impl Emitter {
-    pub fn emit<E: Into<ErrorKind>>(&mut self, error: E) -> ErrorId {
-        let id = self.errors.len();
-        self.errors.push(Error(error.into()));
-        ErrorId(id)
-    }
-}
-
-pub struct UnitPath(pub PathBuf);
+#[derive(Debug, Clone)]
+pub struct MemberPath(pub PathBuf);
 
 #[derive(Debug, thiserror::Error)]
 pub enum PathError {
@@ -258,7 +214,7 @@ pub enum PathError {
     Empty,
 }
 
-impl std::str::FromStr for UnitPath {
+impl std::str::FromStr for MemberPath {
     type Err = PathError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
@@ -275,239 +231,281 @@ impl std::str::FromStr for UnitPath {
     }
 }
 
-params! { struct NoParams {} }
+use eval::EvalCtx;
+pub use eval::{Interpreter, UnitFigment};
+mod eval {
+    use super::{
+        error::{Emitter, Error},
+        provider, Arg, Args, Env, MemberPath, Package, Packages, Spanned, Value,
+    };
+    use crate::{
+        context::Context,
+        rel_path::RelPath,
+        shell::Shell,
+        unit::{interpreter::structures, Routine, Transaction, Unit},
+    };
 
-params! {
-    struct RoutineParams {
-        shell: Option<Vec<String>>,
-        stdin: Option<bool>,
-        stdout: Option<bool>,
-    }
-}
+    params! { struct NoParams {} }
 
-params! {
-    struct UnitHeader {
-        name: Result<String, ()>,
-        desc: Result<String, ()>,
-        target: Result<crate::rel_path::RelPath, ()>,
-        topic: Option<String>,
-        shell: Option<Vec<String>>,
-        members: Option<Vec<structures::FromString<UnitPath>>>,
-    }
-}
-
-#[derive(Debug, Default)]
-pub struct UnitFigment {
-    pub name: Option<String>,
-    pub desc: Option<String>,
-    pub target: Option<crate::rel_path::RelPath>,
-    pub topic: Option<String>,
-    pub shell: Option<Shell>,
-
-    pub transactions: Vec<provider::Transaction>,
-    pub deploy: Option<Routine>,
-    pub remove: Option<Routine>,
-    pub capture: Option<Routine>,
-}
-
-impl UnitFigment {
-    pub fn into_unit(self) -> Option<Unit> {
-        Some(Unit {
-            name: self.name?,
-            desc: self.desc?,
-            target: self.target?,
-            topic: self.topic,
-            shell: self.shell,
-            transactions: self.transactions,
-            deploy: self.deploy,
-            remove: self.remove,
-            capture: self.capture,
-        })
-    }
-}
-
-pub struct UnitData {
-    pub figment: UnitFigment,
-    pub env: Env,
-    pub members: Option<Vec<UnitPath>>,
-    pub errors: Vec<Error>,
-}
-
-pub struct Interpreter {
-    parser: parser::Parser,
-}
-
-impl Interpreter {
-    pub fn new() -> Self {
-        Self {
-            parser: parser::Parser::new(),
+    params! {
+        struct RoutineParams {
+            shell: Option<Vec<String>>,
+            stdin: Option<bool>,
+            stdout: Option<bool>,
         }
     }
 
-    pub fn eval(
-        &self,
-        src: &str,
-        manager: &mut provider::Manager,
-        mut env: Env,
-        context: &crate::context::Context,
-    ) -> UnitData {
-        let mut emitter = Emitter { errors: Vec::new() };
+    params! {
+        struct UnitHeader {
+            name: Result<String, ()>,
+            desc: Result<String, ()>,
+            topic: Option<String>,
+            shell: Option<Vec<String>>,
+            members: Option<Vec<structures::ParseStr<MemberPath>>>,
+        }
+    }
 
-        let (blocks, errors) = self.parser.parse(src);
-        for err in errors {
-            emitter.emit(err);
+    #[derive(Debug, Default)]
+    pub struct UnitFigment {
+        pub name: Option<String>,
+        pub desc: Option<String>,
+        pub topic: Option<String>,
+        pub shell: Option<Shell>,
+
+        pub transactions: Vec<Transaction>,
+        pub deploy: Option<Routine>,
+        pub remove: Option<Routine>,
+        pub capture: Option<Routine>,
+    }
+
+    impl UnitFigment {
+        pub fn into_unit(self) -> Option<Unit> {
+            Some(Unit {
+                name: self.name?,
+                desc: self.desc?,
+                topic: self.topic,
+                shell: self.shell,
+                transactions: self.transactions,
+                deploy: self.deploy,
+                remove: self.remove,
+                capture: self.capture,
+            })
+        }
+    }
+
+    pub struct UnitData {
+        pub figment: UnitFigment,
+        pub env: Env,
+        pub members: Option<Vec<MemberPath>>,
+        pub errors: Vec<Error>,
+    }
+
+    pub(super) struct EvalCtx {
+        members: Vec<MemberPath>,
+        dir: RelPath,
+    }
+
+    impl EvalCtx {
+        pub fn members(&self) -> &[MemberPath] {
+            &self.members
         }
 
-        let mut unit_name = None;
-        let mut desc = None;
-        let mut target = None;
-        let mut topic = None;
-        let mut shell = None;
-        let mut members = None;
+        pub fn dir(&self) -> &RelPath {
+            &self.dir
+        }
+    }
 
-        let mut transactions = Vec::new();
-        let mut deploy = None;
-        let mut remove = None;
-        let mut capture = None;
+    pub struct Interpreter {
+        parser: parser::Parser,
+    }
 
-        for block in blocks {
-            match block {
-                parser::Block::Map { name, params, body } => match name {
-                    parser::Name::Unit => {
-                        let _ = parse_args::<NoParams>(params, &env, &mut emitter, context);
-                        if let Ok(header) =
-                            parse_args::<UnitHeader>(body, &env, &mut emitter, context)
-                        {
-                            unit_name = header.name.ok();
-                            desc = header.desc.ok();
-                            target = header.target.ok();
-                            topic = header.topic;
-                            shell = header.shell;
-                            members = header
-                                .members
-                                .map(|members| members.into_iter().map(|path| path.0).collect());
-                        }
-                    }
-                    parser::Name::Env => {
-                        let _ = parse_args::<NoParams>(params, &env, &mut emitter, context);
-                        for (param, _span) in body.0 {
-                            let name = param.name.0;
-                            let val = Value::from_expr(param.val, &env);
+    impl Interpreter {
+        pub fn new() -> Self {
+            Self {
+                parser: parser::Parser::new(),
+            }
+        }
 
-                            if let Value::Error(err) = &val {
-                                emitter.emit(err.clone());
-                            }
-                            env.insert(name, val);
-                        }
-                    }
-                    _ => panic!("Map block has invalid name"),
+        pub fn eval(
+            &self,
+            src: &str,
+            path: &RelPath,
+            manager: &mut super::provider::Manager,
+            mut env: Env,
+            context: &crate::context::Context,
+        ) -> UnitData {
+            let mut emitter = Emitter::new();
+
+            let (blocks, errors) = self.parser.parse(src);
+            for err in errors {
+                emitter.emit(err);
+            }
+
+            let mut unit_name = None;
+            let mut desc = None;
+            let mut topic = None;
+            let mut shell = None;
+            let mut members = None;
+
+            let mut transactions = Vec::new();
+            let mut deploy = None;
+            let mut remove = None;
+            let mut capture = None;
+            let mut eval_ctx = EvalCtx {
+                members: vec![],
+                dir: {
+                    let mut path = path.clone();
+                    path.pop();
+                    path
                 },
-                parser::Block::Items {
-                    name,
-                    params,
-                    items,
-                } => {
-                    let packages = Packages::new(
-                        items
-                            .0
-                            .into_iter()
-                            .map(|item| Package {
-                                name: item.name,
-                                args: Args::from_exprs(item.args, &env),
-                            })
-                            .collect(),
-                        items.1,
-                    );
+            };
 
-                    let args = (
-                        params
-                            .0
-                            .into_iter()
-                            .map(|(arg, _)| Arg::from_expr(arg, &env))
-                            .collect(),
-                        params.1,
-                    );
+            for block in blocks {
+                match block {
+                    parser::Block::Map { name, params, body } => match name {
+                        parser::Name::Unit => {
+                            let _ = parse_args::<NoParams>(params, &env, &mut emitter, context);
+                            if let Ok(header) =
+                                parse_args::<UnitHeader>(body, &env, &mut emitter, context)
+                            {
+                                unit_name = header.name.ok();
+                                desc = header.desc.ok();
+                                topic = header.topic;
+                                shell = header.shell;
+                                members = header.members.map(|members| {
+                                    members.into_iter().map(|path| path.0).collect::<Vec<_>>()
+                                });
+                                if let Some(members) = members.as_ref() {
+                                    eval_ctx.members = members.clone();
+                                }
+                            }
+                        }
+                        parser::Name::Env => {
+                            let _ = parse_args::<NoParams>(params, &env, &mut emitter, context);
+                            for (param, _span) in body.0 {
+                                let name = param.name.0;
+                                let val = Value::from_expr(param.val, &env);
 
-                    let res = match name {
-                        parser::Name::Files => {
-                            manager.new_files(args, packages, &mut emitter, context)
+                                if let Value::Error(err) = &val {
+                                    emitter.emit(err.clone());
+                                }
+                                env.insert(name, val);
+                            }
                         }
-                        parser::Name::Packages => {
-                            manager.new_transaction(args, packages, &mut emitter, context)
-                        }
-                        _ => panic!("Item block has invalid name"),
-                    };
-                    if let Ok(t) = res {
-                        transactions.push(t)
-                    }
-                }
-                parser::Block::Routine {
-                    name,
-                    params,
-                    content,
-                } => {
-                    if let Ok(params) =
-                        parse_args::<RoutineParams>(params, &env, &mut emitter, context)
-                    {
-                        let routine = super::Routine {
-                            shell: params.shell.map(crate::shell::Shell::from_vec),
-                            stdin: params.stdin.unwrap_or(true),
-                            stdout: params.stdout.unwrap_or(true),
-                            code: content,
+                        _ => panic!("Map block has invalid name"),
+                    },
+                    parser::Block::Items {
+                        name,
+                        params,
+                        items,
+                    } => {
+                        let packages = Packages::new(
+                            items
+                                .0
+                                .into_iter()
+                                .map(|item| Package {
+                                    name: item.name,
+                                    args: Args::from_exprs(item.args, &env),
+                                })
+                                .collect(),
+                            items.1,
+                        );
+
+                        let args = (
+                            params
+                                .0
+                                .into_iter()
+                                .map(|(arg, _)| Arg::from_expr(arg, &env))
+                                .collect(),
+                            params.1,
+                        );
+
+                        let res = match name {
+                            parser::Name::Files => {
+                                manager.new_files(args, packages, &mut emitter, &eval_ctx, context)
+                            }
+                            parser::Name::Packages => manager.new_transaction(
+                                args,
+                                packages,
+                                &mut emitter,
+                                &eval_ctx,
+                                context,
+                            ),
+                            _ => panic!("Item block has invalid name"),
                         };
-                        match name {
-                            // TODO: make it an error to have multiple routine blocks of the same name
-                            parser::Name::Deploy => deploy = Some(routine),
-                            parser::Name::Remove => remove = Some(routine),
-                            parser::Name::Capture => capture = Some(routine),
-                            _ => panic!("Routine block has invalid name"),
+                        if let Ok(t) = res {
+                            transactions.push(t)
+                        }
+                    }
+                    parser::Block::Routine {
+                        name,
+                        params,
+                        content,
+                    } => {
+                        if let Ok(params) =
+                            parse_args::<RoutineParams>(params, &env, &mut emitter, context)
+                        {
+                            let routine = super::Routine {
+                                shell: params.shell.map(crate::shell::Shell::from_vec),
+                                stdin: params.stdin.unwrap_or(true),
+                                stdout: params.stdout.unwrap_or(true),
+                                code: content,
+                            };
+                            match name {
+                                // TODO: make it an error to have multiple routine blocks of the same name
+                                parser::Name::Deploy => deploy = Some(routine),
+                                parser::Name::Remove => remove = Some(routine),
+                                parser::Name::Capture => capture = Some(routine),
+                                _ => panic!("Routine block has invalid name"),
+                            }
                         }
                     }
                 }
             }
-        }
 
-        UnitData {
-            figment: UnitFigment {
-                name: unit_name,
-                desc,
-                target,
-                topic,
-                shell: shell.map(Shell::from_vec),
-                transactions,
-                deploy,
-                remove,
-                capture,
-            },
-            env,
-            members,
-            errors: emitter.errors,
+            UnitData {
+                figment: UnitFigment {
+                    name: unit_name,
+                    desc,
+                    topic,
+                    shell: shell.map(Shell::from_vec),
+                    transactions,
+                    deploy,
+                    remove,
+                    capture,
+                },
+                env,
+                members,
+                errors: emitter.into_errors(),
+            }
         }
     }
-}
 
-fn collect_errors<I: IntoIterator<Item = Result<A, B>>, A, B>(iter: I) -> Result<Vec<A>, Vec<B>> {
-    iter.into_iter()
-        .fold(Ok(Vec::new()), |state, next| match (state, next) {
-            (Ok(mut list), Ok(next)) => {
-                list.push(next);
-                Ok(list)
-            }
-            (Ok(_), Err(err)) => Err(vec![err]),
-            (Err(errors), Ok(_)) => Err(errors),
-            (Err(mut errors), Err(err)) => {
-                errors.push(err);
-                Err(errors)
-            }
-        })
-}
+    fn collect_errors<I: IntoIterator<Item = Result<A, B>>, A, B>(
+        iter: I,
+    ) -> Result<Vec<A>, Vec<B>> {
+        iter.into_iter()
+            .fold(Ok(Vec::new()), |state, next| match (state, next) {
+                (Ok(mut list), Ok(next)) => {
+                    list.push(next);
+                    Ok(list)
+                }
+                (Ok(_), Err(err)) => Err(vec![err]),
+                (Err(errors), Ok(_)) => Err(errors),
+                (Err(mut errors), Err(err)) => {
+                    errors.push(err);
+                    Err(errors)
+                }
+            })
+    }
 
-fn parse_args<T: structures::FromArgs>(
-    args: Spanned<Vec<Spanned<parser::Param>>>,
-    env: &Env,
-    emitter: &mut Emitter,
-    context: &Context,
-) -> Result<T, ()> {
-    let args = Args::from_exprs(args, env);
-    T::from_args(args, emitter, context)
+    fn parse_args<T: structures::FromArgs>(
+        args: Spanned<Vec<Spanned<parser::Param>>>,
+        env: &Env,
+        emitter: &mut Emitter,
+        context: &Context,
+    ) -> Result<T, ()> {
+        let args = Args::from_exprs(args, env);
+        T::from_args(args, emitter, context)
+    }
 }

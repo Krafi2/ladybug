@@ -1,6 +1,11 @@
+use std::path::PathBuf;
+
 use crate::{context::Context, rel_path::RelPath};
 
-use super::{Arg, ArgId, Emitter, Span, Type, Value};
+use super::{
+    error::{Emitter, IntoReport},
+    Arg, ArgId, Span, Type, Value,
+};
 
 pub(super) enum ParamError {
     ValueErr {
@@ -28,11 +33,28 @@ pub(super) enum ParamError {
     },
 }
 
+impl IntoReport for ParamError {
+    fn into_report(self, filename: &str) -> ariadne::Report<(&str, Span)> {
+        match self {
+            ParamError::ValueErr { arg, span, err } => todo!(),
+            ParamError::TypeErr {
+                arg,
+                span,
+                expected,
+                found,
+            } => todo!(),
+            ParamError::Unused { arg, span } => todo!(),
+            ParamError::NotFound { span, name } => todo!(),
+            ParamError::EvalErr { span, err } => todo!(),
+        }
+    }
+}
+
 pub(super) trait ParseParam: Sized {
     fn parse(
-        span: &Span,
         name: &'static str,
         value: Option<(ArgId, Value)>,
+        span: &Span,
         emitter: &mut Emitter,
         context: &Context,
     ) -> Result<Self, ()>;
@@ -40,9 +62,9 @@ pub(super) trait ParseParam: Sized {
 
 impl ParseParam for String {
     fn parse(
-        span: &Span,
         name: &'static str,
         value: Option<(ArgId, Value)>,
+        span: &Span,
         emitter: &mut Emitter,
         _context: &Context,
     ) -> Result<Self, ()> {
@@ -68,11 +90,23 @@ impl ParseParam for String {
     }
 }
 
-impl ParseParam for bool {
+impl ParseParam for PathBuf {
     fn parse(
-        span: &Span,
         name: &'static str,
         value: Option<(ArgId, Value)>,
+        span: &Span,
+        emitter: &mut Emitter,
+        context: &Context,
+    ) -> Result<Self, ()> {
+        String::parse(name, value, span, emitter, context).map(|s| PathBuf::from(s))
+    }
+}
+
+impl ParseParam for bool {
+    fn parse(
+        name: &'static str,
+        value: Option<(ArgId, Value)>,
+        span: &Span,
         emitter: &mut Emitter,
         _context: &Context,
     ) -> Result<Self, ()> {
@@ -100,9 +134,9 @@ impl ParseParam for bool {
 
 impl<T: ParseParam> ParseParam for Vec<T> {
     fn parse(
-        span: &Span,
         name: &'static str,
         value: Option<(ArgId, Value)>,
+        span: &Span,
         emitter: &mut Emitter,
         context: &Context,
     ) -> Result<Self, ()> {
@@ -110,7 +144,7 @@ impl<T: ParseParam> ParseParam for Vec<T> {
             Some((arg, value)) => match value {
                 Value::List((vec, _)) => vec
                     .into_iter()
-                    .map(|value| T::parse(span, "", Some((arg, value)), emitter, context))
+                    .map(|value| T::parse("", Some((arg, value)), span, emitter, context))
                     .fold(Ok(Vec::new()), |state, v| match (state, v) {
                         (Ok(mut list), Ok(v)) => {
                             list.push(v);
@@ -145,14 +179,14 @@ impl<T: ParseParam> ParseParam for Vec<T> {
 
 impl<T: ParseParam> ParseParam for Option<T> {
     fn parse(
-        span: &Span,
         name: &'static str,
         value: Option<(ArgId, Value)>,
+        span: &Span,
         emitter: &mut Emitter,
         context: &Context,
     ) -> Result<Self, ()> {
         match value {
-            Some(value) => T::parse(span, name, Some(value), emitter, context).map(Some),
+            Some(value) => T::parse(name, Some(value), span, emitter, context).map(Some),
             None => Ok(None),
         }
     }
@@ -160,9 +194,9 @@ impl<T: ParseParam> ParseParam for Option<T> {
 
 impl ParseParam for RelPath {
     fn parse(
-        span: &Span,
         name: &'static str,
         value: Option<(ArgId, Value)>,
+        span: &Span,
         emitter: &mut Emitter,
         context: &Context,
     ) -> Result<Self, ()> {
@@ -194,16 +228,16 @@ impl ParseParam for RelPath {
     }
 }
 
-pub struct FromString<T>(pub T);
+pub struct ParseStr<T>(pub T);
 
-impl<T: std::str::FromStr> ParseParam for FromString<T>
+impl<T: std::str::FromStr> ParseParam for ParseStr<T>
 where
     T::Err: std::error::Error + 'static,
 {
     fn parse(
-        span: &Span,
         name: &'static str,
         value: Option<(ArgId, Value)>,
+        span: &Span,
         emitter: &mut Emitter,
         _context: &Context,
     ) -> Result<Self, ()> {
@@ -211,7 +245,7 @@ where
             Some((arg, value)) => match value {
                 Value::String((s, span)) => {
                     T::from_str(&s)
-                        .map(FromString)
+                        .map(ParseStr)
                         .map_err(|err| ParamError::ValueErr {
                             arg,
                             span,
@@ -239,22 +273,42 @@ where
 
 impl<T: ParseParam> ParseParam for Result<T, ()> {
     fn parse(
-        span: &Span,
         name: &'static str,
         value: Option<(ArgId, Value)>,
+        span: &Span,
         emitter: &mut Emitter,
         context: &Context,
     ) -> Result<Self, ()> {
-        Ok(T::parse(span, name, value, emitter, context))
+        Ok(T::parse(name, value, span, emitter, context))
+    }
+}
+
+impl<T: ParseParam> ParseParam for (T, Span) {
+    fn parse(
+        name: &'static str,
+        value: Option<(ArgId, Value)>,
+        span: &Span,
+        emitter: &mut Emitter,
+        context: &Context,
+    ) -> Result<Self, ()> {
+        match value {
+            Some(value) => {
+                let val_span = value.1.span();
+                T::parse(name, Some(value), span, emitter, context).map(|t| (t, val_span))
+            }
+            None => {
+                emitter.emit(ParamError::NotFound {
+                    span: span.clone(),
+                    name,
+                });
+                Err(())
+            }
+        }
     }
 }
 
 pub(super) trait FromArgs: Sized {
-    fn from_args(
-        args: super::Args,
-        emitter: &mut super::Emitter,
-        context: &Context,
-    ) -> Result<Self, ()>;
+    fn from_args(args: super::Args, emitter: &mut Emitter, context: &Context) -> Result<Self, ()>;
 }
 
 macro_rules! params {
@@ -266,9 +320,9 @@ macro_rules! params {
 
     (parse $span:ident, $names:ident, $params:ident, $emitter:ident, $context:ident, $field:ident : $kind:ty, $($field_rest:ident : $type_rest:ty,)*) => {
         let $field = <$kind as $crate::unit::interpreter::structures::ParseParam>::parse(
-            &$span,
             $names.next().expect("Unexpected end of iterator"),
             $params.next().expect("Unexpected end of iterator"),
+            &$span,
             $emitter,
             $context,
         );
@@ -281,7 +335,7 @@ macro_rules! params {
         $where $what $name { $($field : $kind),* }
 
         impl $crate::unit::interpreter::structures::FromArgs for $name {
-            fn from_args(args: $crate::unit::interpreter::Args, emitter: &mut $crate::unit::interpreter::Emitter, context: &$crate::context::Context)
+            fn from_args(args: $crate::unit::interpreter::Args, emitter: &mut $crate::unit::interpreter::error::Emitter, context: &$crate::context::Context)
                     -> std::result::Result<Self, ()> {
                 #![allow(unused)]
                 let names = [$(stringify!($field)),*];

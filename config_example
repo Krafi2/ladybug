@@ -2,7 +2,6 @@
 unit {
     name: My App
     desc: deploy My App
-    target: ~
     topic: development
     shell: [bash -c %c]
     members: [my_app your_app]
