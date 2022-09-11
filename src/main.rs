@@ -1,13 +1,12 @@
 mod commands;
 mod context;
-mod rel_path;
 mod serde;
 mod shell;
 mod unit;
 
 use clap::Parser;
 use color_eyre::eyre::{bail, WrapErr};
-use rel_path::RelPath;
+use common::rel_path::RelPath;
 use std::os::unix::process::CommandExt;
 
 fn main() {
@@ -32,12 +31,11 @@ fn run() -> color_eyre::Result<Result<(), ()>> {
         .ok_or(())
         .or_else(|_| context::default_config_path())
         .and_then(|path| {
-            RelPath::relative_to(path, context::home_dir()).wrap_err("Failed to expand config path")
+            RelPath::new(path, context::home_dir()).wrap_err("Failed to expand config path")
         })?;
 
     let dotfiles = opts.dotfiles.map(|path| {
-        RelPath::relative_to(path, context::home_dir())
-            .wrap_err("Failed to expand dotfile directory path")
+        RelPath::new(path, context::home_dir()).wrap_err("Failed to expand dotfile directory path")
     });
 
     if context::detect_root() {

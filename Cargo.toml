@@ -1,5 +1,5 @@
 [workspace]
-members = ["parser", "interpreter"]
+members = ["parser", "interpreter", "common"]
 
 [package]
 name = "ladybug"
@@ -10,6 +10,7 @@ edition = "2021"
 
 [dependencies]
 interpreter = { path = "interpreter" }
+common = { path = "common" }
 clap = { version = "3.2.15", features = ["derive", "color"] }
 toml = "0.5.9"
 serde = { version = "1.0.140", features = ["derive"] }

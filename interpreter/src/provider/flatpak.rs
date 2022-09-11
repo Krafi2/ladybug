@@ -1,15 +1,21 @@
+use crate::error::IntoReport;
+
 pub struct Error;
+
+impl IntoReport for Error {
+    fn into_report(self, _filename: &str) -> ariadne::Report<(&str, crate::Span)> {
+        todo!()
+    }
+}
 
 pub struct Provider {}
 
 impl super::Transactor for Provider {
     fn new_transaction(
         &mut self,
-        args: crate::Args,
-        packages: crate::Packages,
-        emitter: &mut crate::error::Emitter,
-        eval_ctx: &crate::EvalCtx,
-        context: &crate::context::Context,
+        _args: crate::Args,
+        _packages: crate::Packages,
+        _context: &mut crate::eval::Ctx,
     ) -> Result<super::Transaction, ()> {
         todo!()
     }
@@ -26,7 +32,7 @@ impl super::Provider for Provider {
 }
 
 impl super::ProviderPrivate for Provider {
-    fn new(_context: &crate::context::Context) -> Result<Self, super::ProviderError> {
+    fn new(_root: bool) -> Result<Self, super::ProviderError> {
         todo!()
     }
 }

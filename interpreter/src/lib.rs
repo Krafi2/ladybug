@@ -1,10 +1,9 @@
 #[macro_use]
-pub mod structures;
-#[macro_use]
 pub mod error;
+#[macro_use]
+pub mod structures;
 pub mod provider;
 
-use crate::{context::Context, rel_path::RelPath, shell::Shell};
 use ariadne::{Color, Fmt, ReportKind};
 use std::{
     collections::HashMap,
@@ -91,45 +90,37 @@ enum Type {
     Error,
 }
 
+impl std::fmt::Display for Type {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let s = match self {
+            Type::List => "List",
+            Type::String => "String",
+            Type::Bool => "Bool",
+            Type::Error => "Error",
+        };
+        f.write_str(s)
+    }
+}
+
 #[derive(Debug, Clone)]
 struct Package {
     name: Spanned<String>,
     args: Args,
 }
 
-#[derive(Debug, Clone, Copy)]
-struct PackageId(pub usize);
-
 #[derive(Debug, Clone)]
 struct Packages {
-    iter: std::vec::IntoIter<Package>,
-    n: usize,
-    span: Span,
+    pub packages: Vec<Package>,
+    pub span: Span,
 }
 
 impl Packages {
     pub fn new(packages: Vec<Package>, span: Span) -> Self {
-        Self {
-            iter: packages.into_iter(),
-            n: 0,
-            span,
-        }
+        Self { packages, span }
     }
 
     pub fn span(&self) -> &Span {
         &self.span
-    }
-}
-
-impl Iterator for Packages {
-    type Item = (PackageId, Package);
-
-    fn next(&mut self) -> Option<Self::Item> {
-        self.iter.next().map(|package| {
-            let id = self.n;
-            self.n += 1;
-            (PackageId(id), package)
-        })
     }
 }
 
@@ -148,23 +139,15 @@ impl Arg {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
-struct ArgId(pub usize);
-
 #[derive(Debug, Clone)]
 struct Args {
-    iter: std::vec::IntoIter<Arg>,
-    n: usize,
-    span: Span,
+    pub args: Vec<Arg>,
+    pub span: Span,
 }
 
 impl Args {
     pub fn new(args: Vec<Arg>, span: Span) -> Self {
-        Self {
-            iter: args.into_iter(),
-            n: 0,
-            span,
-        }
+        Self { args, span }
     }
 
     pub fn from_exprs(exprs: Spanned<Vec<Spanned<parser::Param>>>, env: &Env) -> Self {
@@ -183,18 +166,6 @@ impl Args {
 
     pub fn span(&self) -> &Span {
         &self.span
-    }
-}
-
-impl Iterator for Args {
-    type Item = (ArgId, Arg);
-
-    fn next(&mut self) -> Option<Self::Item> {
-        self.iter.next().map(|package| {
-            let id = self.n;
-            self.n += 1;
-            (ArgId(id), package)
-        })
     }
 }
 
@@ -228,17 +199,17 @@ impl std::str::FromStr for MemberPath {
     }
 }
 
-use eval::EvalCtx;
-pub use eval::{Interpreter, UnitFigment};
+use eval::Ctx;
+pub use eval::{Interpreter, RoutineFigment, UnitFigment};
 mod eval {
+    use std::path::{Path, PathBuf};
+
     use super::{
         error::{Emitter, Error},
-        provider, Arg, Args, Env, MemberPath, Package, Packages, Spanned, Value,
+        Arg, Args, Env, MemberPath, Package, Packages, Spanned, Value,
     };
-    use crate::{
-        context::Context, provider::Transaction, rel_path::RelPath, shell::Shell, structures,
-        Routine, Unit,
-    };
+    use crate::{provider::Transaction, structures};
+    use common::rel_path::RelPath;
 
     params! { struct NoParams {} }
 
@@ -261,16 +232,24 @@ mod eval {
     }
 
     #[derive(Debug, Default)]
+    pub struct RoutineFigment {
+        pub shell: Option<Vec<String>>,
+        pub stdin: Option<bool>,
+        pub stdout: Option<bool>,
+        pub body: String,
+    }
+
+    #[derive(Debug, Default)]
     pub struct UnitFigment {
         pub name: Option<String>,
         pub desc: Option<String>,
         pub topic: Option<String>,
-        pub shell: Option<Shell>,
+        pub shell: Option<Vec<String>>,
 
         pub transactions: Vec<Transaction>,
-        pub deploy: Option<Routine>,
-        pub remove: Option<Routine>,
-        pub capture: Option<Routine>,
+        pub deploy: Option<RoutineFigment>,
+        pub remove: Option<RoutineFigment>,
+        pub capture: Option<RoutineFigment>,
     }
 
     pub struct UnitData {
@@ -280,18 +259,33 @@ mod eval {
         pub errors: Vec<Error>,
     }
 
-    pub(super) struct EvalCtx {
+    pub(super) struct Ctx<'a> {
         members: Vec<MemberPath>,
         dir: RelPath,
+        home_dir: Result<&'a Path, common::rel_path::HomeError>,
+        root: bool,
+        errors: Vec<crate::error::Error>,
     }
 
-    impl EvalCtx {
+    impl<'a> Ctx<'a> {
         pub fn members(&self) -> &[MemberPath] {
             &self.members
         }
 
-        pub fn dir(&self) -> &RelPath {
+        pub fn unit_dir(&self) -> &RelPath {
             &self.dir
+        }
+
+        pub fn home_dir(&self) -> Result<&Path, common::rel_path::HomeError> {
+            self.home_dir
+        }
+
+        pub fn emit<E: Into<crate::error::Error>>(&mut self, error: E) {
+            self.errors.push(error.into());
+        }
+
+        pub fn has_root(&self) -> bool {
+            self.root
         }
     }
 
@@ -312,7 +306,8 @@ mod eval {
             path: &RelPath,
             manager: &mut super::provider::Manager,
             mut env: Env,
-            context: &crate::context::Context,
+            home_dir: Result<&Path, common::rel_path::HomeError>,
+            root: bool,
         ) -> UnitData {
             let mut emitter = Emitter::new();
 
@@ -331,23 +326,24 @@ mod eval {
             let mut deploy = None;
             let mut remove = None;
             let mut capture = None;
-            let mut eval_ctx = EvalCtx {
-                members: vec![],
+            let mut context = Ctx {
+                members: Vec::new(),
                 dir: {
                     let mut path = path.clone();
                     path.pop();
                     path
                 },
+                home_dir,
+                root,
+                errors: Vec::new(),
             };
 
             for block in blocks {
                 match block {
                     parser::Block::Map { name, params, body } => match name {
                         parser::Name::Unit => {
-                            let _ = parse_args::<NoParams>(params, &env, &mut emitter, context);
-                            if let Ok(header) =
-                                parse_args::<UnitHeader>(body, &env, &mut emitter, context)
-                            {
+                            let _ = parse_args::<NoParams>(params, &env, &mut context);
+                            if let Ok(header) = parse_args::<UnitHeader>(body, &env, &mut context) {
                                 unit_name = header.name.ok();
                                 desc = header.desc.ok();
                                 topic = header.topic;
@@ -356,12 +352,12 @@ mod eval {
                                     members.into_iter().map(|path| path.0).collect::<Vec<_>>()
                                 });
                                 if let Some(members) = members.as_ref() {
-                                    eval_ctx.members = members.clone();
+                                    context.members = members.clone();
                                 }
                             }
                         }
                         parser::Name::Env => {
-                            let _ = parse_args::<NoParams>(params, &env, &mut emitter, context);
+                            let _ = parse_args::<NoParams>(params, &env, &mut context);
                             for (param, _span) in body.0 {
                                 let name = param.name.0;
                                 let val = Value::from_expr(param.val, &env);
@@ -401,16 +397,10 @@ mod eval {
                         );
 
                         let res = match name {
-                            parser::Name::Files => {
-                                manager.new_files(args, packages, &mut emitter, &eval_ctx, context)
+                            parser::Name::Files => manager.new_files(args, packages, &mut context),
+                            parser::Name::Packages => {
+                                manager.new_transaction(args, packages, &mut context)
                             }
-                            parser::Name::Packages => manager.new_transaction(
-                                args,
-                                packages,
-                                &mut emitter,
-                                &eval_ctx,
-                                context,
-                            ),
                             _ => panic!("Item block has invalid name"),
                         };
                         if let Ok(t) = res {
@@ -422,14 +412,13 @@ mod eval {
                         params,
                         content,
                     } => {
-                        if let Ok(params) =
-                            parse_args::<RoutineParams>(params, &env, &mut emitter, context)
+                        if let Ok(params) = parse_args::<RoutineParams>(params, &env, &mut context)
                         {
-                            let routine = super::Routine {
-                                shell: params.shell.map(crate::shell::Shell::from_vec),
-                                stdin: params.stdin.unwrap_or(true),
-                                stdout: params.stdout.unwrap_or(true),
-                                code: content,
+                            let routine = RoutineFigment {
+                                shell: params.shell,
+                                stdin: params.stdin,
+                                stdout: params.stdout,
+                                body: content,
                             };
                             match name {
                                 // TODO: make it an error to have multiple routine blocks of the same name
@@ -448,7 +437,7 @@ mod eval {
                     name: unit_name,
                     desc,
                     topic,
-                    shell: shell.map(Shell::from_vec),
+                    shell,
                     transactions,
                     deploy,
                     remove,
@@ -482,10 +471,9 @@ mod eval {
     fn parse_args<T: structures::FromArgs>(
         args: Spanned<Vec<Spanned<parser::Param>>>,
         env: &Env,
-        emitter: &mut Emitter,
-        context: &Context,
+        ctx: &mut Ctx,
     ) -> Result<T, ()> {
         let args = Args::from_exprs(args, env);
-        T::from_args(args, emitter, context)
+        T::from_args(args, ctx)
     }
 }

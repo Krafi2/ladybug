@@ -7,9 +7,11 @@ edition = "2021"
 
 [dependencies]
 parser = { path = "../parser" }
+common = { path = "../common" }
 color-eyre = "0.6.2"
 ariadne = "0.1.5"
 thiserror = "1.0.33"
+tracing = "0.1.36"
 
 [dev-dependencies]
 tempfile = "3.3.0"

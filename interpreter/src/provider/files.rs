@@ -1,18 +1,13 @@
-use crate::{
-    rel_path::RelPath,
-    unit::interpreter::{
-        structures::{FromArgs, ParseStr},
-        EvalCtx, Span,
-    },
-};
+use crate::{structures::FromArgs, Ctx, Span};
+use ariadne::{Color, Fmt, ReportKind};
 use color_eyre::eyre::{eyre, WrapErr};
+use common::rel_path::RelPath;
 use std::{
     fs::OpenOptions,
     path::{Path, PathBuf},
 };
 
 pub enum Error {
-    MethodParseError(String, Span),
     InvalidMethod(String, Span),
     InvalidConflictStrat(String, Span),
     NonRelativePath(PathBuf, Span),
@@ -22,6 +17,31 @@ pub enum Error {
 impl Into<crate::error::Error> for Error {
     fn into(self) -> crate::error::Error {
         super::TransactionError::Files(self).into()
+    }
+}
+
+report! {
+    Error {
+        Error::InvalidMethod(found, span) => {
+            report(ReportKind::Error, span.start);
+            message("Unknown method '{}'", found.as_str().fg(Color::Red));
+            label(span, Color::Red, "Expected one of 'link', 'hardlink', or 'copy', but found '{}'", found.fg(Color::Red));
+        }
+        Error::InvalidConflictStrat(found, span) => {
+            report(ReportKind::Error, span.start);
+            message("Unknown conflict strategy '{}'", found.as_str().fg(Color::Red));
+            label(span, Color::Red, "Expected one of 'abort', 'rename', or 'remove', but found '{}'", found.fg(Color::Red));
+        }
+        Error::NonRelativePath(path, span) => {
+            report(ReportKind::Error, span.start);
+            message("Non-relative path '{}'", path.display().fg(Color::Red));
+            label(span, Color::Red, "This path must be relative");
+        }
+        Error::PathDoesntExist(path, span) => {
+            report(ReportKind::Error, span.start);
+            message("Non-existent path '{}'", path.display().fg(Color::Red));
+            label(span, Color::Red, "This path doesn't exist");
+        }
     }
 }
 
@@ -83,9 +103,7 @@ impl super::Transactor for Provider {
         &mut self,
         args: crate::Args,
         packages: crate::Packages,
-        emitter: &mut crate::error::Emitter,
-        eval_ctx: &EvalCtx,
-        context: &crate::context::Context,
+        context: &mut Ctx,
     ) -> Result<super::Transaction, ()> {
         // Parse the package block params
         let Params {
@@ -93,7 +111,7 @@ impl super::Transactor for Provider {
             conflicts,
             source,
             target,
-        } = Params::from_args(args, emitter, context).expect("Parser should be infallible");
+        } = Params::from_args(args, context).expect("Parser should be infallible");
 
         let mut degraded = false;
 
@@ -102,7 +120,7 @@ impl super::Transactor for Provider {
             "hardlink" => Ok(Method::HardLink),
             "copy" => Ok(Method::Copy),
             _ => {
-                emitter.emit(Error::InvalidMethod(method.0, method.1));
+                context.emit(Error::InvalidMethod(method.0, method.1));
                 degraded = true;
                 Err(())
             }
@@ -113,33 +131,35 @@ impl super::Transactor for Provider {
             "rename" => Ok(Conflict::Rename),
             "remove" => Ok(Conflict::Remove),
             _ => {
-                emitter.emit(Error::InvalidConflictStrat(conflicts.0, conflicts.1));
+                context.emit(Error::InvalidConflictStrat(conflicts.0, conflicts.1));
                 degraded = true;
                 Err(())
             }
         });
 
         let source = source.and_then(|source| {
-            Source::from_path(source, eval_ctx.dir()).map_err(|err| {
-                emitter.emit(err);
+            Source::from_path(source, context.unit_dir()).map_err(|err| {
+                context.emit(err);
                 degraded = true;
             })
         });
 
         let mut files = Vec::new();
-        let dir = source.as_ref().map(|source| eval_ctx.dir().join(&source.0));
-        for (_, package) in packages {
+        let dir = source
+            .as_ref()
+            .map(|source| context.unit_dir().join(&source.0));
+        for package in packages.packages {
             let path = dir.as_ref().map_err(|_| ()).and_then(|dir| {
                 let path = PathBuf::from(package.name.0);
                 match Source::from_path((path.clone(), package.name.1), dir) {
                     Ok(_) => Ok(path),
                     Err(err) => {
-                        emitter.emit(err);
+                        context.emit(err);
                         Err(())
                     }
                 }
             });
-            let args = ItemParams::from_args(package.args, emitter, context);
+            let args = ItemParams::from_args(package.args, context);
             if let (Ok(path), Ok(_args)) = (path, args) {
                 files.push(path)
             } else {
@@ -198,7 +218,7 @@ impl super::Provider for Provider {
 }
 
 impl super::ProviderPrivate for Provider {
-    fn new(_context: &crate::context::Context) -> Result<Self, super::ProviderError> {
+    fn new(_root: bool) -> Result<Self, super::ProviderError> {
         Ok(Provider)
     }
 }

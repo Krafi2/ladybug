@@ -1,8 +1,6 @@
 use super::{ProviderError, Transaction, TransactionError};
-use crate::{
-    context::Context,
-    unit::interpreter::{error::Emitter, structures::FromArgs, EvalCtx, Package, Span},
-};
+use crate::{error::Emitter, structures::FromArgs, Ctx, Package, Span};
+use ariadne::{Color, Fmt, ReportKind};
 use color_eyre::eyre::WrapErr;
 use std::{
     io::{Read, Write},
@@ -24,9 +22,24 @@ pub enum Error {
     Eyre(color_eyre::Report, Span),
 }
 
-impl Into<crate::unit::interpreter::error::Error> for Error {
-    fn into(self) -> crate::unit::interpreter::error::Error {
+impl Into<crate::error::Error> for Error {
+    fn into(self) -> crate::error::Error {
         super::TransactionError::Zypper(self).into()
+    }
+}
+
+report! {
+    Error {
+        Error::PackageNotRecognized(package, span) => {
+            report(ReportKind::Error, span.start);
+            message("Package '{}' doesn't exist", package.fg(Color::Red));
+            label(span, Color::Red, "Couldn't find this package");
+        }
+        Error::Eyre(err, span) => {
+            report(ReportKind::Error, span.start);
+            message("Encountered an error");
+            label(span, Color::Red, "{err}");
+        }
     }
 }
 
@@ -152,18 +165,16 @@ impl super::Transactor for Provider {
         &mut self,
         args: super::Args,
         packages: super::Packages,
-        emitter: &mut Emitter,
-        _eval_ctx: &EvalCtx,
-        context: &Context,
+        context: &mut Ctx,
     ) -> Result<Transaction, ()> {
         // Parse the package block params
-        let params = ZyppParams::from_args(args, emitter, context);
+        let params = ZyppParams::from_args(args, context);
 
         let mut packs = Vec::new();
         let mut is_err = false;
         // Verify packages
-        for (id, package) in packages {
-            match PackageParams::from_args(package.args, emitter, context) {
+        for package in packages.packages {
+            match PackageParams::from_args(package.args, context) {
                 // The params are fine
                 Ok(_) => match self.exists(&package.name.0) {
                     // The package may exist
@@ -176,14 +187,14 @@ impl super::Transactor for Provider {
                             packs.push(package);
                         // The package doesn't exist
                         } else {
-                            emitter
+                            context
                                 .emit(Error::PackageNotRecognized(package.name.0, package.name.1));
                             is_err = true;
                         }
                     }
                     // Some other error happened while confirming the package's existence
                     Err(other) => {
-                        emitter.emit(Error::Eyre(other, package.name.1));
+                        context.emit(Error::Eyre(other, package.name.1));
                         is_err = true;
                     }
                 },
@@ -216,8 +227,8 @@ impl super::Provider for Provider {
 }
 
 impl super::ProviderPrivate for Provider {
-    fn new(context: &Context) -> Result<Self, ProviderError> {
-        if !context.is_root() {
+    fn new(root: bool) -> Result<Self, ProviderError> {
+        if !root {
             return Err(ProviderError::NeedRoot);
         }
 
