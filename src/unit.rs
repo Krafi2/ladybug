@@ -1,4 +1,5 @@
-use crate::{rel_path::RelPath, shell::Shell};
+use crate::shell::Shell;
+use common::rel_path::RelPath;
 pub use interpreter::{
     provider::{Manager, Provider, Transaction},
     Env, Interpreter,
@@ -17,16 +18,22 @@ pub struct Unit {
 }
 
 impl Unit {
-    pub fn from_unit(self, figment: interpreter::UnitFigment) -> Option<Unit> {
+    fn from_figment(figment: interpreter::UnitFigment) -> Option<Self> {
+        let [deploy, remove, capture] =
+            [figment.deploy, figment.remove, figment.capture].map(|figment| match figment {
+                Some(figment) => Routine::from_figment(figment).map(Some),
+                None => Some(None),
+            });
+
         Some(Self {
             name: figment.name?,
             desc: figment.desc?,
             topic: figment.topic,
-            shell: figment.shell,
+            shell: figment.shell.map(Shell::from_vec),
             transactions: figment.transactions,
-            deploy: figment.deploy,
-            remove: figment.remove,
-            capture: figment.capture,
+            deploy: deploy?,
+            remove: remove?,
+            capture: capture?,
         })
     }
 }
@@ -39,14 +46,24 @@ pub struct Routine {
     code: String,
 }
 
+impl Routine {
+    fn from_figment(figment: interpreter::RoutineFigment) -> Option<Self> {
+        Some(Self {
+            shell: figment.shell.map(Shell::from_vec),
+            stdin: figment.stdin.unwrap_or(true),
+            stdout: figment.stdout.unwrap_or(true),
+            code: figment.body,
+        })
+    }
+}
+
 pub use tree::{Module, ModuleTree, Status, UnitId};
 mod tree {
-    use super::{
-        interpreter::{self, provider::Manager, Env, Interpreter, UnitFigment, Value},
-        Unit,
-    };
-    use crate::{context::Context, rel_path::RelPath};
+    use super::Unit;
+    use crate::context::Context;
     use color_eyre::eyre::WrapErr;
+    use common::rel_path::RelPath;
+    use interpreter::{self, provider::Manager, Env, Interpreter, UnitFigment, Value};
     use std::{collections::HashMap, path::Path};
 
     #[derive(Debug, Clone, Copy)]
@@ -157,11 +174,17 @@ mod tree {
 
         let (status, env, queue) = match src {
             Ok(src) => {
-                let data = interpreter.eval(&src, &path, manager, env, context);
+                let data = interpreter.eval(
+                    &src,
+                    &path,
+                    manager,
+                    env,
+                    context.home_dir(),
+                    context.is_root(),
+                );
                 let status = if data.errors.is_empty() {
                     Status::Ok(
-                        data.figment
-                            .into_unit()
+                        Unit::from_figment(data.figment)
                             .expect("There were no errors, unit generation shouldn't have failed"),
                     )
                 } else {

@@ -1,5 +1,6 @@
-use crate::{rel_path::RelPath, shell::Shell};
+use crate::shell::Shell;
 use color_eyre::eyre::{eyre, ContextCompat, Result, WrapErr};
+use common::rel_path::{HomeError, RelPath};
 use std::path::{Path, PathBuf};
 
 #[derive(serde::Deserialize)]
@@ -18,7 +19,7 @@ impl Config {
 
 pub struct Context {
     dotfile_dir: RelPath,
-    home_dir: Option<PathBuf>,
+    home_dir: Result<PathBuf, HomeError>,
     shell: Shell,
     root: bool,
 }
@@ -37,7 +38,7 @@ impl Context {
                     .dotfiles
                     .ok_or_else(|| eyre!("No dotfile direcory set in config"))
                     .and_then(|path| {
-                        RelPath::relative_to(path, home_dir())
+                        RelPath::new(path, home_dir())
                             .wrap_err("Failed to expand dotfile directory path set in config file")
                     })
             })
@@ -45,17 +46,10 @@ impl Context {
 
         Ok(Self {
             dotfile_dir: dotfiles,
-            home_dir: home_dir().ok(),
+            home_dir: home_dir(),
             shell: config.shell.unwrap_or_else(default_shell),
             root: detect_root(),
         })
-    }
-
-    pub fn home_dir(&self) -> color_eyre::Result<&Path> {
-        self.home_dir
-            .as_ref()
-            .map(PathBuf::as_path)
-            .ok_or_else(|| eyre!("No user home directory found"))
     }
 
     pub fn is_root(&self) -> bool {
@@ -69,16 +63,23 @@ impl Context {
     pub fn default_shell(&self) -> &Shell {
         &self.shell
     }
+
+    pub fn home_dir(&self) -> Result<&Path, HomeError> {
+        self.home_dir
+            .as_ref()
+            .map(PathBuf::as_path)
+            .map_err(Clone::clone)
+    }
 }
 
 pub fn detect_root() -> bool {
     nix::unistd::Uid::effective().is_root()
 }
 
-pub fn home_dir() -> Result<PathBuf> {
+pub fn home_dir() -> Result<PathBuf, common::rel_path::HomeError> {
     directories_next::UserDirs::new()
         .map(|dirs| dirs.home_dir().to_owned())
-        .ok_or_else(|| eyre!("No user home directory found"))
+        .ok_or(common::rel_path::HomeError::NoHome)
 }
 
 pub fn default_config_path() -> Result<PathBuf> {
@@ -88,7 +89,7 @@ pub fn default_config_path() -> Result<PathBuf> {
 }
 
 pub fn default_dotfile_dir() -> Result<RelPath> {
-    RelPath::relative_to("~/ladybug".into(), home_dir())
+    RelPath::new("~/ladybug".into(), home_dir())
         .wrap_err("Default dotfile directory isn't available")
 }
 

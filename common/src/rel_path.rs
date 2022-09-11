@@ -1,4 +1,3 @@
-use crate::context::Context;
 use std::path::{Path, PathBuf};
 
 /// A path that might be relative to the home directory. Relative paths start with `~`.
@@ -8,23 +7,44 @@ pub struct RelPath {
     absolute: PathBuf,
 }
 
-#[derive(Debug, thiserror::Error)]
-#[error("Failed to expand relative path '{path}': {err}")]
+#[derive(Debug, Clone, Copy)]
+pub enum HomeError {
+    NoHome,
+}
+
+impl std::fmt::Display for HomeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Home directory not found")
+    }
+}
+
+impl std::error::Error for HomeError {}
+
+#[derive(Debug)]
 pub struct Error {
     path: PathBuf,
-    err: color_eyre::Report,
+    err: HomeError,
+}
+
+impl std::fmt::Display for Error {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Failed to expand relative path '{}'",
+            self.path.display(),
+        )
+    }
+}
+
+impl std::error::Error for Error {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.err)
+    }
 }
 
 impl RelPath {
     /// Construct a new relative path
-    pub fn new(path: PathBuf, context: &Context) -> Result<Self, Error> {
-        Self::relative_to(path, context.home_dir())
-    }
-
-    pub fn relative_to<P: AsRef<Path>>(
-        path: PathBuf,
-        home: color_eyre::Result<P>,
-    ) -> Result<Self, Error> {
+    pub fn new<P: AsRef<Path>>(path: PathBuf, home: Result<P, HomeError>) -> Result<Self, Error> {
         let absolute = match path.strip_prefix("~") {
             Ok(path) => match home {
                 Ok(prefix) => Ok(prefix.as_ref().join(path)),

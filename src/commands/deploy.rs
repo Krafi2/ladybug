@@ -1,9 +1,11 @@
-use crate::unit::{Interpreter, Manager, Status};
 use color_eyre::eyre::WrapErr;
+use interpreter::{provider::Manager, Interpreter};
 use std::{
     collections::{HashMap, VecDeque},
     path::Path,
 };
+
+use crate::unit::Status;
 
 #[derive(clap::Parser)]
 pub struct Deploy {
@@ -41,7 +43,8 @@ impl Deploy {
                     for transaction in unit.transactions {
                         let provider = transaction.provider();
                         let provider = manager
-                            .get_provider(provider, context)
+                            .get_provider(provider)
+                            .expect("Unitialized provider")
                             .map_err(|err| color_eyre::eyre::eyre!(err.to_string()))
                             .wrap_err_with(|| format!("Failed to fetch provider '{}'", provider))?;
                         provider

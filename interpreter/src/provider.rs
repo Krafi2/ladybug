@@ -1,5 +1,8 @@
-use super::{error::Emitter, structures::ParamError, Arg, Args, EvalCtx, Packages, Span};
-use crate::context::Context;
+use ariadne::{Color, Fmt, ReportKind};
+
+use crate::structures::ConvertError;
+
+use super::{error::Emitter, structures::ParamError, Arg, Args, Ctx, Packages, Span};
 use std::{any::Any, collections::HashMap};
 
 mod files;
@@ -56,10 +59,32 @@ pub enum ProviderError {
 
 pub(super) enum TransactionError {
     Param(ParamError),
-    Provider(Span, ProviderError),
+    Provider(Span, ProviderId, ProviderError),
     Zypper(zypper::Error),
     Files(files::Error),
     Flatpak(flatpak::Error),
+}
+
+report! {
+    TransactionError {
+        TransactionError::Param(err) => {
+            delegate(err);
+        }
+        TransactionError::Provider(span, id, err) => {
+            report(ReportKind::Error, span.start);
+            message("Provider '{}' is not available", id.fg(Color::Red));
+            label(span, Color::Red, "{err}");
+        }
+        TransactionError::Zypper(err) => {
+            delegate(err);
+        }
+        TransactionError::Files(err) => {
+            delegate(err);
+        }
+        TransactionError::Flatpak(err) => {
+            delegate(err);
+        }
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -82,12 +107,12 @@ impl Manager {
     fn get_raw_provider(
         &mut self,
         id: ProviderId,
-        context: &Context,
+        context: &mut Ctx,
     ) -> Result<&mut dyn ProviderUpcast, ProviderError> {
         fn new_provider<T: ProviderPrivate + 'static>(
-            context: &Context,
+            context: &mut Ctx,
         ) -> Result<Box<dyn ProviderUpcast>, ProviderError> {
-            T::new(context).map(|provider| Box::new(provider) as Box<dyn ProviderUpcast>)
+            T::new(context.has_root()).map(|provider| Box::new(provider) as Box<dyn ProviderUpcast>)
         }
 
         let provider = self.cache.entry(id).or_insert_with(|| match id.0 {
@@ -104,16 +129,18 @@ impl Manager {
     pub fn get_provider(
         &mut self,
         id: ProviderId,
-        context: &Context,
-    ) -> Result<&mut dyn Provider, ProviderError> {
-        self.get_raw_provider(id, context)
-            .map(ProviderUpcast::as_provider)
+    ) -> Option<Result<&mut dyn Provider, ProviderError>> {
+        self.cache.get_mut(&id).map(|res| {
+            res.as_mut()
+                .map(|provider| provider.as_provider())
+                .map_err(|err| err.clone())
+        })
     }
 
     fn get_transactor(
         &mut self,
         id: ProviderId,
-        context: &Context,
+        context: &mut Ctx,
     ) -> Result<&mut dyn Transactor, ProviderError> {
         self.get_raw_provider(id, context)
             .map(ProviderUpcast::as_new_transaction)
@@ -124,21 +151,13 @@ impl Manager {
         (id, span): (ProviderId, Span),
         (args, arg_span): super::Spanned<Vec<Arg>>,
         packages: Packages,
-        emitter: &mut Emitter,
-        eval_ctx: &EvalCtx,
-        context: &Context,
+        context: &mut Ctx,
     ) -> Result<Transaction, Option<TransactionError>> {
         match self.get_transactor(id, context) {
             Ok(transactor) => transactor
-                .new_transaction(
-                    Args::new(args, arg_span),
-                    packages,
-                    emitter,
-                    eval_ctx,
-                    context,
-                )
+                .new_transaction(Args::new(args, arg_span), packages, context)
                 .map_err(|_| None),
-            Err(err) => Err(Some(TransactionError::Provider(span, err))),
+            Err(err) => Err(Some(TransactionError::Provider(span, id, err))),
         }
     }
 
@@ -146,21 +165,19 @@ impl Manager {
         &mut self,
         args: super::Spanned<Vec<Arg>>,
         packages: Packages,
-        emitter: &mut Emitter,
-        eval_ctx: &EvalCtx,
-        context: &Context,
+        context: &mut Ctx,
     ) -> Result<Transaction, ()> {
         let (args, span) = args;
-        let mut args_iter = args.iter().enumerate();
-        let (arg_id, provider) = loop {
+        let mut args_iter = args.iter();
+        let provider = loop {
             match args_iter.next() {
-                Some((id, arg)) => {
+                Some(arg) => {
                     if arg.name.0 == "provider" {
-                        break (id, &arg.value);
+                        break &arg.value;
                     }
                 }
                 None => {
-                    emitter.emit(TransactionError::Param(ParamError::NotFound {
+                    context.emit(TransactionError::Param(ParamError::NotFound {
                         span,
                         name: "provider",
                     }));
@@ -172,19 +189,18 @@ impl Manager {
         let (provider, val_span) = match provider {
             super::Value::String(s) => s,
             super::Value::Error((err, span)) => {
-                emitter.emit(TransactionError::Param(ParamError::EvalErr {
+                context.emit(ConvertError::EvalErr {
                     span: span.clone(),
                     err: err.clone(),
-                }));
+                });
                 return Err(());
             }
             other => {
-                emitter.emit(TransactionError::Param(ParamError::TypeErr {
-                    arg: super::ArgId(arg_id),
+                context.emit(ConvertError::TypeErr {
                     span: other.span(),
                     expected: super::Type::String,
                     found: other.get_type(),
-                }));
+                });
                 return Err(());
             }
         };
@@ -192,13 +208,12 @@ impl Manager {
         let provider_id = match ProviderId::from_name(&provider) {
             Some(id) => id,
             None => {
-                emitter.emit(TransactionError::Param(ParamError::ValueErr {
-                    arg: super::ArgId(arg_id),
+                context.emit(ConvertError::ValueErr {
                     span: val_span.clone(),
                     err: Box::new(InvalidProvider {
                         found: provider.clone(),
                     }),
-                }));
+                });
                 return Err(());
             }
         };
@@ -207,13 +222,11 @@ impl Manager {
             (provider_id, val_span.clone()),
             (args, span),
             packages,
-            emitter,
-            eval_ctx,
             context,
         )
         .map_err(|err| {
             if let Some(err) = err {
-                emitter.emit(err);
+                context.emit(err);
             }
         })
     }
@@ -222,9 +235,7 @@ impl Manager {
         &mut self,
         args: super::Spanned<Vec<Arg>>,
         packages: Packages,
-        emitter: &mut Emitter,
-        eval_ctx: &EvalCtx,
-        context: &Context,
+        context: &mut Ctx,
     ) -> Result<Transaction, ()> {
         let (args, span) = args;
         self.create_transaction(
@@ -232,13 +243,11 @@ impl Manager {
             (ProviderKind::Files.into(), span.clone()),
             (args, span),
             packages,
-            emitter,
-            eval_ctx,
             context,
         )
         .map_err(|err| {
             if let Some(err) = err {
-                emitter.emit(err);
+                context.emit(err);
             }
         })
     }
@@ -279,7 +288,7 @@ impl std::fmt::Debug for Transaction {
 }
 
 trait ProviderPrivate: Provider + Transactor + Sized {
-    fn new(context: &Context) -> Result<Self, ProviderError>;
+    fn new(root: bool) -> Result<Self, ProviderError>;
 }
 
 trait Transactor {
@@ -288,9 +297,7 @@ trait Transactor {
         &mut self,
         args: Args,
         packages: Packages,
-        emitter: &mut Emitter,
-        eval_ctx: &EvalCtx,
-        context: &Context,
+        context: &mut Ctx,
     ) -> Result<Transaction, ()>;
 }
 
