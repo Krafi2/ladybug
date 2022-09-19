@@ -232,8 +232,7 @@ impl super::Provider for Provider {
                 Err(err) => tracing::error!("Failed to deploy {source} to {dest}: {err}"),
             }
         }
-
-        todo!()
+        Ok(())
     }
 
     fn remove(&mut self, _transaction: super::Transaction) -> color_eyre::Result<()> {
@@ -279,7 +278,7 @@ fn file_eq(path1: &Path, path2: &Path) -> std::io::Result<bool> {
 }
 
 /// Deploy `source` at `dest`. If `dest` is occupied, try to free
-/// it according to the provided `[Duplicates]` strategy.
+/// it according to the provided `[Conflict]` strategy.
 fn deploy_file(
     source: &RelPath,
     dest: &RelPath,
@@ -289,7 +288,7 @@ fn deploy_file(
     match method {
         Method::SoftLink | Method::HardLink => {
             // Create a symlink only if it isn't already present
-            if file_eq(source, dest).unwrap_or(false) {
+            if !file_eq(source, dest).unwrap_or(false) {
                 // Try to free the file if it exists
                 if dest.exists() {
                     free_file(dest, conflict)
