@@ -131,10 +131,6 @@ impl Packages {
     pub fn new(packages: Vec<Package>, span: Span) -> Self {
         Self { packages, span }
     }
-
-    pub fn span(&self) -> &Span {
-        &self.span
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -176,10 +172,6 @@ impl Args {
             exprs.1,
         )
     }
-
-    pub fn span(&self) -> &Span {
-        &self.span
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -215,12 +207,9 @@ impl std::str::FromStr for MemberPath {
 use eval::Ctx;
 pub use eval::{Interpreter, RoutineFigment, UnitFigment};
 mod eval {
-    use std::path::{Path, PathBuf};
+    use std::path::Path;
 
-    use super::{
-        error::{Emitter, Error},
-        Arg, Args, Env, MemberPath, Package, Packages, Spanned, Value,
-    };
+    use super::{error::Error, Arg, Args, Env, MemberPath, Package, Packages, Spanned, Value};
     use crate::{provider::Transaction, structures};
     use common::{command::Command, rel_path::RelPath};
 

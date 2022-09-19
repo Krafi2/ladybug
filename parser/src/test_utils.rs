@@ -1,3 +1,4 @@
+#[allow(unused_macros)]
 macro_rules! test_parsers {
     (test $parser:ident) => {
         #[test]

@@ -1,5 +1,5 @@
-use super::{ProviderError, Transaction, TransactionError};
-use crate::{error::Emitter, structures::FromArgs, Ctx, Package, Span};
+use super::{ProviderError, Transaction};
+use crate::{structures::FromArgs, Ctx, Span};
 use ariadne::{Color, Fmt, ReportKind};
 use color_eyre::eyre::WrapErr;
 use std::{
