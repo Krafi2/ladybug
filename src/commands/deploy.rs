@@ -2,7 +2,6 @@ use color_eyre::eyre::WrapErr;
 use interpreter::{provider::Manager, Interpreter};
 use std::{
     collections::{HashMap, VecDeque},
-    path::Path,
 };
 
 use crate::unit::Status;

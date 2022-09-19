@@ -73,28 +73,6 @@ impl Error {
     }
 }
 
-pub(super) struct ErrorId(usize);
-
-pub(super) struct Emitter {
-    errors: Vec<Error>,
-}
-
-impl Emitter {
-    pub fn new() -> Self {
-        Self { errors: Vec::new() }
-    }
-
-    pub fn into_errors(self) -> Vec<Error> {
-        self.errors
-    }
-
-    pub fn emit<E: Into<Error>>(&mut self, error: E) -> ErrorId {
-        let id = self.errors.len();
-        self.errors.push(error.into());
-        ErrorId(id)
-    }
-}
-
 macro_rules! report {
     ( $filename:ident, delegate ( $error:expr ) ) => {
          $crate::error::IntoReport::into_report($error, $filename)

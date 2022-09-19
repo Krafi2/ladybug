@@ -2,7 +2,7 @@ use ariadne::{Color, Fmt, ReportKind};
 
 use crate::structures::ConvertError;
 
-use super::{error::Emitter, structures::ParamError, Arg, Args, Ctx, Packages, Span};
+use super::{structures::ParamError, Arg, Args, Ctx, Packages, Span};
 use std::{any::Any, collections::HashMap};
 
 mod files;

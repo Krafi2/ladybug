@@ -312,8 +312,6 @@ pub(super) fn parser() -> impl Parser<(usize, Token), Vec<Option<Block>>, Error 
 
 #[cfg(test)]
 mod tests {
-    use crate::Params;
-
     use super::*;
 
     test_parsers! {

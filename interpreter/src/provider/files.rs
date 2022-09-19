@@ -271,14 +271,6 @@ fn free_file(path: &Path, conflict: Conflict) -> color_eyre::Result<()> {
     }
 }
 
-pub fn rebase_path(
-    path: &Path,
-    current: &Path,
-    target: &Path,
-) -> Result<PathBuf, std::path::StripPrefixError> {
-    Ok(target.join(path.strip_prefix(current)?))
-}
-
 /// Check if two paths point to the same file, resolving symlinks if neccessary.
 fn file_eq(path1: &Path, path2: &Path) -> std::io::Result<bool> {
     let path1 = path1.canonicalize()?;
