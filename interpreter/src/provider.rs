@@ -57,6 +57,7 @@ pub enum ProviderError {
     NeedRoot,
 }
 
+#[derive(Debug)]
 pub(super) enum TransactionError {
     Param(ParamError),
     Provider(Span, ProviderId, ProviderError),

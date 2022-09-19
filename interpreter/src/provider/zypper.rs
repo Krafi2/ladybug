@@ -17,6 +17,7 @@ enum ProcessError {
     Other(std::io::Error),
 }
 
+#[derive(Debug)]
 pub enum Error {
     PackageNotRecognized(String, Span),
     Eyre(color_eyre::Report, Span),
@@ -202,17 +203,16 @@ impl super::Transactor for Provider {
             };
         }
 
-        if is_err {
-            return Err(());
-        }
-
-        Ok(Transaction {
-            provider: super::ProviderKind::Zypper.into(),
-            payload: Box::new(Payload {
-                from: params?.from,
-                packages: packs,
+        match (is_err, params) {
+            (true, _) | (false, Err(_)) | (false, Ok((_, true))) => Err(()),
+            (false, Ok((params, false))) => Ok(Transaction {
+                provider: super::ProviderKind::Zypper.into(),
+                payload: Box::new(Payload {
+                    from: params.from,
+                    packages: packs,
+                }),
             }),
-        })
+        }
     }
 }
 

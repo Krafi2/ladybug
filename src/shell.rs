@@ -1,18 +1,18 @@
+use common::command::Command;
 use serde::Deserialize;
 
 #[derive(Debug, Clone)]
-pub struct Shell {
-    cmd: String,
-    args: Vec<String>,
-}
+pub struct Shell(Command);
 
 impl Shell {
     pub fn new(cmd: String, args: Vec<String>) -> Self {
-        Self { cmd, args }
+        Self::from(Command::new(cmd, args))
     }
+}
 
-    pub fn from_vec(_cmd: Vec<String>) -> Self {
-        todo!()
+impl From<common::command::Command> for Shell {
+    fn from(cmd: common::command::Command) -> Self {
+        Self(cmd)
     }
 }
 
@@ -26,9 +26,6 @@ impl<'de> Deserialize<'de> for Shell {
             .split_first()
             .ok_or(serde::de::Error::custom("Expected at least one element"))?;
 
-        Ok(Self {
-            cmd: cmd.to_owned(),
-            args: args.to_vec(),
-        })
+        Ok(Self::new(cmd.to_owned(), args.to_vec()))
     }
 }

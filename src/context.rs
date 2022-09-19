@@ -1,7 +1,8 @@
-use crate::shell::Shell;
 use color_eyre::eyre::{eyre, ContextCompat, Result, WrapErr};
 use common::rel_path::{HomeError, RelPath};
 use std::path::{Path, PathBuf};
+
+use crate::shell::Shell;
 
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]

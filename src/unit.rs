@@ -29,7 +29,7 @@ impl Unit {
             name: figment.name?,
             desc: figment.desc?,
             topic: figment.topic,
-            shell: figment.shell.map(Shell::from_vec),
+            shell: figment.shell.map(Into::into),
             transactions: figment.transactions,
             deploy: deploy?,
             remove: remove?,
@@ -49,7 +49,7 @@ pub struct Routine {
 impl Routine {
     fn from_figment(figment: interpreter::RoutineFigment) -> Option<Self> {
         Some(Self {
-            shell: figment.shell.map(Shell::from_vec),
+            shell: figment.shell.map(Into::into),
             stdin: figment.stdin.unwrap_or(true),
             stdout: figment.stdout.unwrap_or(true),
             code: figment.body,

@@ -4,6 +4,7 @@ use ariadne::{Color, Fmt, ReportKind};
 use common::rel_path::RelPath;
 use std::path::PathBuf;
 
+#[derive(Debug)]
 pub(super) enum ParamError {
     Unused { span: Span, name: String },
     NotFound { span: Span, name: &'static str },
@@ -24,6 +25,7 @@ report! {
     }
 }
 
+#[derive(Debug)]
 pub(super) enum ConvertError {
     ValueErr {
         span: Span,
@@ -92,7 +94,7 @@ impl FromValue for bool {
             Value::Error((err, span)) => Err(ConvertError::EvalErr { span, err }),
             other => Err(ConvertError::TypeErr {
                 span: other.span(),
-                expected: Type::String,
+                expected: Type::Bool,
                 found: other.get_type(),
             }),
         }
@@ -189,6 +191,30 @@ impl<T: FromValue> FromValue for (T, Span) {
     }
 }
 
+#[derive(Debug, thiserror::Error)]
+enum CommandError {
+    #[error("Expected at least one element")]
+    Empty,
+}
+
+impl FromValue for common::command::Command {
+    fn from_value(value: Value, ctx: &mut Ctx) -> Result<Self, ()> {
+        let span = value.span();
+        Vec::<String>::from_value(value, ctx).and_then(|mut vec| {
+            if vec.is_empty() {
+                ctx.emit(ConvertError::ValueErr {
+                    span,
+                    err: Box::new(CommandError::Empty),
+                });
+                Err(())
+            } else {
+                let cmd = vec.remove(0);
+                Ok(common::command::Command::new(cmd, vec))
+            }
+        })
+    }
+}
+
 pub(super) trait ParseParam: Sized {
     fn parse(
         name: &'static str,
@@ -215,9 +241,9 @@ impl<T: FromValue> ParseParam for T {
 
 impl<T: FromValue> ParseParam for Option<T> {
     fn parse(
-        name: &'static str,
+        _name: &'static str,
         arg: Option<Arg>,
-        span: &Span,
+        _span: &Span,
         context: &mut Ctx,
     ) -> Result<Self, ()> {
         match arg {
@@ -239,7 +265,7 @@ impl<T: ParseParam> ParseParam for Result<T, ()> {
 }
 
 pub(super) trait FromArgs: Sized {
-    fn from_args(args: super::Args, ctx: &mut Ctx) -> Result<Self, ()>;
+    fn from_args(args: super::Args, ctx: &mut Ctx) -> Result<(Self, bool), ()>;
 }
 
 macro_rules! params {
@@ -266,13 +292,13 @@ macro_rules! params {
 
         impl $crate::structures::FromArgs for $name {
             fn from_args(args: $crate::Args, context: &mut crate::Ctx)
-                    -> std::result::Result<Self, ()> {
+                    -> std::result::Result<(Self, bool), ()> {
                 #![allow(unused)]
                 let names = [$(stringify!($field)),*];
                 let span = args.span;
                 let mut matchmaker = $crate::structures::Matchmaker::new(&names, args.args);
                 let mut params = vec![None; params!(count $($field,)*)];
-                let mut is_err = false;
+                let mut degraded = false;
                 while let Some(res) = matchmaker.next() {
                     match res {
                         Ok((param, arg)) => params[param.0] = Some(arg),
@@ -284,7 +310,7 @@ macro_rules! params {
                                         name: arg.name.0,
                                     }
                                 );
-                                is_err = true;
+                                degraded = true;
                             },
                             // If this really is an error, it will be reported in the parsing stage
                             $crate::structures::MatchError::NotFound(_) => (),
@@ -295,13 +321,12 @@ macro_rules! params {
                 let mut params = params.into_iter();
                 params!{parse span, names, params, context, $($field : $kind,)*}
 
-                if is_err {
-                    return Err(());
-                }
-
-                Ok(Self {
-                    $($field: $field?,)*
-                })
+                Ok((
+                    Self {
+                        $($field: $field?,)*
+                    },
+                    degraded
+                ))
             }
         }
     };

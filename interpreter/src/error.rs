@@ -1,5 +1,6 @@
 use super::{provider, structures, Span, Spanned};
 
+#[derive(Debug)]
 enum Inner {
     Eval(Spanned<super::EvalError>),
     Parse(parser::Error),
@@ -35,6 +36,7 @@ impl From<provider::TransactionError> for Inner {
     }
 }
 
+#[derive(Debug)]
 pub struct Error(Inner);
 
 impl<T: Into<Inner>> From<T> for Error {

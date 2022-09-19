@@ -50,13 +50,9 @@ pub(super) fn map_tokens<
     )
 }
 
-fn block_parser() -> impl Parser<Token, Block, Error = ErrorKind> {
-    // They said that I should flatten the input and I am starting to see why, but it WORKS!
-
-    // # Expr
-
-    let expr = recursive(|expr| {
-        let list_parser = expr.repeated().spanned();
+fn expr() -> impl Parser<Token, Expr, Error = ErrorKind> {
+    recursive(|expr| {
+        let list_parser = expr.repeated().then_ignore(end()).spanned();
 
         filter_map(move |span, token| match token {
             Token::Str(s) => Ok(Expr::String((s, span))),
@@ -75,11 +71,11 @@ fn block_parser() -> impl Parser<Token, Block, Error = ErrorKind> {
                 span,
             )),
         })
-    });
+    })
+}
 
-    // # Param
-
-    let param = filter_map(|span, token| match token {
+fn param() -> impl Parser<Token, Spanned<Param>, Error = ErrorKind> {
+    let param_inner = filter_map(|span, token| match token {
         Token::Ident(ident) => Ok((ident, span)),
         token => Err(ErrorKind::expected(
             vec![TokenKind::Ident],
@@ -88,22 +84,32 @@ fn block_parser() -> impl Parser<Token, Block, Error = ErrorKind> {
         )),
     })
     .then_ignore(just(Token::Ctrl(':')))
-    .then(expr)
+    .then(expr())
+    .then_ignore(end())
     .map(|(param, val)| Param { name: param, val })
     .spanned();
 
-    let params_iner_parser = param
-        .clone()
-        .separated_by(just(Token::Ctrl(',')))
-        .allow_trailing();
-
-    let params_parser = filter_map(move |span, token| match token {
+    filter_map(move |span, token| match token {
         Token::Param(tokens) => {
             let tokens = map_tokens(tokens, span, token_filter);
-            params_iner_parser
-                .parse(tokens)
-                .map_err(ErrorKind::multiple)
+            param_inner.parse(tokens).map_err(ErrorKind::multiple)
         }
+        token => Err(ErrorKind::expected(
+            vec![TokenKind::Params],
+            token.kind(),
+            span,
+        )),
+    })
+}
+
+fn params() -> impl Parser<Token, Spanned<Vec<Spanned<Param>>>, Error = ErrorKind> {
+    let params_parser = param()
+        .separated_by(just(Token::Ctrl(',')))
+        .allow_trailing()
+        .then_ignore(end());
+
+    let params_exist = filter_map(move |span, token| match token {
+        Token::Params(params) => Ok(params),
         token => Err(ErrorKind::expected(
             vec![TokenKind::Params],
             token.kind(),
@@ -111,26 +117,22 @@ fn block_parser() -> impl Parser<Token, Block, Error = ErrorKind> {
         )),
     });
 
-    let params = filter_map(move |span, token| match token {
-        Token::Params(params) => {
-            let tokens = map_tokens(params, span, token_filter);
-            params_parser.parse(tokens).map_err(ErrorKind::multiple)
-        }
-        token => Err(ErrorKind::expected(
-            vec![TokenKind::Params],
-            token.kind(),
-            span,
-        )),
-    })
-    .or_not()
-    .map(Option::unwrap_or_default)
-    .spanned();
+    params_exist
+        .or_not()
+        .try_map(move |params, span| match params {
+            Some(params) => {
+                let tokens = map_tokens(params, span, token_filter);
+                params_parser.parse(tokens).map_err(ErrorKind::multiple)
+            }
+            None => Ok(Vec::new()),
+        })
+        .spanned()
+}
 
-    // # Map
+fn map() -> impl Parser<Token, Block, Error = ErrorKind> {
+    let map_body_parser = param().repeated().spanned().then_ignore(end());
 
-    let map_body_parser = param.clone().repeated().spanned();
-
-    let map = filter_map(|span, token| match token {
+    filter_map(|span, token| match token {
         Token::Name(name @ Name::Unit) | Token::Name(name @ Name::Env) => Ok(name),
         token => Err(ErrorKind::expected(
             vec![TokenKind::Name],
@@ -138,7 +140,7 @@ fn block_parser() -> impl Parser<Token, Block, Error = ErrorKind> {
             span,
         )),
     })
-    .then(params.clone())
+    .then(params())
     .then(filter_map(move |span, token| match token {
         Token::Body(body) => {
             let tokens = map_tokens(body, span, token_filter);
@@ -150,10 +152,10 @@ fn block_parser() -> impl Parser<Token, Block, Error = ErrorKind> {
             span,
         )),
     }))
-    .map(|((name, params), body)| Block::Map { name, params, body });
+    .map(|((name, params), body)| Block::Map { name, params, body })
+}
 
-    // # Items
-
+fn items() -> impl Parser<Token, Block, Error = ErrorKind> {
     let items_body_parser = filter_map(|span, token| match token {
         Token::Str(s) => Ok((s, span)),
         token => Err(ErrorKind::expected(
@@ -162,15 +164,16 @@ fn block_parser() -> impl Parser<Token, Block, Error = ErrorKind> {
             span,
         )),
     })
-    .then(params.clone())
+    .then(params())
     .map(|(item, params)| Item {
         name: item,
         args: params,
     })
     .repeated()
+    .then_ignore(end())
     .spanned();
 
-    let items = filter_map(|span, token| match token {
+    filter_map(|span, token| match token {
         Token::Name(name @ Name::Packages) | Token::Name(name @ Name::Files) => Ok(name),
         token => Err(ErrorKind::expected(
             vec![TokenKind::Name],
@@ -178,7 +181,7 @@ fn block_parser() -> impl Parser<Token, Block, Error = ErrorKind> {
             span,
         )),
     })
-    .then(params.clone())
+    .then(params())
     .then(filter_map(move |span, token| match token {
         Token::Body(body) => {
             let tokens = map_tokens(body, span, token_filter);
@@ -194,10 +197,10 @@ fn block_parser() -> impl Parser<Token, Block, Error = ErrorKind> {
         name,
         params,
         items,
-    });
+    })
+}
 
-    // # Routines
-
+fn routine() -> impl Parser<Token, Block, Error = ErrorKind> {
     let routine_content_parser = filter_map(|span, token| match token {
         Token::Str(s) => Ok(s),
         _ => Err(ErrorKind::expected(
@@ -205,9 +208,10 @@ fn block_parser() -> impl Parser<Token, Block, Error = ErrorKind> {
             token.kind(),
             span,
         )),
-    });
+    })
+    .then_ignore(end());
 
-    let routines = filter_map(|span, token| match token {
+    filter_map(|span, token| match token {
         Token::Name(name @ Name::Deploy)
         | Token::Name(name @ Name::Remove)
         | Token::Name(name @ Name::Capture) => Ok(name),
@@ -217,7 +221,7 @@ fn block_parser() -> impl Parser<Token, Block, Error = ErrorKind> {
             span,
         )),
     })
-    .then(params.clone())
+    .then(params())
     .then(filter_map(move |span, token| match token {
         Token::Body(body) => {
             let tokens = map_tokens(body, span, token_filter);
@@ -235,10 +239,10 @@ fn block_parser() -> impl Parser<Token, Block, Error = ErrorKind> {
         name,
         params,
         content,
-    });
+    })
+}
 
-    // # Other handling
-
+fn block_parser() -> impl Parser<Token, Block, Error = ErrorKind> {
     let other = filter_map(|span, token| match token {
         Token::Name(name @ Name::Other(_)) => Err(ErrorKind::UnexpectedBlock(span, name)),
         token => Err(ErrorKind::expected(
@@ -248,11 +252,11 @@ fn block_parser() -> impl Parser<Token, Block, Error = ErrorKind> {
         )),
     });
 
-    choice((map, items, routines, other))
+    choice((map(), items(), routine(), other))
 }
 
 pub(super) fn parser() -> impl Parser<(usize, Token), Vec<Option<Block>>, Error = ErrorKind> {
-    let block_parser = block_parser();
+    let block_parser = block_parser().then_ignore(end());
 
     any()
         .validate(move |token, span, emit| match token {
@@ -304,4 +308,76 @@ pub(super) fn parser() -> impl Parser<(usize, Token), Vec<Option<Block>>, Error 
         })
         .repeated()
         .then_ignore(end())
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::Params;
+
+    use super::*;
+
+    test_parsers! {
+        expr {
+            [Token::List(vec![
+                (Token::Str("Hello".into()), 0..5),
+                (Token::Space(" ".into()), 5..6),
+                (Token::Var("var".into()), 6..9),
+            ])] => Expr::List((
+                vec![
+                    Expr::String(("Hello".into(), 0..5)),
+                    Expr::Variable(("var".into(), 6..9)),
+                ],
+                0..9
+            ))
+        }
+        param {
+            [
+                Token::Ident("foo".into()),
+                Token::Ctrl(':'),
+                Token::Str("Bar".into()),
+            ] => (
+                Param {
+                    name: ("foo".into(), 0..1),
+                    val: Expr::String(("Bar".into(), 2..3)),
+                },
+                0..3
+            )
+        }
+        params {
+            [
+                Token::Params(vec![
+                    (
+                        Token::Param(vec![
+                            (Token::Comment("# A comment".into()), 0..1),
+                            (Token::Space(" ".into()), 1..2),
+                            (Token::Ident("foo".into()), 2..3),
+                            (Token::Space(" ".into()), 3..4),
+                            (Token::Ctrl(':'), 4..5),
+                            (Token::Space(" ".into()), 5..6),
+                            (Token::Bool(true), 6..7),
+                        ]),
+                        0..7
+                    ),
+                    (Token::Line, 7..8),
+                    (Token::Ctrl(','), 8..9),
+                    (
+                        Token::Param(vec![
+                            (Token::Ident("moo".into()), 9..10),
+                            (Token::Str("bar".into()), 11..12),
+                        ]),
+                        9..12
+                    ),
+                ])
+            ] => (
+                vec![
+                    (Param { name: ("foo".into(), 2..3), val: Expr::Bool((true, 6..7)) }, 2..7),
+                    (Param { name: ("moo".into(), 9..10), val: Expr::String(("bar".into(), 11..12)) }, 9..12 ),
+                ],
+                0..1,
+            )
+        }
+        map {}
+        items {}
+        reoutine {}
+    }
 }

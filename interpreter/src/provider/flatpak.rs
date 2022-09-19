@@ -1,5 +1,6 @@
 use crate::error::IntoReport;
 
+#[derive(Debug)]
 pub struct Error;
 
 impl IntoReport for Error {

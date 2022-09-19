@@ -7,11 +7,14 @@ use std::{
     path::{Path, PathBuf},
 };
 
+#[derive(Debug)]
 pub enum Error {
     InvalidMethod(String, Span),
     InvalidConflictStrat(String, Span),
     NonRelativePath(PathBuf, Span),
     PathDoesntExist(PathBuf, Span),
+    PathUnreachable(PathBuf, std::io::Error, Span),
+    SourceNotADirectory(PathBuf, Span),
 }
 
 impl Into<crate::error::Error> for Error {
@@ -39,8 +42,18 @@ report! {
         }
         Error::PathDoesntExist(path, span) => {
             report(ReportKind::Error, span.start);
-            message("Non-existent path '{}'", path.display().fg(Color::Red));
+            message("Path '{}' doesn't exist", path.display().fg(Color::Red));
             label(span, Color::Red, "This path doesn't exist");
+        }
+        Error::PathUnreachable(path, err, span) => {
+            report(ReportKind::Error, span.start);
+            message("Cannot find path '{}'", path.display().fg(Color::Red));
+            label(span, Color::Red, "IOError: {}", err);
+        }
+        Error::SourceNotADirectory(path, span) => {
+            report(ReportKind::Error, span.start);
+            message("Source path '{}' isn't a directory", path.display().fg(Color::Red));
+            label(span, Color::Red, "Not a directory");
         }
     }
 }
@@ -59,20 +72,24 @@ enum Conflict {
     Remove,
 }
 
+#[derive(Debug)]
 struct Source(RelPath);
 
 impl Source {
-    fn from_path(path: (PathBuf, Span), dir: &RelPath) -> Result<Self, Error> {
-        let (path, span) = path;
+    fn from_path(dir: &RelPath, path: PathBuf, span: Span) -> Result<Self, Error> {
         if path.is_absolute() || path.starts_with("~") {
             Err(Error::NonRelativePath(path, span))
         } else {
-            let relpath = dir.join(&path);
-            if relpath.exists() {
-                Ok(Self(relpath))
-            } else {
-                Err(Error::PathDoesntExist(path, span))
+            {
+                let path = &path;
+                let relpath = dir.join(path);
+                match relpath.try_exists() {
+                    Ok(true) => Ok(relpath),
+                    Ok(false) => Err(Error::PathDoesntExist(path.to_owned(), span)),
+                    Err(err) => Err(Error::PathUnreachable(path.to_owned(), err, span)),
+                }
             }
+            .map(Self)
         }
     }
 }
@@ -99,6 +116,7 @@ params! { struct ItemParams {} }
 pub struct Provider;
 
 impl super::Transactor for Provider {
+    // TODO: check if files are withing the folders of unit members
     fn new_transaction(
         &mut self,
         args: crate::Args,
@@ -106,14 +124,17 @@ impl super::Transactor for Provider {
         context: &mut Ctx,
     ) -> Result<super::Transaction, ()> {
         // Parse the package block params
-        let Params {
-            method,
-            conflicts,
-            source,
-            target,
-        } = Params::from_args(args, context).expect("Parser should be infallible");
+        let (
+            Params {
+                method,
+                conflicts,
+                source,
+                target,
+            },
+            extra_args,
+        ) = Params::from_args(args, context).expect("Parser should be infallible");
 
-        let mut degraded = false;
+        let mut degraded = extra_args;
 
         let method = method.and_then(|method| match method.0.as_str() {
             "link" => Ok(Method::SoftLink),
@@ -137,30 +158,33 @@ impl super::Transactor for Provider {
             }
         });
 
-        let source = source.and_then(|source| {
-            Source::from_path(source, context.unit_dir()).map_err(|err| {
-                context.emit(err);
-                degraded = true;
-            })
+        let rel_source = source.as_ref().map_err(|_| ()).and_then(|(source, span)| {
+            Source::from_path(context.unit_dir(), source.clone(), span.clone())
+                .and_then(|path| {
+                    if path.0.is_dir() {
+                        Ok(path)
+                    } else {
+                        Err(Error::SourceNotADirectory(source.clone(), span.clone()))
+                    }
+                })
+                .map_err(|err| context.emit(err))
         });
 
         let mut files = Vec::new();
-        let dir = source
-            .as_ref()
-            .map(|source| context.unit_dir().join(&source.0));
         for package in packages.packages {
-            let path = dir.as_ref().map_err(|_| ()).and_then(|dir| {
-                let path = PathBuf::from(package.name.0);
-                match Source::from_path((path.clone(), package.name.1), dir) {
-                    Ok(_) => Ok(path),
-                    Err(err) => {
-                        context.emit(err);
-                        Err(())
-                    }
-                }
-            });
+            let path = rel_source
+                .is_ok()
+                .then_some(())
+                .and_then(|_| source.as_ref().ok())
+                .and_then(|(source, _)| {
+                    let path = source.to_owned().join(&package.name.0);
+                    Source::from_path(context.unit_dir(), path, package.name.1)
+                        .map(|_| PathBuf::from(package.name.0))
+                        .map_err(|err| context.emit(err))
+                        .ok()
+                });
             let args = ItemParams::from_args(package.args, context);
-            if let (Ok(path), Ok(_args)) = (path, args) {
+            if let (Some(path), Ok(_args)) = (path, args) {
                 files.push(path)
             } else {
                 degraded = true;
@@ -175,7 +199,7 @@ impl super::Transactor for Provider {
                 payload: Box::new(Payload {
                     method: method.unwrap(),
                     conflicts: conflicts.unwrap(),
-                    source: source.unwrap(),
+                    source: rel_source.unwrap(),
                     target: target.unwrap(),
                     files,
                 }),
