@@ -1,8 +1,6 @@
 use color_eyre::eyre::WrapErr;
 use interpreter::{provider::Manager, Interpreter};
-use std::{
-    collections::{HashMap, VecDeque},
-};
+use std::collections::{HashMap, VecDeque};
 
 use crate::unit::Status;
 
@@ -38,7 +36,7 @@ impl Deploy {
                 )),
             );
             match status {
-                Status::Ok(unit) if is_degraded => {
+                Status::Ok(unit) if !is_degraded => {
                     for transaction in unit.transactions {
                         let provider = transaction.provider();
                         let provider = manager
