@@ -1,3 +1,5 @@
+#[macro_use]
+mod test_utils;
 mod lexer;
 mod parser;
 
@@ -92,6 +94,12 @@ enum Token {
 impl Token {
     fn kind(&self) -> TokenKind {
         self.into()
+    }
+}
+
+impl Into<Token> for Spanned<Token> {
+    fn into(self) -> Token {
+        self.0
     }
 }
 
@@ -376,6 +384,7 @@ impl chumsky::error::Error<(usize, Token)> for ErrorKind {
     }
 }
 
+#[derive(Debug)]
 pub struct Error(ErrorKind);
 
 impl Error {
