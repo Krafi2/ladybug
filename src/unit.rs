@@ -5,7 +5,6 @@ pub use interpreter::{
     Env, Interpreter,
 };
 
-
 pub struct Unit {
     pub name: String,
     pub desc: String,
@@ -57,166 +56,151 @@ impl Routine {
     }
 }
 
-pub use tree::{Module, ModuleTree, Status, UnitId};
-mod tree {
+pub mod loader {
     use super::Unit;
     use crate::context::Context;
-    use color_eyre::eyre::WrapErr;
-    use common::rel_path::RelPath;
-    use interpreter::{self, provider::Manager, Env, Interpreter, UnitFigment, Value};
-    use std::{collections::HashMap, path::Path};
+    use interpreter::{self, provider::Manager, Env, Interpreter, UnitFigment, UnitPath};
 
-    #[derive(Debug, Clone, Copy)]
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
     pub struct UnitId(u32);
+
+    pub enum Error {
+        IO(std::io::Error),
+    }
 
     pub enum Status {
         Ok(Unit),
         Degraded(UnitFigment, Vec<interpreter::error::Error>, String),
-        Err(color_eyre::Report),
+        Err(Error),
     }
 
     pub struct Module {
-        pub path: RelPath,
+        pub id: UnitId,
+        pub path: UnitPath,
         pub status: Status,
-        pub env: Env,
         pub members: Vec<UnitId>,
     }
 
-    pub struct ModuleTree {
-        modules: Vec<Module>,
-        degraded: bool,
-    }
-
+    #[derive(Debug)]
     struct Frame {
-        path: RelPath,
-        status: Status,
         env: Env,
-        members: Vec<UnitId>,
-        queue: Vec<RelPath>,
+        queue: Vec<(UnitId, UnitPath)>,
     }
 
-    impl ModuleTree {
-        pub fn load(
-            interpreter: &Interpreter,
-            manager: &mut Manager,
+    pub struct Loader<'a> {
+        stack: Vec<Frame>,
+        env: Option<Env>,
+        interpreter: &'a Interpreter,
+        manager: &'a mut Manager,
+        context: &'a Context,
+        next_id: u32,
+    }
+
+    impl<'a> Loader<'a> {
+        pub fn new(
             env: Env,
-            context: &Context,
+            interpreter: &'a Interpreter,
+            manager: &'a mut Manager,
+            context: &'a Context,
         ) -> Self {
-            let mut units = Vec::new();
-            let mut stack = vec![load_frame(
-                context.dotfile_dir().join("main.unit"),
-                manager,
-                env,
-                interpreter,
-                context,
-            )];
-            let mut degraded = false;
-
-            while let Some(frame) = stack.last_mut() {
-                match frame.queue.pop() {
-                    Some(path) => {
-                        let env = frame.env.clone();
-                        stack.push(load_frame(path, manager, env, interpreter, context))
-                    }
-                    None => {
-                        let frame = stack.pop().unwrap();
-                        let unit = Module {
-                            path: frame.path,
-                            status: frame.status,
-                            env: frame.env,
-                            members: frame.members,
-                        };
-                        if let Status::Err(..) | Status::Degraded(..) = &unit.status {
-                            degraded = true;
-                        }
-
-                        let id = units.len();
-                        units.push(unit);
-                        if let Some(frame) = stack.last_mut() {
-                            frame.members.push(UnitId(id as u32));
-                        }
-                    }
-                }
-            }
-
             Self {
-                modules: units,
-                degraded,
+                stack: Vec::new(),
+                env: Some(env),
+                interpreter,
+                manager,
+                context,
+                next_id: 0,
             }
-        }
-
-        pub fn get(&self, id: UnitId) -> &Module {
-            &self.modules[id.0 as usize]
-        }
-
-        pub fn get_mut(&mut self, id: UnitId) -> &mut Module {
-            &mut self.modules[id.0 as usize]
-        }
-
-        pub fn is_degraded(&self) -> bool {
-            self.degraded
         }
 
         pub fn root(&self) -> UnitId {
-            UnitId(self.modules.len() as u32 - 1)
+            UnitId(0)
         }
-    }
 
-    fn load_frame(
-        path: RelPath,
-        manager: &mut Manager,
-        env: HashMap<String, Value>,
-        interpreter: &Interpreter,
-        context: &Context,
-    ) -> Frame {
-        let src = std::fs::read_to_string(&path)
-            .wrap_err_with(|| format!("Failed to read unit file {}", &path));
+        fn next_id(&mut self) -> UnitId {
+            let id = self.next_id;
+            self.next_id += 1;
+            UnitId(id)
+        }
 
-        let (status, env, queue) = match src {
-            Ok(src) => {
-                let data = interpreter.eval(
-                    &src,
-                    &path,
-                    manager,
-                    env,
-                    context.home_dir(),
-                    context.is_root(),
-                );
-                let status = if data.errors.is_empty() {
-                    Status::Ok(
-                        Unit::from_figment(data.figment)
-                            .expect("There were no errors, unit generation shouldn't have failed"),
-                    )
-                } else {
-                    Status::Degraded(data.figment, data.errors, src)
-                };
-                let queue = data
-                    .members
-                    .unwrap_or_default()
-                    .into_iter()
-                    .map(|unit| {
-                        let unit = unit.0;
-                        let mut path = path.clone();
-                        assert!(path.pop());
-                        path.push(&unit);
-                        path.push(format!(
-                            "{}.unit",
-                            Path::display(unit.components().last().unwrap().as_ref())
-                        ));
-                        path
-                    })
-                    .collect();
-                (status, data.env, queue)
+        fn load_module(&mut self, id: UnitId, path: UnitPath, env: Env) -> Module {
+            let src = std::fs::read_to_string(
+                path.clone()
+                    .unit_file()
+                    .bind(self.context.dotfile_dir().clone()),
+            )
+            .map_err(Error::IO);
+
+            let (status, env, queue) = match src {
+                Ok(src) => {
+                    let data = self.interpreter.eval(
+                        &src,
+                        path.clone(),
+                        self.manager,
+                        env,
+                        self.context.home_dir(),
+                        self.context.dotfile_dir(),
+                        self.context.is_root(),
+                    );
+                    let status =
+                        if data.errors.is_empty() {
+                            Status::Ok(Unit::from_figment(data.figment).expect(
+                                "There were no errors, unit generation shouldn't have failed",
+                            ))
+                        } else {
+                            Status::Degraded(data.figment, data.errors, src)
+                        };
+
+                    let queue = data
+                        .members
+                        .unwrap_or_default()
+                        .into_iter()
+                        .map(|unit| (self.next_id(), unit))
+                        .collect();
+
+                    (status, data.env, queue)
+                }
+                Err(err) => (Status::Err(err), env, vec![]),
+            };
+
+            let members = queue.iter().map(|&(id, _)| id).collect();
+            self.stack.push(Frame { env, queue });
+            Module {
+                id,
+                path,
+                status,
+                members,
             }
-            Err(err) => (Status::Err(err), env, vec![]),
-        };
-
-        Frame {
-            path,
-            status,
-            env,
-            members: Vec::new(),
-            queue,
         }
     }
+
+    impl<'a> Iterator for Loader<'a> {
+        type Item = Module;
+
+        fn next(&mut self) -> Option<Self::Item> {
+            match self.stack.last_mut() {
+                Some(frame) => match frame.queue.pop() {
+                    Some((id, path)) => {
+                        let env = frame.env.clone();
+                        let module = self.load_module(id, path, env);
+                        Some(module)
+                    }
+                    None => {
+                        self.stack.pop();
+                        None
+                    }
+                },
+                None => match self.env.take() {
+                    Some(env) => {
+                        let id = self.next_id();
+                        let module = self.load_module(id, UnitPath::root(), env);
+                        Some(module)
+                    }
+                    None => None,
+                },
+            }
+        }
+    }
+
+    impl<'a> std::iter::FusedIterator for Loader<'a> {}
 }

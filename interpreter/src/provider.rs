@@ -304,8 +304,8 @@ trait Transactor {
 
 pub trait Provider {
     /// Install a collection of packages.
-    fn install(&mut self, transaction: Transaction) -> color_eyre::Result<()>;
+    fn install(&mut self, transaction: &Transaction) -> color_eyre::Result<()>;
 
     /// Remove a collection of packages from the system.
-    fn remove(&mut self, transaction: Transaction) -> color_eyre::Result<()>;
+    fn remove(&mut self, transaction: &Transaction) -> color_eyre::Result<()>;
 }

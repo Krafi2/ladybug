@@ -5,38 +5,74 @@ pub mod structures;
 pub mod provider;
 
 use ariadne::{Color, Fmt, ReportKind};
+use common::rel_path::RelPath;
 use std::{
     collections::HashMap,
+    fmt::Display,
     path::{Path, PathBuf},
 };
+use structures::FromValue;
 
 type Span = std::ops::Range<usize>;
 type Spanned<T> = (T, Span);
 pub type Env = HashMap<String, Value>;
+
+#[derive(Debug)]
+enum EvalError {
+    NotRelative(Span, LocalPath),
+    TooDeep(Span, LocalPath),
+    Empty(Span),
+    NotFound(Span, UnitPath),
+}
+
+report! {
+    EvalError {
+        EvalError::NotRelative(span, path) => {
+            report(ReportKind::Error, span.start);
+            message("Member '{}' must be relative", path.fg(Color::Red));
+            label(span, Color::Red, "The path must be relative to the current directory");
+        }
+        EvalError::TooDeep(span, path) => {
+            report(ReportKind::Error, span.start);
+            message("Member '{}' is too deep", path.fg(Color::Red));
+            label(span, Color::Red, "This path must only have a single component");
+        }
+        EvalError::Empty(span) => {
+            report(ReportKind::Error, span.start);
+            message("Empty member path");
+            label(span, Color::Red, "This path must not be empty");
+        }
+        EvalError::NotFound(span, path) => {
+            report(ReportKind::Error, span.start);
+            message("Member '{}' doesn't exist", (&path).fg(Color::Red));
+            label(span, Color::Red, "Cannot find file '{}'", path.unit_file().fg(Color::Red));
+        }
+
+    }
+}
 
 #[derive(Debug, Clone)]
 pub enum Value {
     List(Spanned<Vec<Value>>),
     String(Spanned<String>),
     Bool(Spanned<bool>),
-    Error(Spanned<EvalError>),
+    Error(Spanned<ValueError>),
 }
 
 #[derive(Debug, Clone)]
-pub enum EvalError {
+pub enum ValueError {
     UnknownVar(String),
-    VarError(String, Box<Spanned<EvalError>>),
+    VarError(String, Box<Spanned<ValueError>>),
 }
 
 report! {
-    (EvalError, Span) {
-        (EvalError::UnknownVar(var), span) => {
+    (ValueError, Span) {
+        (ValueError::UnknownVar(var), span) => {
             report(ReportKind::Error, span.start);
             message("Undefined variable ${}", var.fg(Color::Red));
             label(span, Color::Red, "This variable is not defined");
-
         }
-        (EvalError::VarError(var, _), span) => {
+        (ValueError::VarError(var, _), span) => {
             report(ReportKind::Error, span.start);
             message("Encountered an error while evaluating variable ${}", var.fg(Color::Red));
             label(span, Color::Red, "Cannot evaluate this variable");
@@ -50,7 +86,7 @@ impl Value {
             parser::Expr::Variable((var, span)) => match env.get(&var) {
                 Some(v) => match v {
                     Value::Error(e) => {
-                        Value::Error((EvalError::VarError(var, Box::new(e.clone())), span))
+                        Value::Error((ValueError::VarError(var, Box::new(e.clone())), span))
                     }
                     v => {
                         let mut val = v.clone();
@@ -58,7 +94,7 @@ impl Value {
                         val
                     }
                 },
-                None => Value::Error((EvalError::UnknownVar(var), span)),
+                None => Value::Error((ValueError::UnknownVar(var), span)),
             },
             parser::Expr::String(s) => Self::String(s),
             parser::Expr::Bool(b) => Self::Bool(b),
@@ -175,31 +211,119 @@ impl Args {
 }
 
 #[derive(Debug, Clone)]
-pub struct MemberPath(pub PathBuf);
+pub struct LocalPath(PathBuf);
 
-#[derive(Debug, thiserror::Error)]
-pub enum PathError {
-    #[error("The path must be relative to the current directory")]
-    NotRelative,
-    #[error("The path cannot contain multiple components")]
-    TooDeep,
-    #[error("The path cannot be empty")]
-    Empty,
+impl std::fmt::Display for LocalPath {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.display().fmt(f)
+    }
 }
 
-impl std::str::FromStr for MemberPath {
-    type Err = PathError;
+impl LocalPath {
+    pub fn bind(&self, mut location: RelPath) -> RelPath {
+        location.push(&self.0);
+        location
+    }
 
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let path = Path::new(s);
-        if path.is_absolute() || path.starts_with("~") {
-            Err(PathError::NotRelative)
-        } else {
-            match path.components().count() {
-                0 => Err(PathError::Empty),
-                1 => Ok(Self(path.to_owned())),
-                _ => Err(PathError::TooDeep),
+    pub fn join<P: AsRef<Path>>(&self, path: P) -> Self {
+        Self(self.0.join(path.as_ref()))
+    }
+
+    pub fn push<P: AsRef<Path>>(&mut self, path: P) {
+        self.0.push(path.as_ref())
+    }
+}
+
+impl From<UnitPath> for LocalPath {
+    fn from(path: UnitPath) -> Self {
+        match path.0 {
+            UnitPathInner::Root => LocalPath("".into()),
+            UnitPathInner::Path(path) => path,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+enum UnitPathInner {
+    Root,
+    Path(LocalPath),
+}
+
+#[derive(Debug, Clone)]
+pub struct UnitPath(UnitPathInner);
+
+impl UnitPath {
+    pub fn name(&self) -> String {
+        match &self.0 {
+            UnitPathInner::Root => "main".into(),
+            UnitPathInner::Path(path) => path
+                .0
+                .components()
+                .last()
+                .unwrap()
+                .as_os_str()
+                .to_string_lossy()
+                .into_owned(),
+        }
+    }
+
+    pub fn unit_file(self) -> LocalPath {
+        let file = self.name() + ".unit";
+        LocalPath::from(self).join(file)
+    }
+
+    pub fn root() -> Self {
+        Self(UnitPathInner::Root)
+    }
+
+    pub fn join<P: AsRef<Path>>(&self, path: P) -> LocalPath {
+        let mut new = LocalPath::from(self.clone());
+        new.push(path.as_ref());
+        new
+    }
+
+    pub fn bind(&self, mut location: RelPath) -> RelPath {
+        location.push(LocalPath::from(self.clone()).0);
+        location
+    }
+}
+
+impl FromValue for UnitPath {
+    fn from_value(value: Value, ctx: &mut Ctx) -> Result<Self, ()> {
+        <(PathBuf, Span)>::from_value(value, ctx).and_then(|(path, span)| {
+            if path.is_absolute() || path.starts_with("~") {
+                Err(EvalError::NotRelative(span, LocalPath(path)))
+            } else {
+                match path.components().count() {
+                    0 => Err(EvalError::Empty(span)),
+                    1 => {
+                        let path = UnitPath(UnitPathInner::Path(
+                            LocalPath::from(ctx.unit_dir().clone()).join(path),
+                        ));
+                        if path
+                            .clone()
+                            .unit_file()
+                            .bind(ctx.dotfile_dir().clone())
+                            .exists()
+                        {
+                            Ok(path)
+                        } else {
+                            Err(EvalError::NotFound(span, path))
+                        }
+                    }
+                    _ => Err(EvalError::TooDeep(span, LocalPath(path))),
+                }
             }
+            .map_err(|err| ctx.emit(err))
+        })
+    }
+}
+
+impl Display for UnitPath {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.0 {
+            UnitPathInner::Root => f.write_str("main"),
+            UnitPathInner::Path(path) => path.fmt(f),
         }
     }
 }
@@ -209,7 +333,7 @@ pub use eval::{Interpreter, RoutineFigment, UnitFigment};
 mod eval {
     use std::path::Path;
 
-    use super::{error::Error, Arg, Args, Env, MemberPath, Package, Packages, Spanned, Value};
+    use super::{error::Error, Arg, Args, Env, Package, Packages, Spanned, UnitPath, Value};
     use crate::{provider::Transaction, structures};
     use common::{command::Command, rel_path::RelPath};
 
@@ -229,7 +353,7 @@ mod eval {
             desc: Result<String, ()>,
             topic: Result<Option<String>, ()>,
             shell: Result<Option<Command>, ()>,
-            members: Result<Option<Vec<structures::ParseStr<MemberPath>>>, ()>,
+            members: Result<Option<structures::CollectOk<UnitPath>>, ()>,
         }
     }
 
@@ -257,29 +381,34 @@ mod eval {
     pub struct UnitData {
         pub figment: UnitFigment,
         pub env: Env,
-        pub members: Option<Vec<MemberPath>>,
+        pub members: Option<Vec<UnitPath>>,
         pub errors: Vec<Error>,
     }
 
     pub(super) struct Ctx<'a> {
-        members: Vec<MemberPath>,
-        dir: RelPath,
+        members: Vec<UnitPath>,
+        dir: UnitPath,
         home_dir: Result<&'a Path, common::rel_path::HomeError>,
+        dotfile_dir: &'a RelPath,
         root: bool,
         errors: Vec<crate::error::Error>,
     }
 
     impl<'a> Ctx<'a> {
-        pub fn members(&self) -> &[MemberPath] {
+        pub fn members(&self) -> &[UnitPath] {
             &self.members
         }
 
-        pub fn unit_dir(&self) -> &RelPath {
+        pub fn unit_dir(&self) -> &UnitPath {
             &self.dir
         }
 
         pub fn home_dir(&self) -> Result<&Path, common::rel_path::HomeError> {
             self.home_dir
+        }
+
+        pub fn dotfile_dir(&self) -> &RelPath {
+            self.dotfile_dir
         }
 
         pub fn emit<E: Into<crate::error::Error>>(&mut self, error: E) {
@@ -305,20 +434,18 @@ mod eval {
         pub fn eval(
             &self,
             src: &str,
-            path: &RelPath,
+            path: UnitPath,
             manager: &mut super::provider::Manager,
             mut env: Env,
             home_dir: Result<&Path, common::rel_path::HomeError>,
+            dotfile_dir: &RelPath,
             root: bool,
         ) -> UnitData {
             let mut context = Ctx {
                 members: Vec::new(),
-                dir: {
-                    let mut path = path.clone();
-                    path.pop();
-                    path
-                },
+                dir: path,
                 home_dir,
+                dotfile_dir,
                 root,
                 errors: Vec::new(),
             };
@@ -350,9 +477,7 @@ mod eval {
                             desc = header.desc.ok();
                             topic = header.topic.unwrap_or_default();
                             shell = header.shell.unwrap_or_default();
-                            members = header.members.unwrap_or_default().map(|members| {
-                                members.into_iter().map(|path| path.0).collect::<Vec<_>>()
-                            });
+                            members = header.members.unwrap_or_default().map(|members| members.0);
                             if let Some(members) = members.as_ref() {
                                 context.members = members.clone();
                             }

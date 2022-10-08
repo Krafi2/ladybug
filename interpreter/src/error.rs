@@ -2,7 +2,8 @@ use super::{provider, structures, Span, Spanned};
 
 #[derive(Debug)]
 enum Inner {
-    Eval(Spanned<super::EvalError>),
+    Eval(crate::EvalError),
+    Value(Spanned<super::ValueError>),
     Parse(parser::Error),
     Convert(structures::ConvertError),
     Param(structures::ParamError),
@@ -10,9 +11,14 @@ enum Inner {
     Other(color_eyre::Report),
 }
 
-impl From<Spanned<super::EvalError>> for Inner {
-    fn from(err: Spanned<super::EvalError>) -> Self {
+impl From<crate::EvalError> for Inner {
+    fn from(err: crate::EvalError) -> Self {
         Self::Eval(err)
+    }
+}
+impl From<Spanned<super::ValueError>> for Inner {
+    fn from(err: Spanned<super::ValueError>) -> Self {
+        Self::Value(err)
     }
 }
 impl From<parser::Error> for Inner {
@@ -59,9 +65,10 @@ impl IntoReport for parser::Error {
 impl Error {
     pub fn into_report<'a>(self, filename: &'a str) -> ariadne::Report<(&'a str, Span)> {
         match self.0 {
+            Inner::Eval(err) => err.into_report(filename),
             Inner::Parse(err) => err.into_report(filename),
             Inner::Convert(err) => err.into_report(filename),
-            Inner::Eval(err) => err.into_report(filename),
+            Inner::Value(err) => err.into_report(filename),
             Inner::Param(err) => err.into_report(filename),
             Inner::Transaction(err) => err.into_report(filename),
             Inner::Other(_err) => todo!(),
