@@ -48,7 +48,7 @@ report! {
         Error::PathUnreachable(path, err, span) => {
             report(ReportKind::Error, span.start);
             message("Cannot find path '{}'", path.display().fg(Color::Red));
-            label(span, Color::Red, "IOError: {}", err);
+            label(span, Color::Red, "IoError: {}", err);
         }
         Error::SourceNotADirectory(path, span) => {
             report(ReportKind::Error, span.start);
@@ -158,8 +158,9 @@ impl super::Transactor for Provider {
             }
         });
 
+        let dir = context.unit_dir().bind(context.dotfile_dir().clone());
         let rel_source = source.as_ref().map_err(|_| ()).and_then(|(source, span)| {
-            Source::from_path(context.unit_dir(), source.clone(), span.clone())
+            Source::from_path(&dir, source.clone(), span.clone())
                 .and_then(|path| {
                     if path.0.is_dir() {
                         Ok(path)
@@ -178,7 +179,7 @@ impl super::Transactor for Provider {
                 .and_then(|_| source.as_ref().ok())
                 .and_then(|(source, _)| {
                     let path = source.to_owned().join(&package.name.0);
-                    Source::from_path(context.unit_dir(), path, package.name.1)
+                    Source::from_path(&dir, path, package.name.1)
                         .map(|_| PathBuf::from(package.name.0))
                         .map_err(|err| context.emit(err))
                         .ok()
@@ -209,7 +210,7 @@ impl super::Transactor for Provider {
 }
 
 impl super::Provider for Provider {
-    fn install(&mut self, transaction: super::Transaction) -> color_eyre::Result<()> {
+    fn install(&mut self, transaction: &super::Transaction) -> color_eyre::Result<()> {
         assert_eq!(transaction.provider, super::ProviderKind::Files.into());
         let Payload {
             method,
@@ -217,25 +218,25 @@ impl super::Provider for Provider {
             source,
             target,
             files,
-        } = *transaction
+        } = transaction
             .payload
-            .downcast::<Payload>()
+            .downcast_ref::<Payload>()
             .expect("Wrong type");
 
-        let source = source.0;
-        tracing::info_span!("deploy", "Deploying files from {source} to {target}");
+        let source = &source.0;
+        tracing::debug_span!("deploy", "Deploying files from {source} to {target}");
         for file in files {
             let source = source.join(&file);
             let dest = target.join(&file);
-            match deploy_file(&source, &dest, method, conflicts) {
-                Ok(_) => tracing::info!("Deployed {source} to {dest}"),
+            match deploy_file(&source, &dest, *method, *conflicts) {
+                Ok(_) => tracing::debug!("Deployed {source} to {dest}"),
                 Err(err) => tracing::error!("Failed to deploy {source} to {dest}: {err}"),
             }
         }
         Ok(())
     }
 
-    fn remove(&mut self, _transaction: super::Transaction) -> color_eyre::Result<()> {
+    fn remove(&mut self, _transaction: &super::Transaction) -> color_eyre::Result<()> {
         todo!()
     }
 }

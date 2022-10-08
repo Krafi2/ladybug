@@ -38,7 +38,7 @@ pub(super) enum ConvertError {
     },
     EvalErr {
         span: Span,
-        err: super::EvalError,
+        err: super::ValueError,
     },
 }
 
@@ -212,6 +212,34 @@ impl FromValue for common::command::Command {
                 Ok(common::command::Command::new(cmd, vec))
             }
         })
+    }
+}
+
+pub(super) struct CollectOk<T: FromValue>(pub Vec<T>);
+
+impl<T: FromValue> FromValue for CollectOk<T> {
+    fn from_value(value: Value, ctx: &mut Ctx) -> Result<Self, ()> {
+        match value {
+            Value::List((vec, _)) => {
+                let vec = vec
+                    .into_iter()
+                    .filter_map(|value| T::from_value(value, ctx).ok())
+                    .collect();
+                Ok(Self(vec))
+            }
+            Value::Error((err, span)) => {
+                ctx.emit(ConvertError::EvalErr { span, err });
+                Err(())
+            }
+            other => {
+                ctx.emit(ConvertError::TypeErr {
+                    span: other.span(),
+                    expected: Type::String,
+                    found: other.get_type(),
+                });
+                Err(())
+            }
+        }
     }
 }
 

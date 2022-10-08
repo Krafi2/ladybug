@@ -101,13 +101,13 @@ impl Provider {
         }
     }
 
-    fn zypper_cmd(&mut self, cmd: &str, transaction: Transaction) -> color_eyre::Result<()> {
+    fn zypper_cmd(&mut self, cmd: &str, transaction: &Transaction) -> color_eyre::Result<()> {
         let transaction = transaction
             .payload
-            .downcast::<Payload>()
+            .downcast_ref::<Payload>()
             .expect("Wrong type");
 
-        let from = if let Some(from) = transaction.from {
+        let from = if let Some(from) = &transaction.from {
             from.iter()
                 .map(String::as_str)
                 .flat_map(|s| [" --from ", s])
@@ -116,15 +116,14 @@ impl Provider {
             "".to_owned()
         };
 
-        let packages =
-            transaction
-                .packages
-                .into_iter()
-                .fold(String::new(), |mut state, package| {
-                    state.push_str(" ");
-                    state.push_str(&package.name);
-                    state
-                });
+        let packages = transaction
+            .packages
+            .iter()
+            .fold(String::new(), |mut state, package| {
+                state.push_str(" ");
+                state.push_str(&package.name);
+                state
+            });
 
         writeln!(self.stdin(), "{}{} {}", cmd, from, packages)
             .wrap_err("Failed to write to stdout")?;
@@ -217,11 +216,11 @@ impl super::Transactor for Provider {
 }
 
 impl super::Provider for Provider {
-    fn install(&mut self, transaction: Transaction) -> color_eyre::Result<()> {
+    fn install(&mut self, transaction: &Transaction) -> color_eyre::Result<()> {
         self.zypper_cmd("install", transaction)
     }
 
-    fn remove(&mut self, transaction: Transaction) -> color_eyre::Result<()> {
+    fn remove(&mut self, transaction: &Transaction) -> color_eyre::Result<()> {
         self.zypper_cmd("remove", transaction)
     }
 }

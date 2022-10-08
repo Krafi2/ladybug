@@ -23,11 +23,11 @@ impl super::Transactor for Provider {
 }
 
 impl super::Provider for Provider {
-    fn install(&mut self, _transaction: super::Transaction) -> color_eyre::Result<()> {
+    fn install(&mut self, _transaction: &super::Transaction) -> color_eyre::Result<()> {
         todo!()
     }
 
-    fn remove(&mut self, _transaction: super::Transaction) -> color_eyre::Result<()> {
+    fn remove(&mut self, _transaction: &super::Transaction) -> color_eyre::Result<()> {
         todo!()
     }
 }
