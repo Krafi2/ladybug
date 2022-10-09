@@ -95,5 +95,8 @@ fn setup_log() -> color_eyre::Result<()> {
     // Set global subscriber
     let subscriber = tracing_subscriber::FmtSubscriber::new();
     tracing::subscriber::set_global_default(subscriber)?;
+
+    // Install color_eyre panic and error handlers
+    color_eyre::install()?;
     Ok(())
 }
