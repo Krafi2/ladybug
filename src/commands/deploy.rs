@@ -173,7 +173,6 @@ impl Deploy {
                         module.path
                     );
                     let unit = module.unit.as_ref().expect("Unexpected error");
-                    let mut newline = false;
 
                     for transaction in &unit.transactions[..*n] {
                         let provider = transaction.provider();
@@ -186,12 +185,6 @@ impl Deploy {
                         if let Err(err) =
                             provider.and_then(|provider| provider.install(&transaction))
                         {
-                            // Print a newline to separate the errors from the "Removing unit:"
-                            // info
-                            if !newline {
-                                newline = true;
-                                eprintln!("");
-                            }
                             eprintln!("{err:?}");
                             errn += 1;
                         }
