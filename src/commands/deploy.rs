@@ -87,6 +87,7 @@ impl Deploy {
                 },
             );
         }
+        let parse_failed = errn != 0;
 
         if errn == 0 {
             let mut queue = Vec::new();
@@ -141,17 +142,30 @@ impl Deploy {
                 let unit = module.unit.as_ref().expect("Unexpected error");
 
                 let mut n = 0;
-                let res = unit.transactions.iter().try_for_each(|transaction| {
-                    n += 1;
-                    let provider = transaction.provider();
-                    let provider = manager
-                        .get_provider(provider)
-                        .expect("Unitialized provider")
-                        .map_err(|err| color_eyre::eyre::eyre!(err.to_string()))
-                        .wrap_err_with(|| format!("Failed to fetch provider '{}'", provider));
+                let res = unit
+                    .transactions
+                    .iter()
+                    .try_for_each(|transaction| {
+                        n += 1;
+                        let provider = transaction.provider();
+                        let provider = manager
+                            .get_provider(provider)
+                            .expect("Unitialized provider")
+                            .map_err(|err| color_eyre::eyre::eyre!(err.to_string()))
+                            .wrap_err_with(|| format!("Failed to fetch provider '{}'", provider));
 
-                    provider.and_then(|provider| provider.install(&transaction))
-                });
+                        provider.and_then(|provider| provider.install(&transaction))
+                    })
+                    .and_then(|_| {
+                        if let Some(hook) = &unit.deploy {
+                            let shell = &unit.shell.as_ref().unwrap_or(context.default_shell());
+                            hook.run(shell)
+                                .map_err(|err| err.into_report().wrap_err("Deploy hook failed"))
+                        } else {
+                            Ok(())
+                        }
+                    });
+
                 println!(" Done");
                 deployed.push((id, n));
                 if res.is_err() {
@@ -162,7 +176,7 @@ impl Deploy {
             });
 
             if let Err(err) = res {
-                eprintln!("{err:?}");
+                eprintln!("Error:{err:?}");
                 eprintln!("Encountered an error, reverting changes");
                 for (i, (id, n)) in deployed.iter().enumerate() {
                     let module = modules.get(&id).unwrap();
@@ -189,15 +203,27 @@ impl Deploy {
                             errn += 1;
                         }
                     }
+
+                    if let Some(hook) = &unit.remove {
+                        let shell = &unit.shell.as_ref().unwrap_or(context.default_shell());
+                        if let Err(err) = hook.run(shell) {
+                            errn += 1;
+                            eprintln!(
+                                "Error:{:?}",
+                                err.into_report().wrap_err("Uninstall hook failed")
+                            );
+                        }
+                    }
                     println!(" Done");
                 }
             }
         }
         if errn != 0 {
+            let verb = if parse_failed { "aborted" } else { "failed" };
             if errn == 1 {
-                eprintln!("\nDeployment aborted due to previous error");
+                eprintln!("\nDeployment {verb} due to previous error");
             } else {
-                eprintln!("\nDeployment aborted due to {errn} previous errors");
+                eprintln!("\nDeployment {verb} due to {errn} previous errors");
             }
         }
 

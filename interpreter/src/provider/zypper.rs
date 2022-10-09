@@ -234,8 +234,9 @@ impl super::ProviderPrivate for Provider {
         // Try to spawn the zypper subprocess
         let zypper = std::process::Command::new("zypper")
             .arg("shell")
-            .stdin(Stdio::piped())
+            .stdin(Stdio::null())
             .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
             .spawn()
             .map_err(|e| ProviderError::Unavailable(std::rc::Rc::new(ProcessError::Spawn(e))))?;
 

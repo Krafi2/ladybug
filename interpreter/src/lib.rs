@@ -342,7 +342,6 @@ mod eval {
     params! {
         struct RoutineParams {
             shell: Result<Option<Command>, ()>,
-            stdin: Result<Option<bool>,()>,
             stdout: Result<Option<bool>, ()>,
         }
     }
@@ -360,7 +359,6 @@ mod eval {
     #[derive(Debug, Default)]
     pub struct RoutineFigment {
         pub shell: Option<Command>,
-        pub stdin: Option<bool>,
         pub stdout: Option<bool>,
         pub body: String,
     }
@@ -542,7 +540,6 @@ mod eval {
                             .expect("Param parsing should be infallible");
                         let routine = RoutineFigment {
                             shell: params.shell.unwrap_or_default(),
-                            stdin: params.stdin.unwrap_or_default(),
                             stdout: params.stdout.unwrap_or_default(),
                             body: content,
                         };

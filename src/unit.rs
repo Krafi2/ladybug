@@ -1,4 +1,11 @@
+use std::process::Stdio;
+
 use crate::shell::Shell;
+
+use color_eyre::{
+    eyre::eyre,
+    section::{Section, SectionExt},
+};
 
 pub use interpreter::{
     provider::{Manager, Provider, Transaction},
@@ -40,19 +47,67 @@ impl Unit {
 #[derive(Debug)]
 pub struct Routine {
     shell: Option<Shell>,
-    stdin: bool,
     stdout: bool,
     code: String,
+}
+
+#[derive(Debug)]
+pub enum CmdError {
+    Spawn(std::io::Error),
+    IO(std::io::Error),
+    Failed(std::process::Output),
 }
 
 impl Routine {
     fn from_figment(figment: interpreter::RoutineFigment) -> Option<Self> {
         Some(Self {
             shell: figment.shell.map(Into::into),
-            stdin: figment.stdin.unwrap_or(true),
             stdout: figment.stdout.unwrap_or(true),
             code: figment.body,
         })
+    }
+
+    pub fn run(&self, shell: &Shell) -> Result<(), CmdError> {
+        let stdout = if self.stdout {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        };
+        let shell = self.shell.as_ref().unwrap_or(shell);
+        let child = shell
+            .new_command(&self.code)
+            .stdin(Stdio::null())
+            .stdout(stdout)
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(CmdError::Spawn)?;
+        let output = child.wait_with_output().map_err(CmdError::IO)?;
+
+        if output.status.success() {
+            Ok(())
+        } else {
+            Err(CmdError::Failed(output))
+        }
+    }
+}
+
+impl CmdError {
+    pub fn into_report(self) -> color_eyre::Report {
+        match self {
+            CmdError::Spawn(err) => eyre!(err).wrap_err("Cannot start process"),
+            CmdError::IO(err) => eyre!(err),
+            CmdError::Failed(output) => match output.status.code() {
+                Some(code) => eyre!("Process failed with exit code {code}"),
+                None => eyre!("Process was terminated by a signal"),
+            }
+            .section(
+                String::from_utf8_lossy(&output.stderr)
+                    .as_ref()
+                    .trim()
+                    .to_owned()
+                    .header("Stderr:"),
+            ),
+        }
     }
 }
 
