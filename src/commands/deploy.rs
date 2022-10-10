@@ -159,7 +159,8 @@ impl Deploy {
                     .and_then(|_| {
                         if let Some(hook) = &unit.deploy {
                             let shell = &unit.shell.as_ref().unwrap_or(context.default_shell());
-                            hook.run(shell)
+                            let dir = module.path.bind(context.dotfile_dir().clone());
+                            hook.run(shell, &dir)
                                 .map_err(|err| err.into_report().wrap_err("Deploy hook failed"))
                         } else {
                             Ok(())
@@ -206,7 +207,8 @@ impl Deploy {
 
                     if let Some(hook) = &unit.remove {
                         let shell = &unit.shell.as_ref().unwrap_or(context.default_shell());
-                        if let Err(err) = hook.run(shell) {
+                        let dir = module.path.bind(context.dotfile_dir().clone());
+                        if let Err(err) = hook.run(shell, &dir) {
                             errn += 1;
                             eprintln!(
                                 "Error:{:?}",
