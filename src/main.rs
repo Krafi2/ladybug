@@ -87,16 +87,14 @@ fn run() -> color_eyre::Result<Result<(), ()>> {
 }
 
 fn setup_log() -> color_eyre::Result<()> {
-    // Disable eyre's spantrace
-    if std::env::var("RUST_SPANTRACE").is_err() {
-        std::env::set_var("RUST_SPANTRACE", "0");
-    }
-
     // Set global subscriber
     let subscriber = tracing_subscriber::FmtSubscriber::new();
     tracing::subscriber::set_global_default(subscriber)?;
 
     // Install color_eyre panic and error handlers
-    color_eyre::install()?;
+    color_eyre::config::HookBuilder::new()
+        .display_env_section(false)
+        .display_location_section(false)
+        .install()?;
     Ok(())
 }
