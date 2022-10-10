@@ -343,6 +343,7 @@ mod eval {
         struct RoutineParams {
             shell: Result<Option<Command>, ()>,
             stdout: Result<Option<bool>, ()>,
+            workdir: Result<Option<RelPath>, ()>,
         }
     }
 
@@ -360,6 +361,7 @@ mod eval {
     pub struct RoutineFigment {
         pub shell: Option<Command>,
         pub stdout: Option<bool>,
+        pub workdir: Option<RelPath>,
         pub body: String,
     }
 
@@ -541,6 +543,7 @@ mod eval {
                         let routine = RoutineFigment {
                             shell: params.shell.unwrap_or_default(),
                             stdout: params.stdout.unwrap_or_default(),
+                            workdir: params.workdir.unwrap_or_default(),
                             body: content,
                         };
                         match name {

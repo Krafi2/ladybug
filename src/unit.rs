@@ -1,4 +1,4 @@
-use std::process::Stdio;
+use std::{path::Path, process::Stdio};
 
 use crate::shell::Shell;
 
@@ -7,6 +7,7 @@ use color_eyre::{
     section::{Section, SectionExt},
 };
 
+use common::rel_path::RelPath;
 pub use interpreter::{
     provider::{Manager, Provider, Transaction},
     Env, Interpreter,
@@ -48,6 +49,7 @@ impl Unit {
 pub struct Routine {
     shell: Option<Shell>,
     stdout: bool,
+    workdir: Option<RelPath>,
     code: String,
 }
 
@@ -63,19 +65,26 @@ impl Routine {
         Some(Self {
             shell: figment.shell.map(Into::into),
             stdout: figment.stdout.unwrap_or(true),
+            workdir: figment.workdir,
             code: figment.body,
         })
     }
 
-    pub fn run(&self, shell: &Shell) -> Result<(), CmdError> {
+    pub fn run(&self, shell: &Shell, dir: &Path) -> Result<(), CmdError> {
         let stdout = if self.stdout {
             Stdio::piped()
         } else {
             Stdio::null()
         };
         let shell = self.shell.as_ref().unwrap_or(shell);
+        let dir = &self
+            .workdir
+            .as_ref()
+            .map(|dir| dir.as_path())
+            .unwrap_or(dir);
         let child = shell
             .new_command(&self.code)
+            .current_dir(dir)
             .stdin(Stdio::null())
             .stdout(stdout)
             .stderr(Stdio::piped())
