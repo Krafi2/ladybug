@@ -1,19 +1,15 @@
 #[allow(unused_macros)]
 macro_rules! test_parsers {
-    (test $parser:ident) => {
-        #[test]
-        fn $parser() {
-            unimplemented!()
-        }
-    };
-    (test $parser:ident $($input:expr => $expected:expr),+) => {
+    (__test__ $exp_trans:path; $out_trans:path; $parser:ident { $($input:expr => $expected:expr),+ $(,)? } ) => {
         #[test]
         fn $parser() {
             let parser = ::chumsky::Parser::then_ignore(super::$parser(), chumsky::prelude::end());
-            let tests = [$(($input, Ok($expected))),+];
+            let tests = [$( ($input, $exp_trans($expected)) ),+];
 
             let errors = tests.into_iter().enumerate().filter_map(|(i, (input, expected))| {
-                let output = ::chumsky::Parser::parse(&parser, input.clone()).map(Into::into);
+                let stream = $crate::stream_from_str(input);
+                let output = ::chumsky::Parser::parse(&parser, stream);
+                let output = $out_trans(output);
                 if output.as_ref() == expected.as_ref() {
                     None
                 } else {
@@ -24,16 +20,22 @@ macro_rules! test_parsers {
 
             if !errors.is_empty() {
                 for (i, input, output, expected) in errors {
-                    eprintln!("[Test {}]", i);
+                    eprintln!("[Test {} failed]", i);
                     eprintln!("input:\n{:#?}\noutput:\n{:#?}\nexpected:\n{:#?}", input, output, expected)
                 }
                 panic!("Test failed")
             }
         }
     };
-    ($($parser:ident { $($inp:expr => $out:expr),* $(,)? })*) => {
+    (__test__ $exp_trans:path; $out_trans:path; $parser:ident {}) => {
+        #[test]
+        fn $parser() {
+            unimplemented!()
+        }
+    };
+    (@expected: $exp_trans:path; @output: $out_trans:path; $( $parser:ident $body:tt )* ) => {
         $(
-            test_parsers!{ test $parser $($inp => $out),* }
+            test_parsers!{ __test__ $exp_trans; $out_trans; $parser $body }
         )*
     };
 }

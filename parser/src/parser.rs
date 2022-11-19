@@ -1,381 +1,219 @@
-use super::{Block, ErrorKind, Expr, Item, Name, Param, Span, Spanned, Spanner, Token, TokenKind};
-use chumsky::{prelude::*, Stream};
+use chumsky::prelude::*;
 
-/// A utility iterator which filters `Token`s. The lifetime `'a` is present so that the
-/// type checker is satisfied when we create a `Stream`.
-pub struct TokenFilter<'a, I: Iterator>(I, std::marker::PhantomData<&'a ()>);
+use crate::{span::Spanner, Span, Spanned, Token, TokenKind};
 
-impl<'a, I: Iterator> Iterator for TokenFilter<'a, I> {
-    type Item = I::Item;
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Error {
+    UnexpectedToken(Span, Vec<Option<TokenKind>>, Option<TokenKind>),
+    InvalidIdent(Span, String),
+}
 
-    fn next(&mut self) -> Option<Self::Item> {
-        self.0.next()
+impl Error {
+    fn expected(expected: Vec<TokenKind>, found: TokenKind, span: Span) -> Self {
+        Self::UnexpectedToken(
+            span,
+            expected.into_iter().map(Option::Some).collect(),
+            Some(found),
+        )
     }
 }
 
-/// Filter out tokens with no impact on parsing, such as spaces, lines, and comments.
-pub(super) fn token_filter(tokens: Vec<Spanned<Token>>) -> impl Iterator<Item = Spanned<Token>> {
-    tokens.into_iter().filter_map(|(token, span)| match token {
-        Token::Space(_) | Token::Comment(_) | Token::Line => None,
-        Token::DelimStr(s) => Some((Token::Str(s), span)),
-        _ => Some((token, span)),
+impl chumsky::error::Error<Token> for Error {
+    type Span = Span;
+    type Label = ();
+
+    fn expected_input_found<Iter: IntoIterator<Item = Option<Token>>>(
+        span: Self::Span,
+        expected: Iter,
+        found: Option<Token>,
+    ) -> Self {
+        Self::expected(
+            expected
+                .into_iter()
+                .map(|t| t.as_ref().map(Token::kind).unwrap_or(TokenKind::End))
+                .collect(),
+            found.as_ref().map(Token::kind).unwrap_or(TokenKind::End),
+            span,
+        )
+    }
+
+    fn with_label(self, _label: Self::Label) -> Self {
+        unimplemented!()
+    }
+
+    fn merge(self, other: Self) -> Self {
+        match (self, other) {
+            (
+                Self::UnexpectedToken(span, mut expected1, found),
+                Self::UnexpectedToken(_, expected2, _),
+            ) => {
+                expected1.extend_from_slice(&expected2);
+                Self::UnexpectedToken(span, expected1, found)
+            }
+            (err, Self::UnexpectedToken(_, _, _)) => err,
+            (Self::UnexpectedToken(_, _, _), err) => err,
+            (err1, _) => err1,
+        }
+    }
+}
+
+trait MyParser<O>: Parser<Token, O, Error = Error> + Clone {}
+impl<O, T: Parser<Token, O, Error = Error> + Clone> MyParser<O> for T {}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct Ident(pub String);
+
+impl std::fmt::Display for Ident {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(&self.0, f)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Expr {
+    Variable(Ident),
+    String(String),
+    Bool(bool),
+    List(Vec<Spanned<Expr>>),
+    Map(Vec<Spanned<Param>>),
+    Code(String),
+    Item(Spanned<Ident>, Spanned<Params>),
+}
+
+pub enum Body {
+    Map(Vec<Spanned<Param>>),
+    List(Vec<Spanned<Expr>>),
+    Code(String),
+}
+
+pub struct Block {
+    pub ident: Spanned<Ident>,
+    pub params: Option<Spanned<Params>>,
+    pub body: Spanned<Body>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Param {
+    pub name: Spanned<Ident>,
+    pub val: Spanned<Expr>,
+}
+
+type Params = Vec<Spanned<Param>>;
+
+fn ident() -> impl MyParser<Ident> {
+    filter_map(|span, token| match token {
+        Token::IdentOrStr(ident) => {
+            for (i, c) in ident.chars().enumerate() {
+                if !c.is_alphabetic() && (c.is_numeric() && i == 0) {
+                    return Err(Error::InvalidIdent(span, ident));
+                }
+            }
+            Ok(Ident(ident))
+        }
+        Token::Ident(ident) => Ok(Ident(ident)),
+        token => Err(Error::expected(vec![TokenKind::Ident], token.kind(), span)),
     })
 }
 
-/// Filter out tokens with no impact on parsing, such as spaces, lines, and comments, and
-/// enumerate the result.
-pub(super) fn token_filter_enumerator(
-    tokens: Vec<Spanned<Token>>,
-) -> impl Iterator<Item = Spanned<(usize, Token)>> {
-    token_filter(tokens)
-        .enumerate()
-        .map(|(i, (token, span))| ((i, token), span))
+fn param(expr: impl MyParser<Expr>) -> impl MyParser<Param> {
+    ident()
+        .spanned()
+        .then_ignore(just(Token::Ctrl(':')))
+        .then(expr.spanned())
+        .map(|(name, val)| Param { name, val })
 }
 
-/// Convert a vector of tokens into a stream through an iterator.
-pub(super) fn map_tokens<
-    'a,
-    F: FnOnce(Vec<Spanned<Token>>) -> I,
-    I: Iterator<Item = Spanned<T>>,
-    T,
->(
-    tokens: Vec<Spanned<Token>>,
-    span: Span,
-    func: F,
-) -> Stream<'a, T, Span, TokenFilter<'a, I>> {
-    let end = span.end;
-    Stream::from_iter(
-        end..end + 1,
-        TokenFilter(func(tokens), std::marker::PhantomData),
-    )
+fn params(expr: impl MyParser<Expr>) -> impl MyParser<Params> {
+    param(expr)
+        .spanned()
+        .repeated()
+        .delimited_by(just(Token::Ctrl('(')), just(Token::Ctrl(')')))
 }
 
-fn expr() -> impl Parser<Token, Expr, Error = ErrorKind> {
+fn list(expr: impl MyParser<Expr>) -> impl MyParser<Vec<Spanned<Expr>>> {
+    expr.spanned()
+        .repeated()
+        .delimited_by(just(Token::Ctrl('[')), just(Token::Ctrl(']')))
+}
+
+fn map(expr: impl MyParser<Expr>) -> impl MyParser<Vec<Spanned<Param>>> {
+    param(expr)
+        .spanned()
+        .repeated()
+        .delimited_by(just(Token::Ctrl('{')), just(Token::Ctrl('}')))
+}
+
+fn code() -> impl MyParser<String> {
+    filter_map(|span, token| match token {
+        Token::Code(code) => Ok(code),
+        other => Err(Error::expected(vec![TokenKind::Code], other.kind(), span)),
+    })
+}
+
+fn expr() -> impl MyParser<Expr> {
     recursive(|expr| {
-        let list_parser = expr.repeated().then_ignore(end()).spanned();
+        let list = list(expr.clone()).map(Expr::List);
+        let map = map(expr.clone()).map(Expr::Map);
+        let code = code().map(Expr::Code);
+        let item = ident()
+            .spanned()
+            .then(params(expr.clone()).spanned())
+            .map(|(ident, params)| Expr::Item(ident, params));
 
-        filter_map(move |span, token| match token {
-            Token::Str(s) => Ok(Expr::String((s, span))),
-            Token::Bool(b) => Ok(Expr::Bool((b, span))),
-            Token::List(list) => {
-                let tokens = map_tokens(list, span, token_filter);
-                list_parser
-                    .parse(tokens)
-                    .map(Expr::List)
-                    .map_err(ErrorKind::multiple)
-            }
-            Token::Var(var) => Ok(Expr::Variable((var, span))),
-            token => Err(ErrorKind::expected(
-                vec![TokenKind::Str, TokenKind::List, TokenKind::Var],
+        let simple_expr = filter_map(move |span, token| match token {
+            Token::Str(s) | Token::DelimStr(s) => Ok(Expr::String(s)),
+            Token::Bool(b) => Ok(Expr::Bool(b)),
+            Token::Var(var) => Ok(Expr::Variable(Ident(var))),
+            token => Err(Error::expected(
+                vec![TokenKind::Str, TokenKind::Bool, TokenKind::Var],
                 token.kind(),
                 span,
             )),
-        })
+        });
+        choice((list, map, code, item, simple_expr))
     })
 }
 
-fn param() -> impl Parser<Token, Spanned<Param>, Error = ErrorKind> {
-    let param_inner = filter_map(|span, token| match token {
-        Token::Ident(ident) => Ok((ident, span)),
-        token => Err(ErrorKind::expected(
-            vec![TokenKind::Ident],
-            token.kind(),
-            span,
-        )),
-    })
-    .then_ignore(just(Token::Ctrl(':')))
-    .then(expr())
-    .then_ignore(end())
-    .map(|(param, val)| Param { name: param, val })
-    .spanned();
-
-    filter_map(move |span, token| match token {
-        Token::Param(tokens) => {
-            let tokens = map_tokens(tokens, span, token_filter);
-            param_inner.parse(tokens).map_err(ErrorKind::multiple)
-        }
-        token => Err(ErrorKind::expected(
-            vec![TokenKind::Params],
-            token.kind(),
-            span,
-        )),
-    })
+fn body(expr: impl MyParser<Expr>) -> impl MyParser<Body> {
+    let list = list(expr.clone()).map(Body::List);
+    let map = map(expr).map(Body::Map);
+    let code = code().map(Body::Code);
+    choice((list, map, code))
 }
 
-fn params() -> impl Parser<Token, Spanned<Vec<Spanned<Param>>>, Error = ErrorKind> {
-    let params_parser = param()
-        .separated_by(just(Token::Ctrl(',')))
-        .allow_trailing()
-        .then_ignore(end());
-
-    let params_exist = filter_map(move |span, token| match token {
-        Token::Params(params) => Ok(params),
-        token => Err(ErrorKind::expected(
-            vec![TokenKind::Params],
-            token.kind(),
-            span,
-        )),
-    });
-
-    params_exist
-        .or_not()
-        .try_map(move |params, span| match params {
-            Some(params) => {
-                let tokens = map_tokens(params, span, token_filter);
-                params_parser.parse(tokens).map_err(ErrorKind::multiple)
-            }
-            None => Ok(Vec::new()),
+pub(crate) fn parser() -> impl Parser<Token, Vec<Spanned<Block>>, Error = Error> {
+    let expr = expr();
+    let ident = ident();
+    let params = params(expr.clone());
+    let body = body(expr);
+    ident
+        .spanned()
+        .then(params.spanned().or_not())
+        .then(body.spanned())
+        .map(|((ident, params), body)| Block {
+            ident,
+            params,
+            body,
         })
         .spanned()
-}
-
-fn map() -> impl Parser<Token, Block, Error = ErrorKind> {
-    let map_body_parser = param().repeated().spanned().then_ignore(end());
-
-    filter_map(|span, token| match token {
-        Token::Name(name @ Name::Unit) | Token::Name(name @ Name::Env) => Ok(name),
-        token => Err(ErrorKind::expected(
-            vec![TokenKind::Name],
-            token.kind(),
-            span,
-        )),
-    })
-    .then(params())
-    .then(filter_map(move |span, token| match token {
-        Token::Body(body) => {
-            let tokens = map_tokens(body, span, token_filter);
-            map_body_parser.parse(tokens).map_err(ErrorKind::multiple)
-        }
-        token => Err(ErrorKind::expected(
-            vec![TokenKind::Body],
-            token.kind(),
-            span,
-        )),
-    }))
-    .map(|((name, params), body)| Block::Map { name, params, body })
-}
-
-fn items() -> impl Parser<Token, Block, Error = ErrorKind> {
-    let items_body_parser = filter_map(|span, token| match token {
-        Token::Str(s) => Ok((s, span)),
-        token => Err(ErrorKind::expected(
-            vec![TokenKind::Str],
-            token.kind(),
-            span,
-        )),
-    })
-    .then(params())
-    .map(|(item, params)| Item {
-        name: item,
-        args: params,
-    })
-    .repeated()
-    .then_ignore(end())
-    .spanned();
-
-    filter_map(|span, token| match token {
-        Token::Name(name @ Name::Packages) | Token::Name(name @ Name::Files) => Ok(name),
-        token => Err(ErrorKind::expected(
-            vec![TokenKind::Name],
-            token.kind(),
-            span,
-        )),
-    })
-    .then(params())
-    .then(filter_map(move |span, token| match token {
-        Token::Body(body) => {
-            let tokens = map_tokens(body, span, token_filter);
-            items_body_parser.parse(tokens).map_err(ErrorKind::multiple)
-        }
-        token => Err(ErrorKind::expected(
-            vec![TokenKind::Body],
-            token.kind(),
-            span,
-        )),
-    }))
-    .map(|((name, params), items)| Block::Items {
-        name,
-        params,
-        items,
-    })
-}
-
-fn routine() -> impl Parser<Token, Block, Error = ErrorKind> {
-    let routine_content_parser = filter_map(|span, token| match token {
-        Token::Str(s) => Ok(s),
-        _ => Err(ErrorKind::expected(
-            vec![TokenKind::Str],
-            token.kind(),
-            span,
-        )),
-    })
-    .then_ignore(end());
-
-    filter_map(|span, token| match token {
-        Token::Name(name @ Name::Deploy)
-        | Token::Name(name @ Name::Remove)
-        | Token::Name(name @ Name::Capture) => Ok(name),
-        token => Err(ErrorKind::expected(
-            vec![TokenKind::Name],
-            token.kind(),
-            span,
-        )),
-    })
-    .then(params())
-    .then(filter_map(move |span, token| match token {
-        Token::Body(body) => {
-            let tokens = map_tokens(body, span, token_filter);
-            routine_content_parser
-                .parse(tokens)
-                .map_err(ErrorKind::multiple)
-        }
-        token => Err(ErrorKind::expected(
-            vec![TokenKind::Body],
-            token.kind(),
-            span,
-        )),
-    }))
-    .map(|((name, params), content)| Block::Routine {
-        name,
-        params,
-        content,
-    })
-}
-
-fn block_parser() -> impl Parser<Token, Block, Error = ErrorKind> {
-    let other = filter_map(|span, token| match token {
-        Token::Name(name @ Name::Other(_)) => Err(ErrorKind::UnexpectedBlock(span, name)),
-        token => Err(ErrorKind::expected(
-            vec![TokenKind::Name],
-            token.kind(),
-            span,
-        )),
-    });
-
-    choice((map(), items(), routine(), other))
-}
-
-pub(super) fn parser() -> impl Parser<(usize, Token), Vec<Option<Block>>, Error = ErrorKind> {
-    let block_parser = block_parser().then_ignore(end());
-
-    any()
-        .validate(move |token, span, emit| match token {
-            (n, Token::Block(tokens)) => {
-                let mut stream = map_tokens(tokens, span, token_filter);
-                let first = stream.fetch_tokens().next().expect("Found empty block");
-
-                // Check if the order of the blocks is correct
-                match first {
-                    (Token::Name(name), name_span) => {
-                        // The first block should be a topic declaration
-                        if name != Name::Unit && n == 0 {
-                            emit(ErrorKind::ExpectedUnit(name_span.clone(), name.clone()));
-                        }
-
-                        // The topic block should be the first in file
-                        if name == Name::Unit && n > 0 {
-                            emit(ErrorKind::MisplacedUnit(name_span.clone()));
-                        }
-
-                        // The env block should follow the topic declaration
-                        if name == Name::Env && n > 1 {
-                            emit(ErrorKind::MisplacedEnv(name_span.clone()));
-                        }
-                    }
-                    (token, span) => emit(ErrorKind::expected(
-                        vec![TokenKind::Name],
-                        token.kind(),
-                        span,
-                    )),
-                }
-
-                match block_parser.parse(stream) {
-                    Ok(block) => Some(block),
-                    Err(errors) => {
-                        emit(ErrorKind::multiple(errors));
-                        None
-                    }
-                }
-            }
-            (_, token) => {
-                emit(ErrorKind::expected(
-                    vec![TokenKind::Block],
-                    token.kind(),
-                    span,
-                ));
-                None
-            }
-        })
         .repeated()
         .then_ignore(end())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
+    //TODO: Implement tests
     test_parsers! {
-        expr {
-            [Token::List(vec![
-                (Token::Str("Hello".into()), 0..5),
-                (Token::Space(" ".into()), 5..6),
-                (Token::Var("var".into()), 6..9),
-            ])] => Expr::List((
-                vec![
-                    Expr::String(("Hello".into(), 0..5)),
-                    Expr::Variable(("var".into(), 6..9)),
-                ],
-                0..9
-            ))
-        }
-        param {
-            [
-                Token::Ident("foo".into()),
-                Token::Ctrl(':'),
-                Token::Str("Bar".into()),
-            ] => (
-                Param {
-                    name: ("foo".into(), 0..1),
-                    val: Expr::String(("Bar".into(), 2..3)),
-                },
-                0..3
-            )
-        }
-        params {
-            [
-                Token::Params(vec![
-                    (
-                        Token::Param(vec![
-                            (Token::Comment("# A comment".into()), 0..1),
-                            (Token::Space(" ".into()), 1..2),
-                            (Token::Ident("foo".into()), 2..3),
-                            (Token::Space(" ".into()), 3..4),
-                            (Token::Ctrl(':'), 4..5),
-                            (Token::Space(" ".into()), 5..6),
-                            (Token::Bool(true), 6..7),
-                        ]),
-                        0..7
-                    ),
-                    (Token::Line, 7..8),
-                    (Token::Ctrl(','), 8..9),
-                    (
-                        Token::Param(vec![
-                            (Token::Ident("moo".into()), 9..10),
-                            (Token::Str("bar".into()), 11..12),
-                        ]),
-                        9..12
-                    ),
-                ])
-            ] => (
-                vec![
-                    (Param { name: ("foo".into(), 2..3), val: Expr::Bool((true, 6..7)) }, 2..7),
-                    (Param { name: ("moo".into(), 9..10), val: Expr::String(("bar".into(), 11..12)) }, 9..12 ),
-                ],
-                0..1,
-            )
-        }
+        @expected: std::convert::identity;
+        @output: std::convert::identity;
+
+        ident {}
+        param {}
+        params {}
+        list {}
         map {}
-        items {}
-        reoutine {}
+        code {}
+        expr {}
+        body {}
     }
 }
