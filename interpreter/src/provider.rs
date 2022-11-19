@@ -1,8 +1,9 @@
 use ariadne::{Color, Fmt, ReportKind};
+use parser::Spanned;
 
-use crate::structures::ConvertError;
+use crate::{structures::ConvertError, Value};
 
-use super::{structures::ParamError, Arg, Args, Ctx, Packages, Span};
+use super::{structures::ParamError, Args, Ctx, Packages, Span};
 use std::{any::Any, collections::HashMap};
 
 mod files;
@@ -149,27 +150,26 @@ impl Manager {
 
     fn create_transaction(
         &mut self,
-        (id, span): (ProviderId, Span),
-        (args, arg_span): super::Spanned<Vec<Arg>>,
+        id: Spanned<ProviderId>,
+        args: Args,
         packages: Packages,
         context: &mut Ctx,
     ) -> Result<Transaction, Option<TransactionError>> {
-        match self.get_transactor(id, context) {
+        match self.get_transactor(id.inner, context) {
             Ok(transactor) => transactor
-                .new_transaction(Args::new(args, arg_span), packages, context)
+                .new_transaction(args, packages, context)
                 .map_err(|_| None),
-            Err(err) => Err(Some(TransactionError::Provider(span, id, err))),
+            Err(err) => Err(Some(TransactionError::Provider(id.span, id.inner, err))),
         }
     }
 
     pub(super) fn new_transaction(
         &mut self,
-        args: super::Spanned<Vec<Arg>>,
+        args: crate::Args,
         packages: Packages,
         context: &mut Ctx,
     ) -> Result<Transaction, ()> {
-        let (args, span) = args;
-        let mut args_iter = args.iter();
+        let mut args_iter = args.args.iter();
         let provider = loop {
             match args_iter.next() {
                 Some(arg) => {
@@ -179,26 +179,27 @@ impl Manager {
                 }
                 None => {
                     context.emit(TransactionError::Param(ParamError::NotFound {
-                        span,
+                        span: args.span,
                         name: "provider",
+                        has_args: args.accurate_span,
                     }));
                     return Err(());
                 }
             }
         };
 
-        let (provider, val_span) = match provider {
-            super::Value::String(s) => s,
-            super::Value::Error((err, span)) => {
+        let provider_name = match &provider.inner {
+            Value::String(s) => s,
+            Value::Error(err) => {
                 context.emit(ConvertError::EvalErr {
-                    span: span.clone(),
+                    span: provider.span,
                     err: err.clone(),
                 });
                 return Err(());
             }
             other => {
                 context.emit(ConvertError::TypeErr {
-                    span: other.span(),
+                    span: provider.span,
                     expected: super::Type::String,
                     found: other.get_type(),
                 });
@@ -206,13 +207,13 @@ impl Manager {
             }
         };
 
-        let provider_id = match ProviderId::from_name(&provider) {
+        let provider_id = match ProviderId::from_name(&provider_name) {
             Some(id) => id,
             None => {
                 context.emit(ConvertError::ValueErr {
-                    span: val_span.clone(),
+                    span: provider.span,
                     err: Box::new(InvalidProvider {
-                        found: provider.clone(),
+                        found: provider_name.to_owned(),
                     }),
                 });
                 return Err(());
@@ -220,8 +221,8 @@ impl Manager {
         };
 
         self.create_transaction(
-            (provider_id, val_span.clone()),
-            (args, span),
+            Spanned::new(provider_id, provider.span),
+            args,
             packages,
             context,
         )
@@ -234,15 +235,14 @@ impl Manager {
 
     pub(super) fn new_files(
         &mut self,
-        args: super::Spanned<Vec<Arg>>,
+        ident_span: Span,
+        args: crate::Args,
         packages: Packages,
         context: &mut Ctx,
     ) -> Result<Transaction, ()> {
-        let (args, span) = args;
         self.create_transaction(
-            // The span is wrong but it shouldnt ever be used anyway
-            (ProviderKind::Files.into(), span.clone()),
-            (args, span),
+            Spanned::new(ProviderKind::Files.into(), ident_span),
+            args,
             packages,
             context,
         )

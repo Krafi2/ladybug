@@ -2,6 +2,7 @@ use crate::{structures::FromArgs, Ctx, Span};
 use ariadne::{Color, Fmt, ReportKind};
 use color_eyre::eyre::{eyre, WrapErr};
 use common::rel_path::RelPath;
+use parser::Spanned;
 use std::{
     fs::OpenOptions,
     path::{Path, PathBuf},
@@ -104,10 +105,10 @@ struct Payload {
 
 params! {
     struct Params {
-        method: Result<(String, Span), ()>,
-        conflicts: Result<(String, Span), ()>,
-        source: Result<(PathBuf, Span), ()>,
-        target: Result<RelPath, ()>,
+        method: Option<Spanned<String>>,
+        conflicts: Option<Spanned<String>>,
+        source: Option<Spanned<PathBuf>>,
+        target: Option<RelPath>,
     }
 }
 
@@ -124,71 +125,71 @@ impl super::Transactor for Provider {
         context: &mut Ctx,
     ) -> Result<super::Transaction, ()> {
         // Parse the package block params
-        let (
-            Params {
-                method,
-                conflicts,
-                source,
-                target,
-            },
-            extra_args,
-        ) = Params::from_args(args, context).expect("Parser should be infallible");
+        let params = Params::from_args(args, context).expect("Parser should be infallible");
 
-        let mut degraded = extra_args;
+        let mut degraded = params.is_degraded();
+        let Params {
+            method,
+            conflicts,
+            source,
+            target,
+        } = params.value;
 
-        let method = method.and_then(|method| match method.0.as_str() {
-            "link" => Ok(Method::SoftLink),
-            "hardlink" => Ok(Method::HardLink),
-            "copy" => Ok(Method::Copy),
+        let method = method.and_then(|method| match method.as_str() {
+            "link" => Some(Method::SoftLink),
+            "hardlink" => Some(Method::HardLink),
+            "copy" => Some(Method::Copy),
             _ => {
-                context.emit(Error::InvalidMethod(method.0, method.1));
+                context.emit(Error::InvalidMethod(method.inner, method.span));
                 degraded = true;
-                Err(())
+                None
             }
         });
 
-        let conflicts = conflicts.and_then(|conflicts| match conflicts.0.as_str() {
-            "abort" => Ok(Conflict::Abort),
-            "rename" => Ok(Conflict::Rename),
-            "remove" => Ok(Conflict::Remove),
+        let conflicts = conflicts.and_then(|conflicts| match conflicts.as_str() {
+            "abort" => Some(Conflict::Abort),
+            "rename" => Some(Conflict::Rename),
+            "remove" => Some(Conflict::Remove),
             _ => {
-                context.emit(Error::InvalidConflictStrat(conflicts.0, conflicts.1));
+                context.emit(Error::InvalidConflictStrat(conflicts.inner, conflicts.span));
                 degraded = true;
-                Err(())
+                None
             }
         });
 
         let dir = context.unit_dir().bind(context.dotfile_dir().clone());
-        let rel_source = source.as_ref().map_err(|_| ()).and_then(|(source, span)| {
-            Source::from_path(&dir, source.clone(), span.clone())
+        let rel_source = source.as_ref().and_then(|source| {
+            Source::from_path(&dir, source.inner.clone(), source.span)
                 .and_then(|path| {
                     if path.0.is_dir() {
                         Ok(path)
                     } else {
-                        Err(Error::SourceNotADirectory(source.clone(), span.clone()))
+                        Err(Error::SourceNotADirectory(
+                            source.inner.clone(),
+                            source.span,
+                        ))
                     }
                 })
                 .map_err(|err| context.emit(err))
+                .ok()
         });
 
         let mut files = Vec::new();
         for package in packages.packages {
             let path = rel_source
-                .is_ok()
-                .then_some(())
-                .and_then(|_| source.as_ref().ok())
-                .and_then(|(source, _)| {
-                    let path = source.to_owned().join(&package.name.0);
-                    Source::from_path(&dir, path, package.name.1)
-                        .map(|_| PathBuf::from(package.name.0))
+                .as_ref()
+                .and_then(|_| source.as_ref())
+                .and_then(|source| {
+                    let path = source.inner.to_owned().join(&package.name.inner);
+                    Source::from_path(&dir, path, package.name.span)
+                        .map(|_| PathBuf::from(package.name.inner))
                         .map_err(|err| context.emit(err))
                         .ok()
                 });
             let args = ItemParams::from_args(package.args, context);
-            if let (Some(path), Ok(_args)) = (path, args) {
-                files.push(path)
-            } else {
-                degraded = true;
+            match (path, args) {
+                (Some(path), Some(args)) if !args.is_degraded() => files.push(path),
+                _ => degraded = true,
             }
         }
 
