@@ -1,10 +1,12 @@
+use parser::span::AriadneSpan;
+
 use crate::error::IntoReport;
 
 #[derive(Debug)]
 pub struct Error;
 
 impl IntoReport for Error {
-    fn into_report(self, _filename: &str) -> ariadne::Report<(&str, crate::Span)> {
+    fn into_report(self, _filename: &str) -> ariadne::Report<AriadneSpan> {
         todo!()
     }
 }

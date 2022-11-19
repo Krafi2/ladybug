@@ -1,5 +1,8 @@
 use super::{ProviderError, Transaction};
-use crate::{structures::FromArgs, Ctx, Span};
+use crate::{
+    structures::{FromArgs, RecoverFromArgs},
+    Ctx, Span,
+};
 use ariadne::{Color, Fmt, ReportKind};
 use color_eyre::eyre::WrapErr;
 use std::{
@@ -168,49 +171,55 @@ impl super::Transactor for Provider {
         context: &mut Ctx,
     ) -> Result<Transaction, ()> {
         // Parse the package block params
-        let params = ZyppParams::from_args(args, context);
+        let params = ZyppParams::recover_default(args, context);
 
         let mut packs = Vec::new();
-        let mut is_err = false;
+        let mut degraded = params.is_degraded();
         // Verify packages
         for package in packages.packages {
-            match PackageParams::from_args(package.args, context) {
-                // The params are fine
-                Ok(_) => match self.exists(&package.name.0) {
+            if let Some(args) = PackageParams::from_args(package.args, context) {
+                if args.is_degraded() {
+                    degraded = true;
+                    continue;
+                }
+
+                match self.exists(&package.name.inner) {
                     // The package may exist
                     Ok(exists) => {
                         // All is well
                         if exists {
                             let package = ZyppPackage {
-                                name: package.name.0,
+                                name: package.name.inner,
                             };
                             packs.push(package);
                         // The package doesn't exist
                         } else {
-                            context
-                                .emit(Error::PackageNotRecognized(package.name.0, package.name.1));
-                            is_err = true;
+                            context.emit(Error::PackageNotRecognized(
+                                package.name.inner,
+                                package.name.span,
+                            ));
+                            degraded = true;
                         }
                     }
                     // Some other error happened while confirming the package's existence
                     Err(other) => {
-                        context.emit(Error::Eyre(other, package.name.1));
-                        is_err = true;
+                        context.emit(Error::Eyre(other, package.name.span));
+                        degraded = true;
                     }
-                },
-                _ => (),
-            };
+                }
+            }
         }
 
-        match (is_err, params) {
-            (true, _) | (false, Err(_)) | (false, Ok((_, true))) => Err(()),
-            (false, Ok((params, false))) => Ok(Transaction {
+        if !degraded && !params.is_degraded() {
+            Ok(Transaction {
                 provider: super::ProviderKind::Zypper.into(),
                 payload: Box::new(Payload {
-                    from: params.from,
+                    from: params.value.from,
                     packages: packs,
                 }),
-            }),
+            })
+        } else {
+            Err(())
         }
     }
 }

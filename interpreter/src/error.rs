@@ -1,8 +1,11 @@
-use super::{provider, structures, Span, Spanned};
+use parser::span::AriadneSpan;
+
+use super::{provider, structures, Spanned};
 
 #[derive(Debug)]
 enum Inner {
-    Eval(crate::EvalError),
+    Structure(crate::StructureError),
+    Eval(crate::PathError),
     Value(Spanned<super::ValueError>),
     Parse(parser::Error),
     Convert(structures::ConvertError),
@@ -11,8 +14,14 @@ enum Inner {
     Other(color_eyre::Report),
 }
 
-impl From<crate::EvalError> for Inner {
-    fn from(err: crate::EvalError) -> Self {
+impl From<crate::StructureError> for Inner {
+    fn from(err: crate::StructureError) -> Self {
+        Self::Structure(err)
+    }
+}
+
+impl From<crate::PathError> for Inner {
+    fn from(err: crate::PathError) -> Self {
         Self::Eval(err)
     }
 }
@@ -52,19 +61,20 @@ impl<T: Into<Inner>> From<T> for Error {
 }
 
 pub(super) trait IntoReport {
-    fn into_report(self, filename: &str) -> ariadne::Report<(&str, Span)>;
+    fn into_report(self, filename: &str) -> ariadne::Report<AriadneSpan>;
 }
 
 impl IntoReport for parser::Error {
-    fn into_report(self, filename: &str) -> ariadne::Report<(&str, Span)> {
+    fn into_report(self, filename: &str) -> ariadne::Report<AriadneSpan> {
         // This is a function, not a trait
         self.into_report(filename)
     }
 }
 
 impl Error {
-    pub fn into_report<'a>(self, filename: &'a str) -> ariadne::Report<(&'a str, Span)> {
+    pub fn into_report<'a>(self, filename: &'a str) -> ariadne::Report<AriadneSpan> {
         match self.0 {
+            Inner::Structure(err) => err.into_report(filename),
             Inner::Eval(err) => err.into_report(filename),
             Inner::Parse(err) => err.into_report(filename),
             Inner::Convert(err) => err.into_report(filename),
@@ -81,38 +91,49 @@ impl Error {
 }
 
 macro_rules! report {
-    ( $filename:ident, delegate ( $error:expr ) ) => {
-         $crate::error::IntoReport::into_report($error, $filename)
+    ( __init__ $filename:ident, delegate ( $error:expr $(,)? ) ) => {
+         return $crate::error::IntoReport::into_report($error, $filename)
     };
-    ( $filename:ident, report ( $kind:expr , $start:expr ) $($rest:tt)* ) => {
-         report!( $filename, ::ariadne::Report::build($kind, $filename, $start) , $($rest)* )
+    ( __init__ $filename:ident, report ( $kind:expr , $start:expr $(,)? ) ) => {
+         ::ariadne::Report::build($kind, $filename, $start)
     };
-    ( $filename:ident, $prev:expr, label ( $span:expr , $color:expr , $($message:expr),* ) $($rest:tt)* ) => {
-        report!(
-            $filename,
-            $prev
-            .with_label(
-                ::ariadne::Label::new(($filename, $span))
-                    .with_color($color)
-                    .with_message(format!( $($message),* ))
-            ),
-            $($rest)*
-        )
+    ( __item__ $report:ident, $filename:ident, label ( $span:expr , $color:expr , $($message:expr),* $(,)? )  ) => {
+        $report.add_label(
+            ::ariadne::Label::new(::parser::span::AriadneSpan::new($filename, $span))
+                .with_color($color)
+                .with_message(format!( $($message),* ))
+        );
     };
-    ( $filename:ident, $prev:expr, message ( $($arg:expr),* ) $($rest:tt)* ) => {
-        report!(
-            $filename,
-            $prev
-            .with_message(format!( $($arg),* )),
-            $($rest)*
-        )
+    ( __item__ $report:ident, $filename:ident, help ( $($arg:expr),* $(,)? ) ) => {
+        $report.set_help(format!( $($arg),* ));
     };
-    ( $filename:ident, $prev:expr, ) => { $prev.finish() };
-    (  $type:ty { $( $pattern:pat => { $($atr:ident $args:tt;)* } )* } ) => {
+    ( __item__ $report:ident, $filename:ident, message ( $($arg:expr),* $(,)? ) ) => {
+        $report.set_message(format!( $($arg),* ));
+    };
+    ( __item__ $report:ident, $filename:ident, note( $($arg:expr),* $(,)? ) ) => {
+        $report.set_note(format!( $($arg),* ));
+    };
+    ( __cond__ @$cond:expr; $($rest:tt)* ) => {
+        if $cond {
+            report!{ $($rest)* }
+        }
+    };
+    ( __cond__ $($rest:tt)* ) => {
+        report!{ $($rest)* }
+    };
+    (  $type:ty { $( $pattern:pat => { $init:ident $init_args:tt; $( $( @if $cond:expr; )? $item:ident $args:tt; )* } )* } ) => {
         impl $crate::error::IntoReport for $type {
-            fn into_report(self, filename: &str) -> ::ariadne::Report<(&str, Span)> {
+            fn into_report(self, filename: &str) -> ::ariadne::Report<::parser::span::AriadneSpan> {
                 match self {
-                    $($pattern => report!( filename, $($atr $args)* ) ,)*
+                    $(
+                        $pattern => {
+                            #[allow(unused_variables)]
+                            let mut report: ::ariadne::ReportBuilder<_> = report!( __init__ filename, $init $init_args );
+                            $( report!{ __cond__ $(@$cond;)? __item__ report, filename, $item $args } )*
+                            #[allow(unreachable_code)]
+                            report.finish()
+                        }
+                    ,)*
                 }
             }
         }
