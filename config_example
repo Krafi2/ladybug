@@ -11,30 +11,30 @@ env {
     arch: x64
 }
 
-packages(provider: zypper, bla: a) {
+packages(provider: zypper, bla: a) [
     # The future?
     ladybug(version: 1.0)
     myapp(
         lock: true,
         version: 1.2.0,        
     )
-}
+]
 
-files(method: link, conflicts: rename, source: $arch, target: there) {
+files(method: link, conflicts: rename, source: $arch, target: there) [
     hello.txt
 
     hi.txt(a: a)
-}
+]
 
-deploy(stdin: false, stdout: true, shell: [python -c %c]) {
+deploy(stdout: true, shell: [python -c %c]) {{
     echo "1" > ~/hello
-}
+}}
 
-remove {
+remove {{
     rm ~/hello
-}
+}}
 
-capture {
+capture {{
     {} braces {{{}}} {
     }   
-}
+}}
