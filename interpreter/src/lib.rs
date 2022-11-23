@@ -3,7 +3,6 @@ pub mod error;
 #[macro_use]
 pub mod structures;
 pub mod provider;
-mod span;
 
 use std::{
     collections::HashMap,
