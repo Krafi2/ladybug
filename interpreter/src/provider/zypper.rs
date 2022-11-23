@@ -225,16 +225,16 @@ impl super::Transactor for Provider {
 }
 
 impl super::Provider for Provider {
-    fn install(&mut self, transaction: &Transaction) -> color_eyre::Result<()> {
+    fn install(&mut self, transaction: &Transaction) -> super::OpResult {
         self.zypper_cmd("install", transaction)
     }
 
-    fn remove(&mut self, transaction: &Transaction) -> color_eyre::Result<()> {
+    fn remove(&mut self, transaction: &Transaction) -> super::OpResult {
         self.zypper_cmd("remove", transaction)
     }
 }
 
-impl super::ProviderPrivate for Provider {
+impl super::ConstructProvider for Provider {
     fn new(root: bool) -> Result<Self, ProviderError> {
         if !root {
             return Err(ProviderError::NeedRoot);

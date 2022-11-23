@@ -25,16 +25,16 @@ impl super::Transactor for Provider {
 }
 
 impl super::Provider for Provider {
-    fn install(&mut self, _transaction: &super::Transaction) -> color_eyre::Result<()> {
+    fn install(&mut self, _transaction: &super::Transaction) -> super::OpResult {
         todo!()
     }
 
-    fn remove(&mut self, _transaction: &super::Transaction) -> color_eyre::Result<()> {
+    fn remove(&mut self, _transaction: &super::Transaction) -> super::OpResult {
         todo!()
     }
 }
 
-impl super::ProviderPrivate for Provider {
+impl super::ConstructProvider for Provider {
     fn new(_root: bool) -> Result<Self, super::ProviderError> {
         todo!()
     }

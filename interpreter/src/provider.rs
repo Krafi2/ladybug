@@ -111,7 +111,7 @@ impl Manager {
         id: ProviderId,
         context: &mut Ctx,
     ) -> Result<&mut dyn ProviderUpcast, ProviderError> {
-        fn new_provider<T: ProviderPrivate + 'static>(
+        fn new_provider<T: ConstructProvider + 'static>(
             context: &mut Ctx,
         ) -> Result<Box<dyn ProviderUpcast>, ProviderError> {
             T::new(context.has_root()).map(|provider| Box::new(provider) as Box<dyn ProviderUpcast>)
@@ -134,7 +134,7 @@ impl Manager {
     ) -> Option<Result<&mut dyn Provider, ProviderError>> {
         self.cache.get_mut(&id).map(|res| {
             res.as_mut()
-                .map(|provider| provider.as_provider())
+                .map(|provider| provider.as_provider_mut())
                 .map_err(|err| err.clone())
         })
     }
@@ -145,7 +145,7 @@ impl Manager {
         context: &mut Ctx,
     ) -> Result<&mut dyn Transactor, ProviderError> {
         self.get_raw_provider(id, context)
-            .map(ProviderUpcast::as_new_transaction)
+            .map(ProviderUpcast::as_transactor_mut)
     }
 
     fn create_transaction(
@@ -255,16 +255,16 @@ impl Manager {
 }
 
 trait ProviderUpcast {
-    fn as_new_transaction(&mut self) -> &mut dyn Transactor;
-    fn as_provider(&mut self) -> &mut dyn Provider;
+    fn as_transactor_mut(&mut self) -> &mut dyn Transactor;
+    fn as_provider_mut(&mut self) -> &mut dyn Provider;
 }
 
-impl<P: ProviderPrivate> ProviderUpcast for P {
-    fn as_new_transaction(&mut self) -> &mut dyn Transactor {
+impl<P: ConstructProvider> ProviderUpcast for P {
+    fn as_transactor_mut(&mut self) -> &mut dyn Transactor {
         self
     }
 
-    fn as_provider(&mut self) -> &mut dyn Provider {
+    fn as_provider_mut(&mut self) -> &mut dyn Provider {
         self
     }
 }
@@ -288,7 +288,7 @@ impl std::fmt::Debug for Transaction {
     }
 }
 
-trait ProviderPrivate: Provider + Transactor + Sized {
+trait ConstructProvider: Provider + Transactor + Sized {
     fn new(root: bool) -> Result<Self, ProviderError>;
 }
 
@@ -302,10 +302,12 @@ trait Transactor {
     ) -> Result<Transaction, ()>;
 }
 
+pub type OpResult = color_eyre::Result<()>;
+
 pub trait Provider {
     /// Install a collection of packages.
-    fn install(&mut self, transaction: &Transaction) -> color_eyre::Result<()>;
+    fn install(&mut self, transaction: &Transaction) -> OpResult;
 
     /// Remove a collection of packages from the system.
-    fn remove(&mut self, transaction: &Transaction) -> color_eyre::Result<()>;
+    fn remove(&mut self, transaction: &Transaction) -> OpResult;
 }

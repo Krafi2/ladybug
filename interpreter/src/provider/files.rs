@@ -211,7 +211,7 @@ impl super::Transactor for Provider {
 }
 
 impl super::Provider for Provider {
-    fn install(&mut self, transaction: &super::Transaction) -> color_eyre::Result<()> {
+    fn install(&mut self, transaction: &super::Transaction) -> super::OpResult {
         assert_eq!(transaction.provider, super::ProviderKind::Files.into());
         let Payload {
             method,
@@ -237,12 +237,12 @@ impl super::Provider for Provider {
         Ok(())
     }
 
-    fn remove(&mut self, _transaction: &super::Transaction) -> color_eyre::Result<()> {
+    fn remove(&mut self, _transaction: &super::Transaction) -> super::OpResult {
         todo!()
     }
 }
 
-impl super::ProviderPrivate for Provider {
+impl super::ConstructProvider for Provider {
     fn new(_root: bool) -> Result<Self, super::ProviderError> {
         Ok(Provider)
     }
