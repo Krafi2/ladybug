@@ -96,7 +96,7 @@ impl Provider {
     }
 
     /// See if the subprocess exited unexpectedly
-    fn try_wait(&mut self) -> Result<(), ProcessError> {
+    fn check_health(&mut self) -> Result<(), ProcessError> {
         match self.zypper.try_wait() {
             Ok(Some(status)) => Err(ProcessError::Exited(status)),
             Err(e) => Err(ProcessError::Other(e)),
@@ -144,10 +144,8 @@ impl Provider {
             ));
         }
 
-        self.try_wait()
-            .map_err(|err| color_eyre::eyre::eyre!(err))?;
-
-        Ok(())
+        self.check_health()
+            .map_err(|err| color_eyre::eyre::eyre!(err))
     }
 }
 
@@ -230,6 +228,7 @@ impl super::Provider for Provider {
     }
 
     fn remove(&mut self, transaction: &Transaction) -> super::OpResult {
+        // TODO: ignore errors when trying to remove a package that isnt installed
         self.zypper_cmd("remove", transaction)
     }
 }
@@ -251,7 +250,7 @@ impl super::ConstructProvider for Provider {
 
         let mut new = Self { zypper };
         // See if the subprocess exited unexpectedly
-        match new.try_wait() {
+        match new.check_health() {
             Ok(_) => Ok(new),
             Err(err) => Err(ProviderError::Unavailable(std::rc::Rc::new(err))),
         }
