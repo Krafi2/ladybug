@@ -323,9 +323,19 @@ impl LocalPath {
 
 impl From<UnitPath> for LocalPath {
     fn from(path: UnitPath) -> Self {
+        // The path is flattened into a single directory separated by dots.
+        // Fox example "foo/bar/baz/" becomes "foo.bar.baz/"
         match path.0 {
-            UnitPathInner::Root => LocalPath("".into()),
-            UnitPathInner::Path(path) => path,
+            UnitPathInner::Root => LocalPath("main".into()),
+            UnitPathInner::Path(path) => {
+                let dir = path
+                    .0
+                    .components()
+                    .map(|c| c.as_os_str())
+                    .collect::<Vec<_>>()
+                    .join(".".as_ref());
+                LocalPath(dir.into())
+            }
         }
     }
 }
@@ -342,6 +352,7 @@ pub struct UnitPath(UnitPathInner);
 impl UnitPath {
     pub fn name(&self) -> String {
         match &self.0 {
+            // TODO: Think of a better name than "main"
             UnitPathInner::Root => "main".into(),
             UnitPathInner::Path(path) => path
                 .0
