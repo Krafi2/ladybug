@@ -2,11 +2,6 @@ use std::{path::Path, process::Stdio};
 
 use crate::shell::Shell;
 
-use color_eyre::{
-    eyre::eyre,
-    section::{Section, SectionExt},
-};
-
 use common::rel_path::RelPath;
 pub use interpreter::{
     provider::{Manager, Provider, Transaction},
@@ -53,13 +48,6 @@ pub struct Routine {
     code: String,
 }
 
-#[derive(Debug)]
-pub enum CmdError {
-    Spawn(std::io::Error),
-    IO(std::io::Error),
-    Failed(std::process::Output),
-}
-
 impl Routine {
     fn from_figment(figment: interpreter::RoutineFigment) -> Option<Self> {
         Some(Self {
@@ -70,7 +58,7 @@ impl Routine {
         })
     }
 
-    pub fn run(&self, shell: &Shell, dir: &Path) -> Result<(), CmdError> {
+    pub fn run(&self, shell: &Shell, dir: &Path) -> Result<(), common::command::Error> {
         let stdout = if self.stdout {
             Stdio::piped()
         } else {
@@ -82,41 +70,15 @@ impl Routine {
             .as_ref()
             .map(|dir| dir.as_path())
             .unwrap_or(dir);
-        let child = shell
-            .new_command(&self.code)
+
+        let mut command = shell.new_command(&self.code);
+        command
             .current_dir(dir)
             .stdin(Stdio::null())
             .stdout(stdout)
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(CmdError::Spawn)?;
-        let output = child.wait_with_output().map_err(CmdError::IO)?;
+            .stderr(Stdio::piped());
 
-        if output.status.success() {
-            Ok(())
-        } else {
-            Err(CmdError::Failed(output))
-        }
-    }
-}
-
-impl CmdError {
-    pub fn into_report(self) -> color_eyre::Report {
-        match self {
-            CmdError::Spawn(err) => eyre!(err).wrap_err("Cannot start process"),
-            CmdError::IO(err) => eyre!(err),
-            CmdError::Failed(output) => match output.status.code() {
-                Some(code) => eyre!("Process failed with exit code {code}"),
-                None => eyre!("Process was terminated by a signal"),
-            }
-            .section(
-                String::from_utf8_lossy(&output.stderr)
-                    .as_ref()
-                    .trim()
-                    .to_owned()
-                    .header("Stderr:"),
-            ),
-        }
+        common::command::run_command(command).map(|_| ())
     }
 }
 
