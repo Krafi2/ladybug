@@ -95,8 +95,10 @@ struct InvalidProvider {
     found: String,
 }
 
+type DynProvider = dyn Provider<Transaction = Box<dyn Any>, State = Box<dyn Any>>;
+
 pub struct Manager {
-    cache: HashMap<ProviderId, Result<Box<dyn ProviderUpcast>, ProviderError>>,
+    cache: HashMap<ProviderId, Result<Box<DynProvider>, ProviderError>>,
 }
 
 impl Manager {
@@ -110,11 +112,11 @@ impl Manager {
         &mut self,
         id: ProviderId,
         context: &mut Ctx,
-    ) -> Result<&mut dyn ProviderUpcast, ProviderError> {
+    ) -> Result<&mut DynProvider, ProviderError> {
         fn new_provider<T: ConstructProvider + 'static>(
             context: &mut Ctx,
-        ) -> Result<Box<dyn ProviderUpcast>, ProviderError> {
-            T::new(context.has_root()).map(|provider| Box::new(provider) as Box<dyn ProviderUpcast>)
+        ) -> Result<Box<DynProvider>, ProviderError> {
+            T::new(context.has_root()).map(|p| Box::new(ProviderAdapter(p)) as Box<DynProvider>)
         }
 
         let provider = self.cache.entry(id).or_insert_with(|| match id.0 {
@@ -122,30 +124,20 @@ impl Manager {
             ProviderKind::Flatpak => new_provider::<flatpak::Provider>(context),
             ProviderKind::Zypper => new_provider::<zypper::Provider>(context),
         });
+
         provider
             .as_mut()
-            .map(|provider| provider.as_mut() as &mut dyn ProviderUpcast)
+            .map(|provider| provider.as_mut())
             .map_err(|err| err.clone())
     }
 
-    pub fn get_provider(
+    fn try_get_provider(
         &mut self,
         id: ProviderId,
-    ) -> Option<Result<&mut dyn Provider, ProviderError>> {
-        self.cache.get_mut(&id).map(|res| {
-            res.as_mut()
-                .map(|provider| provider.as_provider_mut())
-                .map_err(|err| err.clone())
-        })
-    }
-
-    fn get_transactor(
-        &mut self,
-        id: ProviderId,
-        context: &mut Ctx,
-    ) -> Result<&mut dyn Transactor, ProviderError> {
-        self.get_raw_provider(id, context)
-            .map(ProviderUpcast::as_transactor_mut)
+    ) -> Option<Result<&mut DynProvider, ProviderError>> {
+        self.cache
+            .get_mut(&id)
+            .map(|res| res.as_deref_mut().map_err(|err| err.clone()))
     }
 
     fn create_transaction(
@@ -155,9 +147,13 @@ impl Manager {
         packages: Packages,
         context: &mut Ctx,
     ) -> Result<Transaction, Option<TransactionError>> {
-        match self.get_transactor(id.inner, context) {
+        match self.get_raw_provider(id.inner, context) {
             Ok(transactor) => transactor
                 .new_transaction(args, packages, context)
+                .map(|payload| Transaction {
+                    payload,
+                    provider: id.inner,
+                })
                 .map_err(|_| None),
             Err(err) => Err(Some(TransactionError::Provider(id.span, id.inner, err))),
         }
@@ -252,32 +248,37 @@ impl Manager {
             }
         })
     }
-}
 
-trait ProviderUpcast {
-    fn as_transactor_mut(&mut self) -> &mut dyn Transactor;
-    fn as_provider_mut(&mut self) -> &mut dyn Provider;
-}
-
-impl<P: ConstructProvider> ProviderUpcast for P {
-    fn as_transactor_mut(&mut self) -> &mut dyn Transactor {
-        self
+    pub fn install(&mut self, transaction: &Transaction) -> (OpResult, State) {
+        let (res, state) = self
+            .try_get_provider(transaction.provider)
+            .expect("Unitialized provider")
+            .expect("Provider not available")
+            .install(&transaction.payload);
+        (
+            res,
+            State {
+                payload: state,
+                provider: transaction.provider,
+            },
+        )
     }
 
-    fn as_provider_mut(&mut self) -> &mut dyn Provider {
-        self
+    pub fn remove(&mut self, transaction: &Transaction, state: Option<State>) -> OpResult {
+        if let Some(state) = &state {
+            assert_eq!(transaction.provider, state.provider);
+        }
+
+        self.try_get_provider(transaction.provider)
+            .expect("Unitialized provider")
+            .expect("Provider not available")
+            .remove(&transaction.payload, state.map(|s| s.payload))
     }
 }
 
 pub struct Transaction {
     provider: ProviderId,
     payload: Box<dyn Any>,
-}
-
-impl Transaction {
-    pub fn provider(&self) -> ProviderId {
-        self.provider
-    }
 }
 
 impl std::fmt::Debug for Transaction {
@@ -288,26 +289,78 @@ impl std::fmt::Debug for Transaction {
     }
 }
 
-trait ConstructProvider: Provider + Transactor + Sized {
+pub struct State {
+    provider: ProviderId,
+    payload: Box<dyn Any>,
+}
+
+impl std::fmt::Debug for State {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TransactionRes")
+            .field("provider", &self.provider)
+            .finish()
+    }
+}
+
+pub type OpResult = color_eyre::Result<()>;
+
+trait ConstructProvider: Sized + Provider {
+    /// Create a new instance of the provider
     fn new(root: bool) -> Result<Self, ProviderError>;
 }
 
-trait Transactor {
+trait Provider {
+    type Transaction;
+    type State;
+
     /// Create a new transaction from the block definition.
     fn new_transaction(
         &mut self,
         args: Args,
         packages: Packages,
-        context: &mut Ctx,
-    ) -> Result<Transaction, ()>;
-}
+        ctx: &mut Ctx,
+    ) -> Result<Self::Transaction, ()>;
 
-pub type OpResult = color_eyre::Result<()>;
-
-pub trait Provider {
     /// Install a collection of packages.
-    fn install(&mut self, transaction: &Transaction) -> OpResult;
+    fn install(&mut self, transaction: &Self::Transaction) -> (OpResult, Self::State);
 
     /// Remove a collection of packages from the system.
-    fn remove(&mut self, transaction: &Transaction) -> OpResult;
+    fn remove(&mut self, transaction: &Self::Transaction, state: Option<Self::State>) -> OpResult;
+}
+
+struct ProviderAdapter<P>(P);
+
+impl<P> Provider for ProviderAdapter<P>
+where
+    P: Provider,
+    P::Transaction: 'static,
+    P::State: 'static,
+{
+    type Transaction = Box<dyn Any>;
+    type State = Box<dyn Any>;
+
+    fn new_transaction(
+        &mut self,
+        args: Args,
+        packages: Packages,
+        ctx: &mut Ctx,
+    ) -> Result<Self::Transaction, ()> {
+        P::new_transaction(&mut self.0, args, packages, ctx).map(|t| Box::new(t) as Box<dyn Any>)
+    }
+
+    fn install(&mut self, transaction: &Self::Transaction) -> (OpResult, Self::State) {
+        let (res, state) = P::install(
+            &mut self.0,
+            transaction.downcast_ref::<P::Transaction>().unwrap(),
+        );
+        (res, Box::new(state))
+    }
+
+    fn remove(&mut self, transaction: &Self::Transaction, state: Option<Self::State>) -> OpResult {
+        P::remove(
+            &mut self.0,
+            transaction.downcast_ref::<P::Transaction>().unwrap(),
+            state.map(|res| *res.downcast::<P::State>().unwrap()),
+        )
+    }
 }

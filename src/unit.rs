@@ -4,7 +4,7 @@ use crate::shell::Shell;
 
 use common::rel_path::RelPath;
 pub use interpreter::{
-    provider::{Manager, Provider, Transaction},
+    provider::{Manager, Transaction},
     Env, Interpreter,
 };
 

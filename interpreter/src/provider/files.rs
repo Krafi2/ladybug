@@ -8,6 +8,8 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use super::OpResult;
+
 #[derive(Debug)]
 pub enum Error {
     InvalidMethod(String, Span),
@@ -95,12 +97,16 @@ impl Source {
     }
 }
 
-struct Payload {
+pub(super) struct Payload {
     method: Method,
     conflicts: Conflict,
     source: Source,
     target: RelPath,
     files: Vec<PathBuf>,
+}
+
+pub(super) struct PayloadRes {
+    deployed: usize,
 }
 
 params! {
@@ -116,14 +122,23 @@ params! { struct ItemParams {} }
 
 pub struct Provider;
 
-impl super::Transactor for Provider {
+impl super::ConstructProvider for Provider {
+    fn new(_root: bool) -> Result<Self, super::ProviderError> {
+        Ok(Provider)
+    }
+}
+
+impl super::Provider for Provider {
+    type Transaction = Payload;
+    type State = PayloadRes;
+
     // TODO: check if files are withing the folders of unit members
     fn new_transaction(
         &mut self,
         args: crate::Args,
         packages: crate::Packages,
         context: &mut Ctx,
-    ) -> Result<super::Transaction, ()> {
+    ) -> Result<Self::Transaction, ()> {
         // Parse the package block params
         let params = Params::from_args(args, context).expect("Parser should be infallible");
 
@@ -196,56 +211,98 @@ impl super::Transactor for Provider {
         if degraded {
             Err(())
         } else {
-            Ok(super::Transaction {
-                provider: super::ProviderKind::Files.into(),
-                payload: Box::new(Payload {
-                    method: method.unwrap(),
-                    conflicts: conflicts.unwrap(),
-                    source: rel_source.unwrap(),
-                    target: target.unwrap(),
-                    files,
-                }),
+            Ok(Payload {
+                method: method.unwrap(),
+                conflicts: conflicts.unwrap(),
+                source: rel_source.unwrap(),
+                target: target.unwrap(),
+                files,
             })
         }
     }
-}
 
-impl super::Provider for Provider {
-    fn install(&mut self, transaction: &super::Transaction) -> super::OpResult {
-        assert_eq!(transaction.provider, super::ProviderKind::Files.into());
+    fn install(&mut self, transaction: &Self::Transaction) -> (OpResult, Self::State) {
         let Payload {
             method,
             conflicts,
             source,
             target,
             files,
-        } = transaction
-            .payload
-            .downcast_ref::<Payload>()
-            .expect("Wrong type");
+        } = transaction;
 
         let source = &source.0;
         tracing::debug_span!("deploy", "Deploying files from {source} to {target}");
-        for file in files {
+
+        for (i, file) in files.iter().enumerate() {
             let source = source.join(&file);
             let dest = target.join(&file);
             match deploy_file(&source, &dest, *method, *conflicts) {
                 Ok(_) => tracing::debug!("Deployed {source} to {dest}"),
-                Err(err) => tracing::error!("Failed to deploy {source} to {dest}: {err}"),
+                Err(err) => {
+                    tracing::error!("Failed to deploy {source} to {dest}: {err}");
+                    return (Err(err), PayloadRes { deployed: i });
+                }
             }
         }
-        Ok(())
+
+        (
+            Ok(()),
+            PayloadRes {
+                deployed: files.len(),
+            },
+        )
     }
 
-    fn remove(&mut self, _transaction: &super::Transaction) -> super::OpResult {
-        todo!()
+    fn remove(&mut self, transaction: &Self::Transaction, res: Option<Self::State>) -> OpResult {
+        let Payload {
+            method,
+            conflicts: _,
+            source,
+            target,
+            files,
+        } = transaction;
+
+        let source = &source.0;
+        tracing::debug_span!("deploy", "Deploying files from {source} to {target}");
+
+        let deployed = if let Some(res) = res {
+            res.deployed
+        } else {
+            files.len()
+        };
+
+        let mut failed = Vec::new();
+        for file in &files[..deployed] {
+            let source = source.join(&file);
+            let dest = target.join(&file);
+            match remove_file(&source, &dest, *method) {
+                Ok(_) => {
+                    tracing::debug!("Removed {dest}");
+                }
+                Err(err) => {
+                    tracing::error!("Failed to remove {dest}: {err}");
+                    failed.push(dest.to_string())
+                }
+            }
+        }
+
+        if failed.is_empty() {
+            Ok(())
+        } else {
+            Err(eyre!(
+                "Failed to remove the following files: {}",
+                failed.join(", ")
+            ))
+        }
     }
 }
 
-impl super::ConstructProvider for Provider {
-    fn new(_root: bool) -> Result<Self, super::ProviderError> {
-        Ok(Provider)
-    }
+fn backup_path(path: &Path) -> PathBuf {
+    let mut name = path.file_name().expect("Expected a file").to_owned();
+    name.push(".old");
+    let mut backup = path.to_owned();
+    backup.set_file_name(name);
+    backup
 }
 
 /// Try to remove the file at `path` according to the `[Duplicates]` strategy. This could be by
@@ -256,11 +313,7 @@ fn free_file(path: &Path, conflict: Conflict) -> color_eyre::Result<()> {
         Conflict::Remove => std::fs::remove_file(path).wrap_err("Failed to remove file"),
         Conflict::Abort => Err(eyre!("Destination is occupied")),
         Conflict::Rename => {
-            let mut name = path.file_name().expect("Expected a file").to_owned();
-            name.push(".old");
-            let mut new = path.to_owned();
-            new.set_file_name(name);
-
+            let new = backup_path(path);
             std::fs::rename(path, &new).wrap_err_with(|| {
                 format!(
                     "Failed to rename file {} -> {}",
@@ -361,6 +414,38 @@ fn deploy_file(
     }
 }
 
+fn remove_file(src: &RelPath, target: &RelPath, method: Method) -> color_eyre::Result<()> {
+    // Check if source is deployed to target
+    let eq = match method {
+        Method::SoftLink | Method::HardLink => file_eq(src.absolute(), target.absolute())
+            .wrap_err_with(|| format!("Failed to canonalize path: '{target}'"))?,
+        Method::Copy => contents_equal(
+            OpenOptions::new()
+                .read(true)
+                .open(src.absolute())
+                .wrap_err_with(|| format!("Failed to open source file: '{src}'"))?,
+            OpenOptions::new()
+                .read(true)
+                .open(target.absolute())
+                .wrap_err_with(|| format!("Failed to open destination file: '{target}'"))?,
+        ),
+    };
+
+    // Only remove the file if we are certain that it was deployed by ladybug
+    if eq {
+        let backup = backup_path(target);
+        if backup.exists() {
+            std::fs::rename(&backup, target)
+                .wrap_err_with(|| format!("Failed to restore file: '{}'", backup.display()))
+        } else {
+            std::fs::remove_file(target)
+                .wrap_err_with(|| format!("Failed to remove file: '{}'", target))
+        }
+    } else {
+        Ok(())
+    }
+}
+
 // I think this implementation doesn't cover a lot of the edge cases, but we will see how it goes.
 /// Compare the contents of two readers to check if they are equal. If either reader returns an
 /// error, the function returns false.
@@ -408,13 +493,16 @@ mod imp {
 
 #[cfg(test)]
 mod tests {
+
     use std::{
         fs::File,
         io::{Seek, Write},
+        path::PathBuf,
     };
 
     use super::free_file;
     use super::Conflict;
+    use common::rel_path::RelPath;
     use tempfile::{tempdir, tempfile, NamedTempFile};
 
     #[test]
@@ -475,6 +563,42 @@ mod tests {
     }
 
     #[test]
+    fn remove_file() {
+        let dir = tempdir().expect("Failed to create tempdir");
+        let dir = RelPath::new::<PathBuf>(
+            dir.path().to_path_buf(),
+            Err(common::rel_path::HomeError::NoHome),
+        )
+        .unwrap();
+        let src = NamedTempFile::new_in(&dir).expect("Failed to create tempfile");
+        let src = dir.join(src.path().file_name().unwrap());
+        let dest = dir.join("dest");
+
+        super::imp::symlink_file(&src, &dest).expect("Failed to create symlink");
+        super::remove_file(&src, &dest, super::Method::SoftLink).expect("Failed to remove file");
+
+        assert!(!dest.exists())
+    }
+
+    #[test]
+    fn remove_file_fail() {
+        let dir = tempdir().expect("Failed to create tempdir");
+        let dir = RelPath::new::<PathBuf>(
+            dir.path().to_path_buf(),
+            Err(common::rel_path::HomeError::NoHome),
+        )
+        .unwrap();
+        let src = NamedTempFile::new_in(&dir).expect("Failed to create tempfile");
+        let src = dir.join(src.path().file_name().unwrap());
+        let dest = NamedTempFile::new_in(&dir).expect("Failed to create tempfile");
+        let dest = dir.join(dest.path().file_name().unwrap());
+
+        super::remove_file(&src, &dest, super::Method::SoftLink).expect("Failed to remove file");
+
+        assert!(dest.exists())
+    }
+
+    #[test]
     fn contents_equal() {
         const DATA: &[u8] = "This is data that should be equal.".as_bytes();
 
@@ -490,8 +614,8 @@ mod tests {
 
     #[test]
     fn contents_not_equal() {
-        const DATA1: &[u8] = "This is data that should be equal.".as_bytes();
-        const DATA2: &[u8] = "This data is different.".as_bytes();
+        const DATA1: &[u8] = "This data should be equal.".as_bytes();
+        const DATA2: &[u8] = "But is not.".as_bytes();
 
         fn make_file(data: &[u8]) -> File {
             let mut file = tempfile().expect("Failed to create file");

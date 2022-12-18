@@ -13,29 +13,34 @@ impl IntoReport for Error {
 
 pub struct Provider {}
 
-impl super::Transactor for Provider {
-    fn new_transaction(
-        &mut self,
-        _args: crate::Args,
-        _packages: crate::Packages,
-        _context: &mut crate::eval::Ctx,
-    ) -> Result<super::Transaction, ()> {
+impl super::ConstructProvider for Provider {
+    fn new(_root: bool) -> Result<Self, super::ProviderError> {
         todo!()
     }
 }
 
 impl super::Provider for Provider {
-    fn install(&mut self, _transaction: &super::Transaction) -> super::OpResult {
+    type Transaction = ();
+    type State = ();
+
+    fn new_transaction(
+        &mut self,
+        _args: crate::Args,
+        _packages: crate::Packages,
+        _ctx: &mut crate::eval::Ctx,
+    ) -> Result<Self::Transaction, ()> {
         todo!()
     }
 
-    fn remove(&mut self, _transaction: &super::Transaction) -> super::OpResult {
+    fn install(&mut self, _transaction: &Self::Transaction) -> (super::OpResult, Self::State) {
         todo!()
     }
-}
 
-impl super::ConstructProvider for Provider {
-    fn new(_root: bool) -> Result<Self, super::ProviderError> {
+    fn remove(
+        &mut self,
+        _transaction: &Self::Transaction,
+        _state: Option<Self::State>,
+    ) -> super::OpResult {
         todo!()
     }
 }

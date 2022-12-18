@@ -1,4 +1,4 @@
-use super::{ProviderError, Transaction};
+use super::ProviderError;
 use crate::{
     structures::{FromArgs, RecoverFromArgs},
     Ctx, Span,
@@ -104,12 +104,7 @@ impl Provider {
         }
     }
 
-    fn zypper_cmd(&mut self, cmd: &str, transaction: &Transaction) -> color_eyre::Result<()> {
-        let transaction = transaction
-            .payload
-            .downcast_ref::<Payload>()
-            .expect("Wrong type");
-
+    fn zypper_cmd(&mut self, cmd: &str, transaction: &Payload) -> color_eyre::Result<()> {
         let from = if let Some(from) = &transaction.from {
             from.iter()
                 .map(String::as_str)
@@ -153,7 +148,7 @@ struct ZyppPackage {
     name: String,
 }
 
-struct Payload {
+pub(super) struct Payload {
     from: Option<Vec<String>>,
     packages: Vec<ZyppPackage>,
 }
@@ -161,13 +156,40 @@ struct Payload {
 params! { struct ZyppParams { from: Option<Vec<String>> } }
 params! { struct PackageParams {} }
 
-impl super::Transactor for Provider {
+impl super::ConstructProvider for Provider {
+    fn new(root: bool) -> Result<Self, ProviderError> {
+        if !root {
+            return Err(ProviderError::NeedRoot);
+        }
+
+        // Try to spawn the zypper subprocess
+        let zypper = std::process::Command::new("zypper")
+            .arg("shell")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|e| ProviderError::Unavailable(std::rc::Rc::new(ProcessError::Spawn(e))))?;
+
+        let mut new = Self { zypper };
+        // See if the subprocess exited unexpectedly
+        match new.check_health() {
+            Ok(_) => Ok(new),
+            Err(err) => Err(ProviderError::Unavailable(std::rc::Rc::new(err))),
+        }
+    }
+}
+
+impl super::Provider for Provider {
+    type Transaction = Payload;
+    type State = ();
+
     fn new_transaction(
         &mut self,
         args: super::Args,
         packages: super::Packages,
         context: &mut Ctx,
-    ) -> Result<Transaction, ()> {
+    ) -> Result<Self::Transaction, ()> {
         // Parse the package block params
         let params = ZyppParams::recover_default(args, context);
 
@@ -209,51 +231,26 @@ impl super::Transactor for Provider {
         }
 
         if !degraded && !params.is_degraded() {
-            Ok(Transaction {
-                provider: super::ProviderKind::Zypper.into(),
-                payload: Box::new(Payload {
-                    from: params.value.from,
-                    packages: packs,
-                }),
+            Ok(Payload {
+                from: params.value.from,
+                packages: packs,
             })
         } else {
             Err(())
         }
     }
-}
 
-impl super::Provider for Provider {
-    fn install(&mut self, transaction: &Transaction) -> super::OpResult {
-        self.zypper_cmd("install", transaction)
+    fn install(&mut self, transaction: &Self::Transaction) -> (super::OpResult, Self::State) {
+        (self.zypper_cmd("install", transaction), ())
     }
 
-    fn remove(&mut self, transaction: &Transaction) -> super::OpResult {
+    fn remove(
+        &mut self,
+        transaction: &Self::Transaction,
+        _state: Option<Self::State>,
+    ) -> super::OpResult {
         // TODO: ignore errors when trying to remove a package that isnt installed
         self.zypper_cmd("remove", transaction)
-    }
-}
-
-impl super::ConstructProvider for Provider {
-    fn new(root: bool) -> Result<Self, ProviderError> {
-        if !root {
-            return Err(ProviderError::NeedRoot);
-        }
-
-        // Try to spawn the zypper subprocess
-        let zypper = std::process::Command::new("zypper")
-            .arg("shell")
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|e| ProviderError::Unavailable(std::rc::Rc::new(ProcessError::Spawn(e))))?;
-
-        let mut new = Self { zypper };
-        // See if the subprocess exited unexpectedly
-        match new.check_health() {
-            Ok(_) => Ok(new),
-            Err(err) => Err(ProviderError::Unavailable(std::rc::Rc::new(err))),
-        }
     }
 }
 
