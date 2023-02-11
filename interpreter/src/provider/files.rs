@@ -15,9 +15,9 @@ pub enum Error {
     InvalidMethod(String, Span),
     InvalidConflictStrat(String, Span),
     NonRelativePath(PathBuf, Span),
-    PathDoesntExist(PathBuf, Span),
-    PathUnreachable(PathBuf, std::io::Error, Span),
-    SourceNotADirectory(PathBuf, Span),
+    PathDoesntExist(RelPath, Span),
+    PathUnreachable(RelPath, std::io::Error, Span),
+    SourceNotADirectory(RelPath, Span),
 }
 
 impl Into<crate::error::Error> for Error {
@@ -45,17 +45,17 @@ report! {
         }
         Error::PathDoesntExist(path, span) => {
             report(ReportKind::Error, span.start);
-            message("Path '{}' doesn't exist", path.display().fg(Color::Red));
+            message("Path '{}' doesn't exist", path.fg(Color::Red));
             label(span, Color::Red, "This path doesn't exist");
         }
         Error::PathUnreachable(path, err, span) => {
             report(ReportKind::Error, span.start);
-            message("Cannot find path '{}'", path.display().fg(Color::Red));
+            message("Cannot find path '{}'", path.fg(Color::Red));
             label(span, Color::Red, "IoError: {}", err);
         }
         Error::SourceNotADirectory(path, span) => {
             report(ReportKind::Error, span.start);
-            message("Source path '{}' isn't a directory", path.display().fg(Color::Red));
+            message("Source path '{}' isn't a directory", path.fg(Color::Red));
             label(span, Color::Red, "Not a directory");
         }
     }
@@ -79,21 +79,40 @@ enum Conflict {
 struct Source(RelPath);
 
 impl Source {
-    fn from_path(dir: &RelPath, path: PathBuf, span: Span) -> Result<Self, Error> {
-        if path.is_absolute() || path.starts_with("~") {
-            Err(Error::NonRelativePath(path, span))
+    fn new(rel_path: Spanned<RelPath>) -> Result<Self, Error> {
+        if rel_path.is_dir() {
+            Ok(Self(rel_path.inner))
         } else {
-            {
-                let path = &path;
-                let relpath = dir.join(path);
-                match relpath.try_exists() {
-                    Ok(true) => Ok(relpath),
-                    Ok(false) => Err(Error::PathDoesntExist(path.to_owned(), span)),
-                    Err(err) => Err(Error::PathUnreachable(path.to_owned(), err, span)),
-                }
-            }
-            .map(Self)
+            Err(Error::SourceNotADirectory(rel_path.inner, rel_path.span))
         }
+    }
+
+    fn from_path(dir: &RelPath, path: Spanned<PathBuf>) -> Result<Self, Error> {
+        join_path(dir, path)
+            .and_then(check_exists)
+            .and_then(Self::new)
+    }
+
+    fn file_exists(&self, path: Spanned<PathBuf>) -> Result<Spanned<PathBuf>, Error> {
+        join_path(&self.0, path.clone())
+            .and_then(check_exists)
+            .map(|_| path)
+    }
+}
+
+fn join_path(dir: &RelPath, path: Spanned<PathBuf>) -> Result<Spanned<RelPath>, Error> {
+    if path.is_absolute() || path.starts_with("~") {
+        Err(Error::NonRelativePath(path.inner, path.span))
+    } else {
+        Ok(path.map(|path| dir.join(path)))
+    }
+}
+
+fn check_exists(path: Spanned<RelPath>) -> Result<Spanned<RelPath>, Error> {
+    match path.try_exists() {
+        Ok(true) => Ok(path),
+        Ok(false) => Err(Error::PathDoesntExist(path.inner, path.span)),
+        Err(err) => Err(Error::PathUnreachable(path.inner, err, path.span)),
     }
 }
 
@@ -137,10 +156,10 @@ impl super::Provider for Provider {
         &mut self,
         args: crate::Args,
         packages: crate::Packages,
-        context: &mut Ctx,
+        ctx: &mut Ctx,
     ) -> Result<Self::Transaction, ()> {
         // Parse the package block params
-        let params = Params::from_args(args, context).expect("Parser should be infallible");
+        let params = Params::from_args(args, ctx).expect("Parser should be infallible");
 
         let mut degraded = params.is_degraded();
         let Params {
@@ -155,7 +174,7 @@ impl super::Provider for Provider {
             "hardlink" => Some(Method::HardLink),
             "copy" => Some(Method::Copy),
             _ => {
-                context.emit(Error::InvalidMethod(method.inner, method.span));
+                ctx.emit(Error::InvalidMethod(method.inner, method.span));
                 degraded = true;
                 None
             }
@@ -166,42 +185,36 @@ impl super::Provider for Provider {
             "rename" => Some(Conflict::Rename),
             "remove" => Some(Conflict::Remove),
             _ => {
-                context.emit(Error::InvalidConflictStrat(conflicts.inner, conflicts.span));
+                ctx.emit(Error::InvalidConflictStrat(conflicts.inner, conflicts.span));
                 degraded = true;
                 None
             }
         });
 
-        let dir = context.unit_dir().bind(context.dotfile_dir().clone());
-        let rel_source = source.as_ref().and_then(|source| {
-            Source::from_path(&dir, source.inner.clone(), source.span)
-                .and_then(|path| {
-                    if path.0.is_dir() {
-                        Ok(path)
-                    } else {
-                        Err(Error::SourceNotADirectory(
-                            source.inner.clone(),
-                            source.span,
-                        ))
-                    }
-                })
-                .map_err(|err| context.emit(err))
-                .ok()
-        });
+        let dir = ctx.unit_dir().bind(ctx.dotfile_dir().clone());
+        let source = match source {
+            // Attempt to create the specified source
+            Some(source) => Source::from_path(&dir, source)
+                .map_err(|err| ctx.emit(err))
+                .ok(),
+            // Default to the unit directory if no source was provided
+            None => Some(Source(dir.clone())),
+        };
 
         let mut files = Vec::new();
         for package in packages.packages {
-            let path = rel_source
-                .as_ref()
-                .and_then(|_| source.as_ref())
-                .and_then(|source| {
-                    let path = source.inner.to_owned().join(&package.name.inner);
-                    Source::from_path(&dir, path, package.name.span)
-                        .map(|_| PathBuf::from(package.name.inner))
-                        .map_err(|err| context.emit(err))
-                        .ok()
-                });
-            let args = ItemParams::from_args(package.args, context);
+            // Check if the referenced file exists
+            let path = source.as_ref().and_then(|source| {
+                source
+                    .file_exists(package.name.map(PathBuf::from))
+                    .map(|path| path.inner)
+                    .map_err(|err| ctx.emit(err))
+                    .ok()
+            });
+
+            let args = ItemParams::from_args(package.args, ctx);
+
+            // See if anything went wrong
             match (path, args) {
                 (Some(path), Some(args)) if !args.is_degraded() => files.push(path),
                 _ => degraded = true,
@@ -214,7 +227,7 @@ impl super::Provider for Provider {
             Ok(Payload {
                 method: method.unwrap(),
                 conflicts: conflicts.unwrap(),
-                source: rel_source.unwrap(),
+                source: source.unwrap(),
                 target: target.unwrap(),
                 files,
             })
