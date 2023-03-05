@@ -16,8 +16,13 @@ use crate::unit::{
 
 #[derive(clap::Parser)]
 pub struct Deploy {
+    /// If a unit fails, revert all changes made to the system
+    #[clap(long)]
+    revert_all: bool,
+    /// Run the command without making any changes to the system
     #[clap(long)]
     dry_run: bool,
+    /// Topics to deploy
     topics: Option<Vec<String>>,
 }
 
@@ -46,17 +51,33 @@ impl Deploy {
         let mut errn = load_modules(loader, &mut modules);
         let parse_failed = errn != 0;
 
+        // Continue if there were no errors
         if errn == 0 {
-            let (deployed, res) = self.deploy_modules(root, &mut modules, &mut manager, context);
+            let (mut deployed, res) =
+                self.deploy_modules(root, &mut modules, &mut manager, context);
 
+            // Revert changes if the deployment failed
             if let Err(err) = res {
                 eprintln!("Error:{err:?}");
                 eprintln!("Encountered an error, reverting changes");
                 errn += 1;
+                assert!(
+                    !deployed.is_empty(),
+                    "There were errors but no units were deployed"
+                );
+
+                let deployed = if self.revert_all {
+                    // Revert all changes
+                    deployed
+                } else {
+                    // Revert the latest unit, which should contain the error
+                    vec![deployed.pop().unwrap()]
+                };
                 errn += remove_modules(deployed, &modules, &mut manager, context);
             }
         }
 
+        // Print number of errors
         if errn != 0 {
             let verb = if parse_failed { "aborted" } else { "failed" };
             if errn == 1 {
@@ -66,6 +87,7 @@ impl Deploy {
             }
         }
 
+        // Print status of units
         println!("\nUnit status:");
         let mut stdout = std::io::stdout().lock();
         write_tree(&mut stdout, root, modules).unwrap();
@@ -74,7 +96,7 @@ impl Deploy {
     }
 
     fn deploy_modules(
-        self,
+        &self,
         root: UnitId,
         modules: &mut HashMap<UnitId, Module>,
         manager: &mut Manager,
@@ -113,7 +135,7 @@ impl Deploy {
             }
         }
         if queue.is_empty() {
-            if let Some(mut topics) = self.topics {
+            if let Some(mut topics) = self.topics.clone() {
                 eprintln!(
                     "No units match the {} {}",
                     if topics.len() == 1 { "topic" } else { "topics" },
