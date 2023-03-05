@@ -84,9 +84,19 @@ pub fn home_dir() -> Result<PathBuf, common::rel_path::HomeError> {
 }
 
 pub fn default_config_path() -> Result<PathBuf> {
-    directories_next::ProjectDirs::from("com", "krafi", "ladybug")
+    project_dirs()
         .map(|dirs| dirs.config_dir().join("ladybug.toml"))
         .wrap_err("No config directory found")
+}
+
+pub fn project_dirs() -> Option<directories_next::ProjectDirs> {
+    directories_next::ProjectDirs::from("com", "krafi", "ladybug")
+}
+
+pub fn log_path() -> Result<PathBuf> {
+    project_dirs()
+        .map(|dirs| dirs.cache_dir().join("ladybug.log"))
+        .wrap_err("No home directory found")
 }
 
 pub fn default_dotfile_dir() -> Result<RelPath> {
