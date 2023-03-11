@@ -14,7 +14,7 @@ use crate::unit::{
     Unit,
 };
 
-#[derive(clap::Parser)]
+#[derive(clap::Parser, Debug)]
 pub struct Deploy {
     /// If a unit fails, revert all changes made to the system
     #[clap(long)]
@@ -44,7 +44,28 @@ impl Deploy {
         let mut manager = Manager::new();
         let interpreter = Interpreter::new();
         let env = HashMap::new();
-        let loader = loader::Loader::new(env, &interpreter, &mut manager, context);
+
+        let loader = match loader::Loader::new(env, &interpreter, &mut manager, context) {
+            Ok(loader) => loader,
+            Err(err) => {
+                match err {
+                    loader::LoaderError::DotfileDirError(err) => eprintln!(
+                        "The dotfile directory at '{}' is inaccessible: {}",
+                        context.dotfile_dir(),
+                        err
+                    ),
+                    loader::LoaderError::DotfileDirMissing => {
+                        eprintln!(
+                            "The dotfile directory at '{}' doesn't exist",
+                            context.dotfile_dir()
+                        )
+                    }
+                }
+                failure_message(1, true);
+                return Ok(Err(()));
+            }
+        };
+
         let root = loader.root();
         let mut modules = HashMap::new();
 
@@ -77,15 +98,7 @@ impl Deploy {
             }
         }
 
-        // Print number of errors
-        if errn != 0 {
-            let verb = if parse_failed { "aborted" } else { "failed" };
-            if errn == 1 {
-                eprintln!("\nDeployment {verb} due to previous error");
-            } else {
-                eprintln!("\nDeployment {verb} due to {errn} previous errors");
-            }
-        }
+        failure_message(errn, parse_failed);
 
         // Print status of units
         println!("\nUnit status:");
@@ -162,6 +175,18 @@ impl Deploy {
     }
 }
 
+fn failure_message(errn: usize, aborted: bool) {
+    // Print number of errors
+    if errn != 0 {
+        let verb = if aborted { "aborted" } else { "failed" };
+        if errn == 1 {
+            eprintln!("\nDeployment {verb} due to previous error");
+        } else {
+            eprintln!("\nDeployment {verb} due to {errn} previous errors");
+        }
+    }
+}
+
 fn remove_modules(
     deployed: Vec<(UnitId, Vec<interpreter::provider::State>)>,
     modules: &HashMap<UnitId, Module>,
@@ -208,7 +233,9 @@ fn load_modules(loader: loader::Loader, modules: &mut HashMap<UnitId, Module>) -
                     errn += 1;
                     eprintln!("Cannot load root module:");
                     match err {
-                        loader::Error::IO(io) => eprintln!("    File not found: {}", io),
+                        loader::Error::IO(io) => {
+                            eprintln!("    File {} not found: {}", module.path, io)
+                        }
                     }
                 }
                 (None, Status::Err)

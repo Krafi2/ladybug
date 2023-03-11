@@ -122,21 +122,38 @@ pub mod loader {
         next_id: u32,
     }
 
+    pub enum LoaderError {
+        /// Encountered an error while accessing the dotfile directory
+        DotfileDirError(std::io::Error),
+        /// The dotfile directory doesn't exist
+        DotfileDirMissing,
+    }
+
     impl<'a> Loader<'a> {
         pub fn new(
             env: Env,
             interpreter: &'a Interpreter,
             manager: &'a mut Manager,
             context: &'a Context,
-        ) -> Self {
-            Self {
+        ) -> Result<Self, LoaderError> {
+            match context.dotfile_dir().try_exists() {
+                Ok(true) => (),
+                Ok(false) => {
+                    return Err(LoaderError::DotfileDirMissing);
+                }
+                Err(err) => {
+                    return Err(LoaderError::DotfileDirError(err));
+                }
+            }
+
+            Ok(Self {
                 stack: Vec::new(),
                 env: Some(env),
                 interpreter,
                 manager,
                 context,
                 next_id: 0,
-            }
+            })
         }
 
         pub fn root(&self) -> UnitId {
