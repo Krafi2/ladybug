@@ -18,6 +18,7 @@ impl Config {
     }
 }
 
+#[derive(Debug)]
 pub struct Context {
     dotfile_dir: RelPath,
     home_dir: Result<PathBuf, HomeError>,
