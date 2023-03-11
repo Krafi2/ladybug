@@ -215,7 +215,7 @@ fn load_modules(loader: loader::Loader, modules: &mut HashMap<UnitId, Module>) -
             loader::Status::Degraded(_, errors, src) => {
                 for err in errors {
                     errn += 1;
-                    let filename = &module.path.to_string();
+                    let filename = &module.path.clone().unit_file().to_string();
                     let report = err.into_report(&filename);
                     let res = report
                         .eprint::<(&str, ariadne::Source)>((&filename, ariadne::Source::from(&src)))
