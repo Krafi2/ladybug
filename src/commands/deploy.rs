@@ -26,12 +26,14 @@ pub struct Deploy {
     topics: Option<Vec<String>>,
 }
 
+#[derive(Debug)]
 enum Status {
     Ok,
     Err,
     Skipped,
 }
 
+#[derive(Debug)]
 struct Module {
     path: UnitPath,
     unit: Option<Unit>,
@@ -69,7 +71,7 @@ impl Deploy {
         let root = loader.root();
         let mut modules = HashMap::new();
 
-        let mut errn = load_modules(loader, &mut modules);
+        let mut errn = load_modules(loader, self.dry_run, &mut modules);
         let parse_failed = errn != 0;
 
         // Continue if there were no errors
@@ -165,11 +167,16 @@ impl Deploy {
             let module = modules.get_mut(&id).unwrap();
             print!("[{}/{}] Deploying unit {}:", i + 1, queue_len, &module.path);
 
-            let (res, states) = deploy_unit(module, manager, context);
-            deployed.push((id, states));
+            if self.dry_run {
+                println!(" Skipped");
+                Ok(())
+            } else {
+                let (res, states) = deploy_unit(module, manager, context);
+                deployed.push((id, states));
 
-            println!(" Done");
-            res
+                println!(" Done");
+                res
+            }
         });
         (deployed, res)
     }
@@ -205,13 +212,20 @@ fn remove_modules(
     errn
 }
 
-fn load_modules(loader: loader::Loader, modules: &mut HashMap<UnitId, Module>) -> usize {
+fn load_modules(
+    loader: loader::Loader,
+    dry_run: bool,
+    modules: &mut HashMap<UnitId, Module>,
+) -> usize {
     let root = loader.root();
     let mut errn = 0;
 
     for module in loader {
         let (unit, status) = match module.status {
-            loader::Status::Ok(unit) => (Some(unit), Status::Ok),
+            loader::Status::Ok(unit) => (
+                Some(unit),
+                if dry_run { Status::Skipped } else { Status::Ok },
+            ),
             loader::Status::Degraded(_, errors, src) => {
                 for err in errors {
                     errn += 1;
@@ -228,7 +242,7 @@ fn load_modules(loader: loader::Loader, modules: &mut HashMap<UnitId, Module>) -
                 (None, Status::Err)
             }
             loader::Status::Err(err) => {
-                // Non-root modules should have already reported errors
+                // Non-root modules should have already reported their errors
                 if module.id == root {
                     errn += 1;
                     eprintln!("Cannot load root module:");

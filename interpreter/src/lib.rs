@@ -297,6 +297,7 @@ impl Args {
     }
 }
 
+// A path relative to the dotfile directory
 #[derive(Debug, Clone)]
 pub struct LocalPath(PathBuf);
 
@@ -346,6 +347,7 @@ enum UnitPathInner {
     Path(LocalPath),
 }
 
+// A `LocalPath` that points to a unit
 #[derive(Debug, Clone)]
 pub struct UnitPath(UnitPathInner);
 
@@ -374,10 +376,17 @@ impl UnitPath {
         Self(UnitPathInner::Root)
     }
 
-    pub fn join<P: AsRef<Path>>(&self, path: P) -> LocalPath {
-        let mut new = LocalPath::from(self.clone());
-        new.push(path.as_ref());
-        new
+    pub fn join<P: AsRef<Path> + ToOwned<Owned = PathBuf>>(&self, path: P) -> LocalPath {
+        match self.0 {
+            // Don't add the root prefix to paths
+            UnitPathInner::Root => LocalPath(path.to_owned()),
+            // Join non-root paths
+            UnitPathInner::Path(_) => {
+                let mut new = LocalPath::from(self.clone());
+                new.push(path.as_ref());
+                new
+            }
+        }
     }
 
     pub fn bind(&self, mut location: RelPath) -> RelPath {
@@ -399,9 +408,8 @@ impl FromValue for UnitPath {
                     match path.components().count() {
                         0 => Err(PathError::Empty(span)),
                         1 => {
-                            let path = UnitPath(UnitPathInner::Path(
-                                LocalPath::from(ctx.unit_dir().clone()).join(path),
-                            ));
+                            let path =
+                                UnitPath(UnitPathInner::Path(ctx.unit_dir().clone().join(path)));
                             if path
                                 .clone()
                                 .unit_file()
@@ -615,7 +623,8 @@ mod eval {
                 };
 
                 match name {
-                    Name::Unit if i > 0 => ctx.emit(StructureError::MisplacedUnit(ident.span)),
+                    Name::Unit if i == 0 => (),
+                    Name::Unit => ctx.emit(StructureError::MisplacedUnit(ident.span)),
                     Name::Env if i > 1 => ctx.emit(StructureError::MisplacedEnv(ident.span)),
                     _ if i == 0 => ctx.emit(StructureError::ExpectedUnit(ident.span, ident.inner)),
                     _ => (),

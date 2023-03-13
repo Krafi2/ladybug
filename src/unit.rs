@@ -8,6 +8,7 @@ pub use interpreter::{
     Env, Interpreter,
 };
 
+#[derive(Debug)]
 pub struct Unit {
     pub name: String,
     pub desc: String,
@@ -221,26 +222,30 @@ pub mod loader {
         type Item = Module;
 
         fn next(&mut self) -> Option<Self::Item> {
-            match self.stack.last_mut() {
-                Some(frame) => match frame.queue.pop() {
-                    Some((id, path)) => {
-                        let env = frame.env.clone();
-                        let module = self.load_module(id, path, env);
-                        Some(module)
-                    }
-                    None => {
-                        self.stack.pop();
-                        None
-                    }
-                },
-                None => match self.env.take() {
-                    Some(env) => {
-                        let id = self.next_id();
-                        let module = self.load_module(id, UnitPath::root(), env);
-                        Some(module)
-                    }
-                    None => None,
-                },
+            loop {
+                match self.stack.last_mut() {
+                    Some(frame) => match frame.queue.pop() {
+                        Some((id, path)) => {
+                            let env = frame.env.clone();
+                            let module = self.load_module(id, path, env);
+                            break Some(module);
+                        }
+                        None => {
+                            self.stack.pop();
+                            continue;
+                        }
+                    },
+                    None => match self.env.take() {
+                        // This is the first iteration so we load the root node
+                        Some(env) => {
+                            let id = self.next_id();
+                            let module = self.load_module(id, UnitPath::root(), env);
+                            break Some(module);
+                        }
+                        // This is the last iteration
+                        None => break None,
+                    },
+                }
             }
         }
     }

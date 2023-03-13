@@ -169,27 +169,31 @@ impl super::Provider for Provider {
             target,
         } = params.value;
 
-        let method = method.and_then(|method| match method.as_str() {
-            "link" => Some(Method::SoftLink),
-            "hardlink" => Some(Method::HardLink),
-            "copy" => Some(Method::Copy),
-            _ => {
-                ctx.emit(Error::InvalidMethod(method.inner, method.span));
-                degraded = true;
-                None
-            }
-        });
+        let method = method
+            .and_then(|method| match method.as_str() {
+                "link" => Some(Method::SoftLink),
+                "hardlink" => Some(Method::HardLink),
+                "copy" => Some(Method::Copy),
+                _ => {
+                    ctx.emit(Error::InvalidMethod(method.inner, method.span));
+                    degraded = true;
+                    None
+                }
+            })
+            .unwrap_or(Method::SoftLink);
 
-        let conflicts = conflicts.and_then(|conflicts| match conflicts.as_str() {
-            "abort" => Some(Conflict::Abort),
-            "rename" => Some(Conflict::Rename),
-            "remove" => Some(Conflict::Remove),
-            _ => {
-                ctx.emit(Error::InvalidConflictStrat(conflicts.inner, conflicts.span));
-                degraded = true;
-                None
-            }
-        });
+        let conflicts = conflicts
+            .and_then(|conflicts| match conflicts.as_str() {
+                "abort" => Some(Conflict::Abort),
+                "rename" => Some(Conflict::Rename),
+                "remove" => Some(Conflict::Remove),
+                _ => {
+                    ctx.emit(Error::InvalidConflictStrat(conflicts.inner, conflicts.span));
+                    degraded = true;
+                    None
+                }
+            })
+            .unwrap_or(Conflict::Rename);
 
         let dir = ctx.unit_dir().bind(ctx.dotfile_dir().clone());
         let source = match source {
@@ -225,8 +229,8 @@ impl super::Provider for Provider {
             Err(())
         } else {
             Ok(Payload {
-                method: method.unwrap(),
-                conflicts: conflicts.unwrap(),
+                method,
+                conflicts,
                 source: source.unwrap(),
                 target: target.unwrap(),
                 files,
