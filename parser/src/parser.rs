@@ -38,7 +38,7 @@ impl chumsky::error::Error<Token> for Error {
     }
 
     fn with_label(self, _label: Self::Label) -> Self {
-        unimplemented!()
+        self
     }
 
     fn merge(self, other: Self) -> Self {
@@ -80,12 +80,14 @@ pub enum Expr {
     Item(Spanned<Ident>, Spanned<Params>),
 }
 
+#[derive(Debug, PartialEq, Eq)]
 pub enum Body {
     Map(Vec<Spanned<Param>>),
     List(Vec<Spanned<Expr>>),
     Code(String),
 }
 
+#[derive(Debug, PartialEq, Eq)]
 pub struct Block {
     pub ident: Spanned<Ident>,
     pub params: Option<Spanned<Params>>,
@@ -103,6 +105,7 @@ type Params = Vec<Spanned<Param>>;
 fn ident() -> impl MyParser<Ident> {
     filter_map(|span, token| match token {
         Token::IdentOrStr(ident) => {
+            // check that this is a c identifier
             for (i, c) in ident.chars().enumerate() {
                 if !c.is_alphabetic() && (c.is_numeric() && i == 0) {
                     return Err(Error::InvalidIdent(span, ident));
@@ -126,7 +129,8 @@ fn param(expr: impl MyParser<Expr>) -> impl MyParser<Param> {
 fn params(expr: impl MyParser<Expr>) -> impl MyParser<Params> {
     param(expr)
         .spanned()
-        .repeated()
+        .separated_by(just(Token::Ctrl(',')))
+        .allow_trailing()
         .delimited_by(just(Token::Ctrl('(')), just(Token::Ctrl(')')))
 }
 
@@ -161,8 +165,8 @@ fn expr() -> impl MyParser<Expr> {
             .map(|(ident, params)| Expr::Item(ident, params));
 
         let simple_expr = filter_map(move |span, token| match token {
-            Token::Str(s) | Token::DelimStr(s) => Ok(Expr::String(s)),
             Token::Bool(b) => Ok(Expr::Bool(b)),
+            Token::Str(s) | Token::DelimStr(s) | Token::IdentOrStr(s) => Ok(Expr::String(s)),
             Token::Var(var) => Ok(Expr::Variable(Ident(var))),
             token => Err(Error::expected(
                 vec![TokenKind::Str, TokenKind::Bool, TokenKind::Var],
@@ -202,18 +206,197 @@ pub(crate) fn parser() -> impl Parser<Token, Vec<Spanned<Block>>, Error = Error>
 
 #[cfg(test)]
 mod tests {
-    //TODO: Implement tests
-    test_parsers! {
-        @expected: std::convert::identity;
-        @output: std::convert::identity;
+    use crate::{Ident, Param, Span, Token};
 
-        ident {}
-        param {}
-        params {}
-        list {}
-        map {}
-        code {}
-        expr {}
-        body {}
+    use super::*;
+
+    fn ok<T>(t: T) -> Result<T, Vec<Error>> {
+        Ok(t)
+    }
+
+    fn stream<'a>(
+        src: &'a [Token],
+    ) -> chumsky::Stream<
+        'a,
+        Token,
+        Span,
+        std::iter::Map<
+            std::iter::Enumerate<std::slice::Iter<Token>>,
+            fn((usize, &Token)) -> (Token, Span),
+        >,
+    > {
+        let len = src.len();
+        chumsky::Stream::<_, Span, _>::from_iter(
+            Span::new(len, len),
+            src.into_iter()
+                .enumerate()
+                .map(|(i, c)| (c.clone(), Span::new(i, i + 1))),
+        )
+    }
+
+    fn param() -> impl MyParser<Param> {
+        super::param(super::expr())
+    }
+    fn params() -> impl MyParser<Params> {
+        super::params(super::expr())
+    }
+    fn list() -> impl MyParser<Vec<Spanned<Expr>>> {
+        super::list(super::expr())
+    }
+    fn map() -> impl MyParser<Vec<Spanned<Param>>> {
+        super::map(super::expr())
+    }
+
+    mod a {
+        use super::*;
+
+        test_parsers! {
+            @stream: stream;
+            @expected: ok;
+            @output: std::convert::identity;
+
+            ident {
+                &[Token::Ident("foo".into())] => Ident("foo".into()),
+                &[Token::IdentOrStr("bar".into())] => Ident("bar".into()),
+            }
+            param {
+                &[Token::Ident("foo".into()), Token::Ctrl(':'), Token::Bool(false)] =>
+                    Param {
+                        name: Spanned::new(Ident("foo".into()), 0..1),
+                        val: Spanned::new(Expr::Bool(false), 2..3)
+                    },
+            }
+            params {
+                &[
+                    Token::Ctrl('('),
+                    Token::Ident("foo".into()),
+                    Token::Ctrl(':'),
+                    Token::IdentOrStr("hey there".into()),
+                    Token::Ctrl(','),
+                    Token::Ident("bar".into()),
+                    Token::Ctrl(':'),
+                    Token::Var("var".into()),
+                    Token::Ctrl(')')
+                ] => vec![
+                    Spanned::new(
+                        Param {
+                            name: Spanned::new(Ident("foo".into()), 1..2),
+                            val: Spanned::new(Expr::String("hey there".into()), 3..4)
+                        },
+                        1..4,
+                    ),
+                    Spanned::new(
+                        Param {
+                            name: Spanned::new(Ident("bar".into()), 5..6),
+                            val: Spanned::new(Expr::Variable(Ident("var".into())), 7..8)
+                        },
+                        5..8,
+                    )
+                ],
+            }
+            list {
+                &[
+                    Token::Ctrl('['),
+                    Token::Code("code".into()),
+                    Token::Var("var".into()),
+                    Token::Ctrl(']')
+                ] => vec![
+                    Spanned::new(Expr::Code("code".into()), 1..2),
+                    Spanned::new(Expr::Variable(Ident("var".into())), 2..3),
+                ],
+
+            }
+            map {
+                &[
+                    Token::Ctrl('{'),
+                    Token::Ident("foo".into()),
+                    Token::Ctrl(':'),
+                    Token::Code("code".into()),
+                    Token::Ident("bar".into()),
+                    Token::Ctrl(':'),
+                    Token::Var("var".into()),
+                    Token::Ctrl('}')
+                ] => vec![
+                    Spanned::new(
+                        Param {
+                            name: Spanned::new(Ident("foo".into()), 1..2),
+                            val: Spanned::new(Expr::Code("code".into()), 3..4),
+                        },
+                        1..4,
+                    ),
+                    Spanned::new(
+                        Param {
+                            name: Spanned::new(Ident("bar".into()), 4..5),
+                            val: Spanned::new(Expr::Variable(Ident("var".into())), 6..7),
+                        },
+                        4..7,
+                    )
+                ]
+
+            }
+            code {
+                &[Token::Code("code".into())] => "code".into()
+            }
+            expr {
+                vec![Token::Code("code".into())] => Expr::Code("code".into()),
+                vec![
+                    Token::IdentOrStr("foo".into()),
+                    Token::Ctrl('('),
+                    Token::IdentOrStr("bar".into()),
+                    Token::Ctrl(':'),
+                    Token::IdentOrStr("a b".into()),
+                    Token::Ctrl(')')
+                ] => Expr::Item(
+                    Spanned::new(Ident("foo".into()), 0..1),
+                    Spanned::new(
+                        vec![
+                            Spanned::new(
+                                Param {
+                                    name: Spanned::new(Ident("bar".into()), 2..3),
+                                    val: Spanned::new(Expr::String("a b".into()), 4..5),
+                                },
+                                2..5,
+                            )
+                        ],
+                        1..6
+                    )
+                )
+            }
+            parser {
+                &[
+                    Token::IdentOrStr("foo".into()),
+                    Token::Ctrl('('),
+                    Token::IdentOrStr("bar".into()),
+                    Token::Ctrl(':'),
+                    Token::IdentOrStr("a b".into()),
+                    Token::Ctrl(')'),
+                    Token::Ctrl('{'),
+                    Token::Ctrl('}'),
+                ] => vec![
+                    Spanned::new(
+                        Block {
+                            ident: Spanned::new(Ident("foo".into()), 0..1),
+                            params: Some(Spanned::new(
+                                vec![
+                                    Spanned::new(
+                                        Param {
+                                            name: Spanned::new(Ident("bar".into()), 2..3),
+                                            val: Spanned::new(Expr::String("a b".into()), 4..5),
+                                        },
+                                        2..5,
+                                    )
+                                ],
+                                1..6
+                            )),
+                            body: Spanned::new(
+                                Body::Map(vec![]),
+                                6..8
+                            )
+                        },
+                        0..8,
+                    )
+                ]
+            }
+        }
     }
 }

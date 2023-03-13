@@ -62,7 +62,7 @@ trait TokParser: Parser<char, TokenTree, Error = Simple<char, Span>> + Clone {}
 impl<T: Parser<char, TokenTree, Error = Simple<char, Span>> + Clone> TokParser for T {}
 
 const RESERVED_CHARS: &[char] = &[
-    ':', ',', ';', '(', ')', '[', ']', '{', '}', '"', '\'', '#', '\n', '$',
+    ':', ',', ';', '(', ')', '[', ']', '{', '}', '"', '#', '\n', '$',
 ];
 
 // Characters allowed as whitespace
@@ -119,18 +119,27 @@ fn word_string() -> impl TokParser {
 }
 
 fn ident_or_string() -> impl TokParser {
-    delim_str()
-        .or(string_chars()
+    delim_str().or(
+        // parse words separated by whitespace
+        string_chars()
             .chain::<char, _, _>(
-                filter(|c: &char| c.is_whitespace())
-                    .repeated()
-                    .at_least(1)
-                    .chain(string_chars()),
+                // parse multiple `space` `word` sequences
+                recursive(|space_word| {
+                    one_of(" \t")
+                        .repeated()
+                        .at_least(1)
+                        .chain(string_chars())
+                        // repeat or exit
+                        .chain(space_word.or_not().flatten())
+                })
+                .or_not()
+                .flatten(),
             )
             .collect()
             .map(Token::IdentOrStr)
-            .single())
-        .labelled("string")
+            .single()
+            .labelled("string"),
+    )
 }
 
 fn boolean() -> impl TokParser {
@@ -155,12 +164,6 @@ fn code() -> impl TokParser {
     .delimited_by(just(['{', '{']), just(['}', '}']))
     .map(Token::Code)
     .single()
-    .recover_with(nested_delimiters(
-        '{',
-        '}',
-        [('(', ')'), ('[', ']')],
-        |_| TokenTree::Single(Token::Error),
-    ))
     .labelled("code")
 }
 
@@ -176,8 +179,8 @@ fn options(expr: impl TokParser) -> impl TokParser {
                 control(','),
                 control(':'),
                 comment(),
-                space(),
                 line(),
+                space(),
                 expr,
                 ident_or_string(),
             ))
@@ -193,16 +196,9 @@ fn list(expr: impl TokParser) -> impl TokParser {
     control('[')
         .spanned()
         .chain(
-            choice((
-                control(','),
-                comment(),
-                space(),
-                line(),
-                expr,
-                word_string(),
-            ))
-            .spanned()
-            .repeated(),
+            choice((comment(), line(), space(), expr, word_string()))
+                .spanned()
+                .repeated(),
         )
         .chain(control(']').spanned())
         .map(TokenTree::Tree)
@@ -222,8 +218,8 @@ fn map(expr: impl TokParser) -> impl TokParser {
             choice((
                 control(':'),
                 comment(),
-                space(),
                 line(),
+                space(),
                 expr,
                 ident_or_string(),
             ))
@@ -266,9 +262,11 @@ pub(crate) fn lexer(
 ) -> impl chumsky::Parser<char, Vec<Spanned<TokenTree>>, Error = Simple<char, Span>> {
     let expr = expr();
     choice((
-        space(),
         line(),
+        space(),
         comment(),
+        code(),
+        options(expr.clone()),
         list(expr.clone()),
         map(expr),
         ident(),
@@ -281,37 +279,26 @@ pub(crate) fn lexer(
 #[cfg(test)]
 mod tests {
     use super::{TokParser, Token, TokenTree};
-    type Result<T> = std::result::Result<T, Vec<chumsky::error::Simple<char, crate::Span>>>;
-    fn ok_single(tok: Token) -> Result<TokenTree> {
-        Ok(TokenTree::Single(tok))
-    }
+    type Error = chumsky::error::Simple<char, crate::Span>;
+    type Result<T> = std::result::Result<T, Vec<Error>>;
 
     fn ok<T>(t: T) -> Result<T> {
         Ok(t)
     }
 
-    fn flatten_tts(tts: Result<TokenTree>) -> Result<Vec<Token>> {
-        fn flatten(tt: TokenTree, buf: &mut Vec<Token>) {
-            match tt {
-                TokenTree::Single(tok) => buf.push(tok),
-                TokenTree::Tree(tts) => {
-                    for tt in tts {
-                        flatten(tt.inner, buf)
-                    }
-                }
-            }
-        }
-
-        tts.map(|tt| {
-            let mut buf = Vec::new();
-            flatten(tt, &mut buf);
-            buf
+    fn unwrap_single(tok: Result<TokenTree>) -> Result<Token> {
+        tok.map(|tok| match tok {
+            TokenTree::Single(tok) => tok,
+            TokenTree::Tree(_) => unreachable!(),
         })
     }
 
+    // fn trans_output(out: (Option<Token>, Vec<chumsky::Error>)) ->
+
     test_parsers! {
-        @expected: ok_single;
-        @output: std::convert::identity;
+        @stream: crate::stream_from_str;
+        @expected: ok;
+        @output: unwrap_single;
 
         space {
             "  " => Token::Space("  ".into()),
@@ -333,7 +320,7 @@ mod tests {
         ident_or_string {
             "\"a string\"" => Token::DelimStr("a string".into()),
             "a string" => Token::IdentOrStr("a string".into()),
-            "string" => Token::IdentOrStr("string".into()),
+            "g'day" => Token::IdentOrStr("g'day".into()),
         }
         word_string {
             "\"a string\"" => Token::DelimStr("a string".into()),
@@ -355,10 +342,30 @@ mod tests {
         super::options(super::expr())
     }
 
+    fn flatten_tts(tts: Result<TokenTree>) -> Result<Vec<Token>> {
+        fn flatten(tt: TokenTree, buf: &mut Vec<Token>) {
+            match tt {
+                TokenTree::Single(tok) => buf.push(tok),
+                TokenTree::Tree(tts) => {
+                    for tt in tts {
+                        flatten(tt.inner, buf)
+                    }
+                }
+            }
+        }
+
+        tts.map(|tt| {
+            let mut buf = Vec::new();
+            flatten(tt, &mut buf);
+            buf
+        })
+    }
+
     mod collections {
         use super::*;
 
         test_parsers! {
+            @stream: crate::stream_from_str;
             @expected: ok;
             @output: flatten_tts;
 
@@ -369,7 +376,8 @@ mod tests {
                     Token::Space(" ".into()),
                     Token::Str("b".into()),
                     Token::Space(" ".into()),
-                    Token::DelimStr("c d".into())
+                    Token::DelimStr("c d".into()),
+                    Token::Ctrl(']'),
                 ],
                 "[a[b[c[]]]]" => vec![
                     Token::Ctrl('['),
@@ -387,22 +395,19 @@ mod tests {
                 "[#comment\nno comment]" => vec![
                     Token::Ctrl('['),
                     Token::Comment("comment".into()),
-                    Token::Line,
-                    Token::Str("no".into()),
+                    Token::Bool(false),
+                    Token::Space(" ".into()),
                     Token::Str("comment".into()),
                     Token::Ctrl(']'),
                 ]
             }
             map {
-                "{foo: [bar bar]\nfoo: item(param: val)}" => vec![
+                "{foo: bar bar\nfoo: item(param: val)}" => vec![
                     Token::Ctrl('{'),
                     Token::IdentOrStr("foo".into()),
                     Token::Ctrl(':'),
                     Token::Space(" ".into()),
-                    Token::Ctrl('['),
-                    Token::Str("bar".into()),
-                    Token::Str("bar".into()),
-                    Token::Ctrl(']'),
+                    Token::IdentOrStr("bar bar".into()),
                     Token::Line,
                     Token::IdentOrStr("foo".into()),
                     Token::Ctrl(':'),
@@ -427,8 +432,9 @@ mod tests {
                     Token::Ctrl(','),
                     Token::Space(" ".into()),
                     Token::IdentOrStr("hello".into()),
+                    Token::Ctrl(':'),
                     Token::Space(" ".into()),
-                    Token::IdentOrStr("word".into()),
+                    Token::IdentOrStr("world".into()),
                     Token::Ctrl('('),
                     Token::Ctrl(')'),
                     Token::Ctrl(','),

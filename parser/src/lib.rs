@@ -24,6 +24,7 @@ impl Token {
 enum TokenKind {
     Ctrl(char),
     Ident,
+    IdentOrStr,
     Str,
     Bool,
     Var,
@@ -40,7 +41,7 @@ impl From<&Token> for TokenKind {
         match token {
             Token::Ctrl(char) => TokenKind::Ctrl(*char),
             Token::Ident(_) => TokenKind::Ident,
-            Token::IdentOrStr(_) => unimplemented!(),
+            Token::IdentOrStr(_) => TokenKind::IdentOrStr,
             Token::Str(_) => TokenKind::Str,
             Token::DelimStr(_) => TokenKind::Str,
             Token::Bool(_) => TokenKind::Bool,
@@ -59,6 +60,7 @@ impl std::fmt::Display for TokenKind {
         match self {
             TokenKind::Ctrl(char) => write!(f, "'{}'", char),
             TokenKind::Ident => f.write_str("Ident"),
+            TokenKind::IdentOrStr => f.write_str("IdentOrStr"),
             TokenKind::Str => f.write_str("String"),
             TokenKind::Bool => f.write_str("Boolean"),
             TokenKind::Var => f.write_str("Variable"),
@@ -85,7 +87,15 @@ impl Error {
     pub fn into_report<'a>(self, filename: &'a str) -> Report<span::AriadneSpan> {
         fn token_or_end<T: ToString>(t: &Option<T>) -> String {
             match t {
-                Some(t) => t.to_string(),
+                Some(t) => {
+                    let s = t.to_string();
+                    match s.as_str() {
+                        "\n" => "\\n".into(),
+                        "\r" => "\\r".into(),
+                        "\t" => "\\t".into(),
+                        _ => s,
+                    }
+                }
                 None => "end of file".to_string(),
             }
         }
@@ -161,10 +171,7 @@ impl Error {
                             Label::new(AriadneSpan::new(filename, err.span()))
                                 .with_message(format!(
                                     "Must be closed before '{}'",
-                                    err.found()
-                                        .map(ToString::to_string)
-                                        .unwrap_or("end of file".to_string())
-                                        .fg(Color::Red)
+                                    token_or_end(&err.found()).fg(Color::Red)
                                 ))
                                 .with_color(Color::Red),
                         )
@@ -175,7 +182,7 @@ impl Error {
                             some_or_end(&err.found(), "token"),
                             match err.expected().len() {
                                 0 => "something else".to_string(),
-                                1 => token_or_end(&err.expected().next().unwrap()),
+                                1 => format!("'{}'", token_or_end(&err.expected().next().unwrap())),
                                 _ => format!(
                                     "one of {}",
                                     err.expected()
@@ -188,11 +195,8 @@ impl Error {
                         .with_label(
                             Label::new(AriadneSpan::new(filename, err.span()))
                                 .with_message(format!(
-                                    "Unexpected token {}",
-                                    err.found()
-                                        .map(ToString::to_string)
-                                        .unwrap_or("end of file".to_string())
-                                        .fg(Color::Red)
+                                    "Unexpected token '{}'",
+                                    token_or_end(&err.found()).fg(Color::Red)
                                 ))
                                 .with_color(Color::Red),
                         )
@@ -280,7 +284,7 @@ fn tts_to_stream(tts: Vec<Spanned<TokenTree>>) -> chumsky::BoxStream<'static, To
 }
 
 fn stream_from_str<'a>(
-    src: &str,
+    src: &'a str,
 ) -> chumsky::Stream<
     'a,
     char,
