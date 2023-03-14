@@ -9,9 +9,9 @@ edition = "2021"
 parser = { path = "../parser" }
 common = { path = "../common" }
 color-eyre = "0.6.2"
-ariadne = "0.1.5"
-thiserror = "1.0.33"
-tracing = "0.1.36"
+ariadne = "0.2.0"
+thiserror = "1.0.39"
+tracing = "0.1.37"
 
 [dev-dependencies]
-tempfile = "3.3.0"
+tempfile = "3.4.0"

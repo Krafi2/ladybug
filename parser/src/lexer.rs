@@ -128,9 +128,9 @@ fn ident_or_string() -> impl TokParser {
                     one_of(" \t")
                         .repeated()
                         .at_least(1)
-                        .chain(string_chars())
+                        .chain::<char, _, _>(string_chars())
                         // repeat or exit
-                        .chain(space_word.or_not().flatten())
+                        .chain::<char, _, _>(space_word.or_not().flatten())
                 })
                 .or_not()
                 .flatten(),

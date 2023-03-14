@@ -15,11 +15,11 @@ common = { path = "common" }
 clap = { version = "4.1.8", features = ["derive", "color"] }
 directories-next = "2.0.0"
 color-eyre = "0.6.2"
-tracing = "0.1.35"
-tracing-subscriber = "0.3.15"
-ariadne = "0.1.5"
-nix = { version = "0.25.0", default-features = false, features = ["user"] }
-thiserror = "1.0.32"
+tracing = "0.1.37"
+tracing-subscriber = "0.3.16"
+ariadne = "0.2.0"
+nix = { version = "0.26.2", default-features = false, features = ["user"] }
+thiserror = "1.0.39"
 
 [profile.dev.package.backtrace]
 opt-level = 3
