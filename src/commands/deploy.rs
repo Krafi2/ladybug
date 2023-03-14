@@ -44,10 +44,9 @@ struct Module {
 impl Deploy {
     pub(super) fn run(self, context: &crate::context::Context) -> super::CmdResult {
         let mut manager = Manager::new();
-        let interpreter = Interpreter::new();
         let env = HashMap::new();
 
-        let loader = match loader::Loader::new(env, &interpreter, &mut manager, context) {
+        let loader = match loader::Loader::new(env, context.interpreter(), &mut manager, context) {
             Ok(loader) => loader,
             Err(err) => {
                 match err {

@@ -22,11 +22,48 @@ use self::structures::FromValue;
 pub type Env = HashMap<Ident, Spanned<Value>>;
 
 #[derive(Debug)]
+enum BlockType {
+    Map,
+    List,
+    Code,
+}
+
+impl From<parser::Body> for BlockType {
+    fn from(value: parser::Body) -> Self {
+        match value {
+            parser::Body::Map(_) => Self::Map,
+            parser::Body::List(_) => Self::List,
+            parser::Body::Code(_) => Self::Code,
+        }
+    }
+}
+
+impl std::fmt::Display for BlockType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let s = match self {
+            BlockType::Map => "Map",
+            BlockType::List => "List",
+            BlockType::Code => "Code",
+        };
+        f.write_str(s)
+    }
+}
+
+#[derive(Debug)]
 enum StructureError {
     ExpectedUnit(Span, Ident),
     MisplacedUnit(Span),
     MisplacedEnv(Span),
-    UnexpectedBlock(Span, Ident),
+    UnexpectedBlock {
+        span: Span,
+        found: Ident,
+        expected: Vec<&'static str>,
+    },
+    WrongType {
+        span: Span,
+        found: BlockType,
+        expected: BlockType,
+    },
 }
 
 report! {
@@ -41,21 +78,31 @@ report! {
             message("The unit declaration should be located at the start of the file");
             label(span, Color::Red, "'unit' expected at the top of file");
         }
-
         StructureError::MisplacedEnv(span) => {
             report(ReportKind::Error, span.start);
             message("The env block should be placed directly after the unit declaration");
             label(span, Color::Red, "Unexpected 'env'");
         }
-        StructureError::UnexpectedBlock(span, name) => {
+        StructureError::UnexpectedBlock { span, found, expected } => {
             report(ReportKind::Error, span.start);
-            message("Unknown block '{}'", name);
+            message("Unknown block '{}'", found);
             label(
                 span,
                 Color::Red,
-                "Expected one of 'unit', 'env', 'packages', 'files', 'deploy', 'remove', 'capture', found '{}'",
-                name.fg(Color::Red),
+                "Expected one of {}",
+                expected.into_iter().map(|s| format!("'{s}'")).collect::<Vec<_>>().join(", ")
             );
+        }
+        StructureError::WrongType { span, found, expected } => {
+            report(ReportKind::Error, span.start);
+            message("Expected {} block", expected);
+            label(
+                span,
+                Color::Red,
+                "Found {}",
+                found.fg(Color::Red),
+            );
+
         }
     }
 }
@@ -244,9 +291,9 @@ impl Packages {
 
 #[derive(Debug, Clone)]
 pub struct Arg {
-    name: Spanned<Ident>,
-    value: Spanned<Value>,
-    span: Span,
+    pub name: Spanned<Ident>,
+    pub value: Spanned<Value>,
+    pub span: Span,
 }
 
 impl Arg {
@@ -261,12 +308,12 @@ impl Arg {
 
 #[derive(Debug, Clone)]
 pub struct Args {
-    args: Vec<Arg>,
-    span: Span,
+    pub args: Vec<Arg>,
+    pub span: Span,
     /// If true, the args were present in the source code and the span is accurate.
     /// Otherwise were omitted and should be assumed empty. The provided span
     /// points to the space where args could be placed.
-    accurate_span: bool,
+    pub accurate_span: bool,
 }
 
 impl Args {
@@ -446,16 +493,17 @@ impl Display for UnitPath {
     }
 }
 
-use eval::Ctx;
+pub use eval::Ctx;
 pub use eval::{Interpreter, RoutineFigment, UnitFigment};
 mod eval {
-    use std::path::Path;
+    use std::{collections::HashMap, path::Path};
 
     use super::{error::Error, Args, Env, Packages, Spanned, UnitPath, Value};
-    use crate::{provider::Transaction, structures::RecoverFromArgs, StructureError};
+    use crate::{provider::Transaction, structures::RecoverFromArgs, BlockType, StructureError};
     use common::{command::Command, rel_path::RelPath};
-    use parser::Ident;
+    use parser::{Body, Ident};
 
+    #[derive(Clone, Copy)]
     enum Name {
         Unit,
         Env,
@@ -529,11 +577,18 @@ mod eval {
         pub errors: Vec<Error>,
     }
 
-    pub(super) struct Ctx<'a> {
+    params! {
+        pub struct Config {
+            pub dotfiles: Option<RelPath>,
+            pub shell: Option<Command>,
+        }
+    }
+
+    pub struct Ctx<'a> {
         members: Vec<UnitPath>,
-        dir: UnitPath,
+        dir: Option<UnitPath>,
         home_dir: Result<&'a Path, common::rel_path::HomeError>,
-        dotfile_dir: &'a RelPath,
+        dotfile_dir: Option<&'a RelPath>,
         root: bool,
         errors: Vec<crate::error::Error>,
     }
@@ -544,7 +599,7 @@ mod eval {
         }
 
         pub fn unit_dir(&self) -> &UnitPath {
-            &self.dir
+            self.dir.as_ref().expect("Not in unit context")
         }
 
         pub fn home_dir(&self) -> Result<&Path, common::rel_path::HomeError> {
@@ -552,7 +607,7 @@ mod eval {
         }
 
         pub fn dotfile_dir(&self) -> &RelPath {
-            self.dotfile_dir
+            self.dotfile_dir.expect("Not in unit context")
         }
 
         pub fn emit<E: Into<crate::error::Error>>(&mut self, error: E) {
@@ -575,6 +630,63 @@ mod eval {
             }
         }
 
+        pub fn eval_config(
+            &self,
+            src: &str,
+            home_dir: Result<&Path, common::rel_path::HomeError>,
+        ) -> (Config, Vec<Error>) {
+            let mut ctx = Ctx {
+                members: Vec::new(),
+                dir: None,
+                home_dir,
+                dotfile_dir: None,
+                root: false,
+                errors: Vec::new(),
+            };
+            let env = &HashMap::new();
+
+            let (blocks, errors) = self.parser.parse(src);
+            for err in errors {
+                ctx.emit(err);
+            }
+
+            let mut dotfiles = None;
+            let mut shell = None;
+
+            for block in blocks {
+                let block = block.inner;
+                let ident = block.ident;
+                let args = Args::from_item(&ident, block.params, &env);
+                match ident.inner.0.as_str() {
+                    "config" => {
+                        let _ = NoParams::recover_default(args, &mut ctx);
+                        match block.body.inner {
+                            Body::Map(body) => {
+                                let body =
+                                    Args::from_exprs(Spanned::new(body, block.body.span), &env);
+                                let config = Config::recover_default(body, &mut ctx);
+
+                                dotfiles = config.value.dotfiles;
+                                shell = config.value.shell;
+                            }
+                            other => ctx.emit(StructureError::WrongType {
+                                span: block.body.span,
+                                found: BlockType::from(other),
+                                expected: BlockType::Map,
+                            }),
+                        }
+                    }
+                    _ => ctx.emit(StructureError::UnexpectedBlock {
+                        span: ident.span,
+                        found: ident.inner,
+                        expected: vec!["config"],
+                    }),
+                }
+            }
+
+            (Config { dotfiles, shell }, ctx.errors)
+        }
+
         pub fn eval(
             &self,
             src: &str,
@@ -587,9 +699,9 @@ mod eval {
         ) -> UnitData {
             let mut ctx = Ctx {
                 members: Vec::new(),
-                dir: path,
+                dir: Some(path),
                 home_dir,
-                dotfile_dir,
+                dotfile_dir: Some(dotfile_dir),
                 root,
                 errors: Vec::new(),
             };
@@ -617,7 +729,14 @@ mod eval {
                 let name = match Name::from_ident(&ident.inner) {
                     Some(name) => name,
                     None => {
-                        ctx.emit(StructureError::UnexpectedBlock(ident.span, ident.inner));
+                        ctx.emit(StructureError::UnexpectedBlock {
+                            span: ident.span,
+                            found: ident.inner,
+                            expected: vec![
+                                "unit", "env", "packages", "files", "deploy", "remove", "capture",
+                            ],
+                        });
+
                         continue;
                     }
                 };
@@ -630,36 +749,33 @@ mod eval {
                     _ => (),
                 }
 
-                match block.body.inner {
-                    parser::Body::Map(body) => match name {
-                        Name::Unit => {
-                            let _ = NoParams::recover_default(args, &mut ctx);
-                            let body = Args::from_exprs(Spanned::new(body, block.body.span), &env);
-                            let header = UnitHeader::recover_default(body, &mut ctx).value;
-                            unit_name = header.name;
-                            desc = header.desc;
-                            topic = header.topic;
-                            shell = header.shell;
-                            members = header.members;
-                            if let Some(members) = members.as_ref() {
-                                ctx.members = members.clone();
-                            }
+                match (name, block.body.inner) {
+                    (Name::Unit, Body::Map(body)) => {
+                        let _ = NoParams::recover_default(args, &mut ctx);
+                        let body = Args::from_exprs(Spanned::new(body, block.body.span), &env);
+                        let header = UnitHeader::recover_default(body, &mut ctx).value;
+                        unit_name = header.name;
+                        desc = header.desc;
+                        topic = header.topic;
+                        shell = header.shell;
+                        members = header.members;
+                        if let Some(members) = members.as_ref() {
+                            ctx.members = members.clone();
                         }
-                        Name::Env => {
-                            let _ = NoParams::recover_default(args, &mut ctx);
-                            for arg in body {
-                                let name = arg.inner.name.inner;
-                                let val = arg.inner.val.map(|val| Value::from_expr(val, &env));
+                    }
+                    (Name::Env, Body::Map(body)) => {
+                        let _ = NoParams::recover_default(args, &mut ctx);
+                        for arg in body {
+                            let name = arg.inner.name.inner;
+                            let val = arg.inner.val.map(|val| Value::from_expr(val, &env));
 
-                                if let Value::Error(err) = &val.inner {
-                                    ctx.emit(Spanned::new(err.clone(), val.span));
-                                }
-                                env.insert(name, val);
+                            if let Value::Error(err) = &val.inner {
+                                ctx.emit(Spanned::new(err.clone(), val.span));
                             }
+                            env.insert(name, val);
                         }
-                        _ => panic!("Map block has invalid name"),
-                    },
-                    parser::Body::List(items) => {
+                    }
+                    (Name::Files | Name::Packages, Body::List(items)) => {
                         let packages = Packages::from_exprs(
                             Spanned::new(items, block.body.span),
                             &env,
@@ -668,13 +784,13 @@ mod eval {
                         let res = match name {
                             Name::Files => manager.new_files(ident.span, args, packages, &mut ctx),
                             Name::Packages => manager.new_transaction(args, packages, &mut ctx),
-                            _ => panic!("Item block has invalid name"),
+                            _ => unreachable!(),
                         };
-                        if let Ok(t) = res {
-                            transactions.push(t)
+                        if let Ok(trans) = res {
+                            transactions.push(trans)
                         }
                     }
-                    parser::Body::Code(code) => {
+                    (Name::Deploy | Name::Remove | Name::Capture, Body::Code(code)) => {
                         let params = RoutineParams::recover_default(args, &mut ctx).value;
                         let routine = RoutineFigment {
                             shell: params.shell,
@@ -687,9 +803,22 @@ mod eval {
                             Name::Deploy => deploy = Some(routine),
                             Name::Remove => remove = Some(routine),
                             Name::Capture => capture = Some(routine),
-                            _ => panic!("Routine block has invalid name"),
+                            _ => unreachable!(),
                         }
                     }
+                    (name, other) => ctx.emit(StructureError::WrongType {
+                        span: block.body.span,
+                        found: BlockType::from(other),
+                        expected: match name {
+                            Name::Unit => BlockType::Map,
+                            Name::Env => BlockType::Map,
+                            Name::Files => BlockType::List,
+                            Name::Packages => BlockType::List,
+                            Name::Deploy => BlockType::Code,
+                            Name::Remove => BlockType::Code,
+                            Name::Capture => BlockType::Code,
+                        },
+                    }),
                 }
             }
 

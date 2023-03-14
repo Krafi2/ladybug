@@ -1,6 +1,5 @@
 mod commands;
 mod context;
-mod serde;
 mod shell;
 mod unit;
 

@@ -1,37 +1,51 @@
 use color_eyre::eyre::{eyre, ContextCompat, Result, WrapErr};
 use common::rel_path::{HomeError, RelPath};
+use interpreter::Interpreter;
 use std::path::{Path, PathBuf};
 
 use crate::shell::Shell;
 
-#[derive(serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Config {
-    dotfiles: Option<PathBuf>,
-    shell: Option<Shell>,
-}
-
-impl Config {
-    fn new(conf_file: &Path) -> Result<Self> {
-        let config = std::fs::read_to_string(conf_file).wrap_err("Failed to read file")?;
-        toml::from_str(&config).wrap_err("Failed to deserialize config")
-    }
-}
-
-#[derive(Debug)]
 pub struct Context {
     dotfile_dir: RelPath,
     home_dir: Result<PathBuf, HomeError>,
     shell: Shell,
     root: bool,
+    interpreter: Interpreter,
+}
+
+impl std::fmt::Debug for Context {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Context")
+            .field("dotfile_dir", &self.dotfile_dir)
+            .field("home_dir", &self.home_dir)
+            .field("shell", &self.shell)
+            .field("root", &self.root)
+            .finish_non_exhaustive()
+    }
 }
 
 impl Context {
-    pub fn new(config: RelPath, dotfiles: Option<RelPath>) -> Result<Self> {
-        // let home_dir = directories_next::UserDirs::new().map(|dirs| dirs.home_dir().to_owned());
+    pub fn new(config_path: RelPath, dotfiles: Option<RelPath>) -> Result<Self> {
+        let home_dir = home_dir();
+        let interpreter = Interpreter::new();
 
-        let config = Config::new(&config)
-            .wrap_err_with(|| format!("Failed to load config from file '{}'", config.display()))?;
+        let config_src = std::fs::read_to_string(&config_path)
+            .wrap_err_with(|| format!("Failed to read config from file '{}'", config_path))?;
+        let (config, errors) =
+            interpreter.eval_config(&config_src, home_dir.as_deref().map_err(Clone::clone));
+
+        let errn = errors.len();
+        for err in errors {
+            let filename = &config_path.to_string();
+            let report = err.into_report(&filename);
+            let res = report
+                .eprint::<(&str, ariadne::Source)>((&filename, ariadne::Source::from(&config_src)))
+                .wrap_err("Failed to print message");
+            tracing::warn!("{res:?}");
+        }
+        if errn > 0 {
+            color_eyre::eyre::bail!("Failed to load config due to {errn} previous errors");
+        }
 
         let dotfiles = dotfiles
             .ok_or(())
@@ -39,18 +53,15 @@ impl Context {
                 config
                     .dotfiles
                     .ok_or_else(|| eyre!("No dotfile direcory set in config"))
-                    .and_then(|path| {
-                        RelPath::new(path, home_dir())
-                            .wrap_err("Failed to expand dotfile directory path set in config file")
-                    })
             })
             .or_else(|_| default_dotfile_dir())?;
 
         Ok(Self {
             dotfile_dir: dotfiles,
-            home_dir: home_dir(),
-            shell: config.shell.unwrap_or_else(default_shell),
+            home_dir,
+            shell: config.shell.map(From::from).unwrap_or_else(default_shell),
             root: detect_root(),
+            interpreter,
         })
     }
 
@@ -72,6 +83,10 @@ impl Context {
             .map(PathBuf::as_path)
             .map_err(Clone::clone)
     }
+
+    pub fn interpreter(&self) -> &Interpreter {
+        &self.interpreter
+    }
 }
 
 pub fn detect_root() -> bool {
@@ -86,7 +101,7 @@ pub fn home_dir() -> Result<PathBuf, common::rel_path::HomeError> {
 
 pub fn default_config_path() -> Result<PathBuf> {
     project_dirs()
-        .map(|dirs| dirs.config_dir().join("ladybug.toml"))
+        .map(|dirs| dirs.config_dir().join("config.ldbg"))
         .wrap_err("No config directory found")
 }
 

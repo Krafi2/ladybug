@@ -93,6 +93,11 @@ impl Error {
                         "\n" => "\\n".into(),
                         "\r" => "\\r".into(),
                         "\t" => "\\t".into(),
+                        "\x0B" => "\\x0B".into(),
+                        "\x0C" => "\\x0C".into(),
+                        "\u{0085}" => "\\u{0085}".into(),
+                        "\u{2028}" => "\\u{2028}".into(),
+                        "\u{2029}" => "\\u{2029}".into(),
                         _ => s,
                     }
                 }
@@ -182,11 +187,10 @@ impl Error {
                             some_or_end(&err.found(), "token"),
                             match err.expected().len() {
                                 0 => "something else".to_string(),
-                                1 => format!("'{}'", token_or_end(&err.expected().next().unwrap())),
                                 _ => format!(
                                     "one of {}",
                                     err.expected()
-                                        .map(|t| format!("'{}'", token_or_end(t)))
+                                        .map(|t| format!("'{}'", token_or_end(&t)))
                                         .collect::<Vec<_>>()
                                         .join(", ")
                                 ),
