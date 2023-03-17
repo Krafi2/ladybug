@@ -165,22 +165,38 @@ impl Manager {
         packages: Packages,
         context: &mut Ctx,
     ) -> Result<Transaction, ()> {
-        let mut args_iter = args.args.iter();
-        let provider = loop {
-            match args_iter.next() {
-                Some(arg) => {
-                    if arg.name.0 == "provider" {
-                        break &arg.value;
-                    }
+        let args_span = args.span;
+        let accurate_span = args.accurate_span;
+        let mut provider = None;
+
+        // Find the provider and remove the `provider` argument
+        let args = args
+            .args
+            .into_iter()
+            .filter_map(|arg| {
+                if arg.name.0 == "provider" {
+                    provider = Some(arg.value);
+                    None
+                } else {
+                    Some(arg)
                 }
-                None => {
-                    context.emit(TransactionError::Param(ParamError::NotFound {
-                        span: args.span,
-                        name: "provider",
-                        has_args: args.accurate_span,
-                    }));
-                    return Err(());
-                }
+            })
+            .collect();
+        let args = Args {
+            args,
+            span: args_span,
+            accurate_span,
+        };
+
+        let provider = match provider {
+            Some(provider) => provider,
+            None => {
+                context.emit(TransactionError::Param(ParamError::NotFound {
+                    span: args_span,
+                    name: "provider",
+                    has_args: accurate_span,
+                }));
+                return Err(());
             }
         };
 
