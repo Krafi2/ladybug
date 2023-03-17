@@ -15,17 +15,19 @@ pub struct Unit {
     pub topic: Option<String>,
     pub shell: Option<Shell>,
     pub transactions: Vec<Transaction>,
-    pub deploy: Option<Routine>,
-    pub remove: Option<Routine>,
-    pub capture: Option<Routine>,
+    pub deploy: Vec<Routine>,
+    pub remove: Vec<Routine>,
+    pub capture: Vec<Routine>,
 }
 
 impl Unit {
     fn from_figment(figment: interpreter::UnitFigment) -> Option<Self> {
         let [deploy, remove, capture] =
-            [figment.deploy, figment.remove, figment.capture].map(|figment| match figment {
-                Some(figment) => Routine::from_figment(figment).map(Some),
-                None => Some(None),
+            [figment.deploy, figment.remove, figment.capture].map(|figments| {
+                figments
+                    .into_iter()
+                    .map(Routine::from_figment)
+                    .collect::<Option<Vec<_>>>()
             });
 
         Some(Self {

@@ -1,4 +1,4 @@
-use color_eyre::eyre::{eyre, ContextCompat, Result, WrapErr};
+use color_eyre::eyre::{bail, eyre, ContextCompat, Result, WrapErr};
 use common::rel_path::{HomeError, RelPath};
 use interpreter::Interpreter;
 use std::path::{Path, PathBuf};
@@ -43,8 +43,11 @@ impl Context {
                 .wrap_err("Failed to print message");
             tracing::warn!("{res:?}");
         }
-        if errn > 0 {
-            color_eyre::eyre::bail!("Failed to load config due to {errn} previous errors");
+
+        if errn == 1 {
+            bail!("Failed to load config due to previous error");
+        } else if errn > 1 {
+            bail!("Failed to load config due to {errn} previous errors")
         }
 
         let dotfiles = dotfiles

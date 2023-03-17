@@ -565,9 +565,9 @@ mod eval {
         pub shell: Option<Command>,
 
         pub transactions: Vec<Transaction>,
-        pub deploy: Option<RoutineFigment>,
-        pub remove: Option<RoutineFigment>,
-        pub capture: Option<RoutineFigment>,
+        pub deploy: Vec<RoutineFigment>,
+        pub remove: Vec<RoutineFigment>,
+        pub capture: Vec<RoutineFigment>,
     }
 
     pub struct UnitData {
@@ -718,9 +718,9 @@ mod eval {
             let mut members = None;
 
             let mut transactions = Vec::new();
-            let mut deploy = None;
-            let mut remove = None;
-            let mut capture = None;
+            let mut deploy = Vec::new();
+            let mut remove = Vec::new();
+            let mut capture = Vec::new();
 
             for (i, block) in blocks.into_iter().enumerate() {
                 let block = block.inner;
@@ -799,10 +799,9 @@ mod eval {
                             body: code,
                         };
                         match name {
-                            // TODO: make it an error to have multiple routine blocks of the same name
-                            Name::Deploy => deploy = Some(routine),
-                            Name::Remove => remove = Some(routine),
-                            Name::Capture => capture = Some(routine),
+                            Name::Deploy => deploy.push(routine),
+                            Name::Remove => remove.push(routine),
+                            Name::Capture => capture.push(routine),
                             _ => unreachable!(),
                         }
                     }
