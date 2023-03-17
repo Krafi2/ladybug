@@ -1,13 +1,17 @@
+use std::{
+    io::{BufReader, Write},
+    process::{ChildStdin, ChildStdout, Stdio},
+};
+
+use ariadne::{Color, Fmt, ReportKind};
+use color_eyre::eyre::{eyre, WrapErr};
+use quick_xml::events::Event;
+use quick_xml::reader::Reader as XmlReader;
+
 use super::ProviderError;
 use crate::{
     structures::{FromArgs, RecoverFromArgs},
     Ctx, Span,
-};
-use ariadne::{Color, Fmt, ReportKind};
-use color_eyre::eyre::WrapErr;
-use std::{
-    io::{Read, Write},
-    process::Stdio,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -41,10 +45,16 @@ report! {
         }
         Error::Eyre(err, span) => {
             report(ReportKind::Error, span.start);
-            message("Encountered an error");
+            message("Encountered an error while proccessing package");
             label(span, Color::Red, "{err}");
         }
     }
+}
+
+#[derive(PartialEq)]
+enum Operation {
+    Install,
+    Remove,
 }
 
 /// The zypper provider spawns a persistent zypper process using `zypper shell` and uses stdio to
@@ -52,47 +62,72 @@ report! {
 pub struct Provider {
     /// The zypper process
     zypper: std::process::Child,
+    stdin: ChildStdin,
+    reader: XmlReader<BufReader<ChildStdout>>,
+    buf: Vec<u8>,
 }
 
 impl Provider {
     /// Get the subprocess' stdin handle
-    fn stdin(&mut self) -> &mut std::process::ChildStdin {
-        self.zypper
-            .stdin
-            .as_mut()
-            .expect("Expected a valid stdin handle")
+    fn stdin(&mut self) -> &mut ChildStdin {
+        &mut self.stdin
     }
 
-    /// Get the subprocess' stdout handle
-    fn stdout(&mut self) -> &mut std::process::ChildStdout {
-        self.zypper
-            .stdout
-            .as_mut()
-            .expect("Expected a valid stout handle")
-    }
-
-    /// Get the subprocess' stderr handle
-    fn stderr(&mut self) -> &mut std::process::ChildStderr {
-        self.zypper
-            .stderr
-            .as_mut()
-            .expect("Expected a valid stderr handle")
+    fn read_event<'a>(&'a mut self) -> quick_xml::Result<Event<'a>> {
+        self.reader.read_event_into(&mut self.buf)
     }
 
     /// Check if the package named 'package' exists
     fn exists(&mut self, package: &str) -> color_eyre::Result<bool> {
-        writeln!(self.stdin(), "info {}", &package).wrap_err("Failed to write stdin")?;
-        let mut buf = Vec::new();
-        self.stdout()
-            .read_to_end(&mut buf)
-            .wrap_err("Failed to read stdout")?;
+        writeln!(self.stdin(), "search --match-exact {}", &package)
+            .wrap_err("Failed to write zypper stdin")?;
+        let mut found = None;
+        let mut level = 0;
+        let mut handle_error = false;
+        let mut error = None;
 
-        // This is what zypper says when it can't find the package
-        let unfound = contains_bytes(
-            &buf,
-            format!("package '{}' not found.", &package).as_bytes(),
-        );
-        Ok(!unfound)
+        loop {
+            let event = self.read_event();
+            match event {
+                Ok(Event::Start(tag)) => {
+                    if tag.local_name().as_ref() == b"message" {
+                        let ty = tag.attributes().next().unwrap()?;
+                        assert_eq!(ty.key.local_name().as_ref(), b"type");
+                        // Handle error message
+                        if ty.value.as_ref() == b"error" {
+                            handle_error = true;
+                        }
+                    }
+                    level += 1;
+                }
+                Ok(Event::Empty(tag)) => {
+                    // This means that we got a search result
+                    if tag.local_name().as_ref() == b"solvable" {
+                        found = Some(true);
+                    }
+                }
+                Ok(Event::End(_)) => level -= 1,
+                Ok(Event::Text(message)) => {
+                    let message = message.unescape().unwrap();
+                    let message = message.trim();
+                    if handle_error {
+                        error = Some(message.to_owned());
+                    } else if message == "No matching items found." {
+                        found = Some(false);
+                    }
+                }
+                Err(e) => return Err(e).wrap_err("Failed to parse xml"),
+                _ => (),
+            }
+            if level == 0 {
+                if let Some(error) = error {
+                    return Err(eyre!(error));
+                }
+                if let Some(found) = found {
+                    return Ok(found);
+                }
+            }
+        }
     }
 
     /// See if the subprocess exited unexpectedly
@@ -104,7 +139,11 @@ impl Provider {
         }
     }
 
-    fn zypper_cmd(&mut self, cmd: &str, transaction: &Payload) -> color_eyre::Result<()> {
+    fn send_command(
+        &mut self,
+        transaction: &Payload,
+        op: Operation,
+    ) -> Result<(), color_eyre::Report> {
         let from = if let Some(from) = &transaction.from {
             from.iter()
                 .map(String::as_str)
@@ -113,7 +152,6 @@ impl Provider {
         } else {
             "".to_owned()
         };
-
         let packages = transaction
             .packages
             .iter()
@@ -122,25 +160,90 @@ impl Provider {
                 state.push_str(&package.name);
                 state
             });
-
+        let cmd = match op {
+            Operation::Install => "install",
+            Operation::Remove => "remove",
+        };
         writeln!(self.stdin(), "{}{} {}", cmd, from, packages)
             .wrap_err("Failed to write to stdout")?;
 
-        let mut buf = Vec::new();
-        self.stderr()
-            .read_to_end(&mut buf)
-            .wrap_err("Failed to read stderr")?;
+        let mut handle_error = false;
+        let mut level = 0;
+        let mut error = None;
+        let mut finished = false;
 
-        // Check if the proccess printed anything to `stderr`. I'm not sure if this will work in
-        // all cases but let's give it a try.
-        if !buf.is_empty() {
-            return Err(color_eyre::eyre::eyre!(
-                String::from_utf8_lossy(&buf).into_owned()
-            ));
+        loop {
+            let event = self.read_event();
+            match event {
+                Ok(Event::Start(tag)) => {
+                    if tag.local_name().as_ref() == b"message" {
+                        let ty = tag.attributes().next().unwrap()?;
+                        assert_eq!(ty.key.local_name().as_ref(), b"type");
+                        if ty.value.as_ref() == b"error" {
+                            handle_error = true;
+                        }
+                    }
+                    level += 1;
+                }
+                Ok(Event::Empty(tag)) => {
+                    let mut attributes = tag.attributes();
+                    if tag.local_name().as_ref() == b"progress" {
+                        let id = attributes.next().unwrap()?;
+                        let name = attributes.next().unwrap()?;
+                        assert_eq!(id.key.local_name().as_ref(), b"id");
+                        assert_eq!(name.key.local_name().as_ref(), b"name");
+
+                        if id.value.as_ref() == b"install-resolvable"
+                            || id.value.as_ref() == b"remove-resolvable"
+                        {
+                            if let Some(done) = attributes.next().transpose()? {
+                                if done.key.local_name().as_ref() == b"done" {
+                                    // Print what has been installed
+                                    let name = String::from_utf8_lossy(&name.value);
+                                    tracing::debug!("zypper: {}", name);
+
+                                    // The name is in the format "(n/n) blabla"
+                                    // The transaction is complete if the numbers in the parantheses match
+                                    let (s, _) =
+                                        name.strip_prefix('(').unwrap().split_once(')').unwrap();
+                                    let (left, right) = s.split_once('/').unwrap();
+                                    if left == right {
+                                        finished = true;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                Ok(Event::End(_)) => level -= 1,
+                Ok(Event::Text(message)) => {
+                    let message = message.unescape().unwrap();
+                    let message = message.trim();
+                    if handle_error {
+                        if op == Operation::Remove
+                            && message.starts_with("No provider of ")
+                            && message.ends_with(" found.")
+                        {
+                            // Ignore errors related to unknown packages when removing
+                            ()
+                        } else {
+                            error = Some(message.to_owned());
+                        }
+                        handle_error = false;
+                    }
+                }
+                Err(e) => return Err(e).wrap_err("Failed to parse xml"),
+                _ => (),
+            }
+            if level == 0 {
+                if let Some(error) = error {
+                    return Err(eyre!(error));
+                }
+                if finished {
+                    return Ok(());
+                }
+            }
         }
-
-        self.check_health()
-            .map_err(|err| color_eyre::eyre::eyre!(err))
     }
 }
 
@@ -163,15 +266,41 @@ impl super::ConstructProvider for Provider {
         }
 
         // Try to spawn the zypper subprocess
-        let zypper = std::process::Command::new("zypper")
+        let mut zypper = std::process::Command::new("zypper")
+            .arg("--xmlout") // Enable XML output
+            .arg("--non-interactive") // Don't ask for confirmation
             .arg("shell")
-            .stdin(Stdio::null())
+            .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
             .map_err(|e| ProviderError::Unavailable(std::rc::Rc::new(ProcessError::Spawn(e))))?;
 
-        let mut new = Self { zypper };
+        let reader = BufReader::new(zypper.stdout.take().unwrap());
+        let reader = XmlReader::from_reader(reader);
+        let stdin = zypper.stdin.take().unwrap();
+        let buf = Vec::new();
+
+        let mut new = Self {
+            zypper,
+            stdin,
+            reader,
+            buf,
+        };
+
+        // Pop the initialization events
+        loop {
+            match new.read_event() {
+                Ok(Event::Start(tag)) => {
+                    if tag.local_name().as_ref() == b"stream" {
+                        break;
+                    }
+                }
+                // Let's hope that any errors here aren't fatal
+                _ => (),
+            }
+        }
+
         // See if the subprocess exited unexpectedly
         match new.check_health() {
             Ok(_) => Ok(new),
@@ -241,7 +370,13 @@ impl super::Provider for Provider {
     }
 
     fn install(&mut self, transaction: &Self::Transaction) -> (super::OpResult, Self::State) {
-        (self.zypper_cmd("install", transaction), ())
+        let res = self
+            .send_command(transaction, Operation::Install)
+            .and_then(|_| {
+                self.check_health()
+                    .wrap_err("Zypper process exited unexpectedly")
+            });
+        (res, ())
     }
 
     fn remove(
@@ -249,25 +384,10 @@ impl super::Provider for Provider {
         transaction: &Self::Transaction,
         _state: Option<Self::State>,
     ) -> super::OpResult {
-        // TODO: ignore errors when trying to remove a package that isnt installed
-        self.zypper_cmd("remove", transaction)
+        self.send_command(transaction, Operation::Remove)
+            .and_then(|_| {
+                self.check_health()
+                    .wrap_err("Zypper process exited unexpectedly")
+            })
     }
-}
-
-/// Search for a string of bytes in a haystack
-fn contains_bytes(haystack: &[u8], pattern: &[u8]) -> bool {
-    let mut n = 0;
-    for byte in haystack.iter() {
-        let pat = match pattern.get(n) {
-            Some(pat) => pat,
-            None => return true,
-        };
-
-        if byte == pat {
-            n += 1;
-        } else {
-            n = 0;
-        }
-    }
-    false
 }

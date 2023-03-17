@@ -274,6 +274,7 @@ dependencies = [
  "color-eyre",
  "common",
  "parser",
+ "quick-xml",
  "tempfile",
  "thiserror",
  "tracing",
@@ -469,6 +470,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5787f7cda34e3033a72192c018bc5883100330f362ef279a8cbccfce8bb4e874"
 dependencies = [
  "cc",
+]
+
+[[package]]
+name = "quick-xml"
+version = "0.28.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7a306703b4ad75d304a1bbc17d91d4399993caa163ad5028ffb044e5152ffcdd"
+dependencies = [
+ "memchr",
 ]
 
 [[package]]

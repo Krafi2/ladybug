@@ -12,6 +12,7 @@ color-eyre = "0.6.2"
 ariadne = "0.2.0"
 thiserror = "1.0.39"
 tracing = "0.1.37"
+quick-xml = "0.28.0"
 
 [dev-dependencies]
 tempfile = "3.4.0"
