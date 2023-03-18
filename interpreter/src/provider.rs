@@ -97,6 +97,7 @@ struct InvalidProvider {
 
 type DynProvider = dyn Provider<Transaction = Box<dyn Any>, State = Box<dyn Any>>;
 
+/// This struct initializes and holds providers
 pub struct Manager {
     cache: HashMap<ProviderId, Result<Box<DynProvider>, ProviderError>>,
 }
@@ -265,12 +266,12 @@ impl Manager {
         })
     }
 
-    pub fn install(&mut self, transaction: &Transaction) -> (OpResult, State) {
+    pub fn install(&mut self, transaction: &Transaction, ctx: ExecutionCtx) -> (OpResult, State) {
         let (res, state) = self
             .try_get_provider(transaction.provider)
             .expect("Unitialized provider")
             .expect("Provider not available")
-            .install(&transaction.payload);
+            .install(&transaction.payload, ctx);
         (
             res,
             State {
@@ -280,7 +281,12 @@ impl Manager {
         )
     }
 
-    pub fn remove(&mut self, transaction: &Transaction, state: Option<State>) -> OpResult {
+    pub fn remove(
+        &mut self,
+        transaction: &Transaction,
+        state: Option<State>,
+        ctx: ExecutionCtx,
+    ) -> OpResult {
         if let Some(state) = &state {
             assert_eq!(transaction.provider, state.provider);
         }
@@ -288,7 +294,7 @@ impl Manager {
         self.try_get_provider(transaction.provider)
             .expect("Unitialized provider")
             .expect("Provider not available")
-            .remove(&transaction.payload, state.map(|s| s.payload))
+            .remove(&transaction.payload, state.map(|s| s.payload), ctx)
     }
 }
 
@@ -318,6 +324,22 @@ impl std::fmt::Debug for State {
     }
 }
 
+/// The provider context wraps the interpreter context with additional features
+/// realted to the exucution of transactions
+pub struct ExecutionCtx<'a> {
+    set_msg: Box<dyn FnMut(&str) + 'a>,
+}
+
+impl<'a> ExecutionCtx<'a> {
+    pub fn new(set_msg: Box<dyn FnMut(&str) + 'a>) -> Self {
+        Self { set_msg }
+    }
+
+    fn set_message(&mut self, msg: &str) {
+        (self.set_msg)(msg)
+    }
+}
+
 pub type OpResult = color_eyre::Result<()>;
 
 trait ConstructProvider: Sized + Provider {
@@ -338,10 +360,19 @@ trait Provider {
     ) -> Result<Self::Transaction, ()>;
 
     /// Install a collection of packages.
-    fn install(&mut self, transaction: &Self::Transaction) -> (OpResult, Self::State);
+    fn install(
+        &mut self,
+        transaction: &Self::Transaction,
+        ctx: ExecutionCtx,
+    ) -> (OpResult, Self::State);
 
     /// Remove a collection of packages from the system.
-    fn remove(&mut self, transaction: &Self::Transaction, state: Option<Self::State>) -> OpResult;
+    fn remove(
+        &mut self,
+        transaction: &Self::Transaction,
+        state: Option<Self::State>,
+        ctx: ExecutionCtx,
+    ) -> OpResult;
 }
 
 struct ProviderAdapter<P>(P);
@@ -364,19 +395,30 @@ where
         P::new_transaction(&mut self.0, args, packages, ctx).map(|t| Box::new(t) as Box<dyn Any>)
     }
 
-    fn install(&mut self, transaction: &Self::Transaction) -> (OpResult, Self::State) {
+    fn install(
+        &mut self,
+        transaction: &Self::Transaction,
+        ctx: ExecutionCtx,
+    ) -> (OpResult, Self::State) {
         let (res, state) = P::install(
             &mut self.0,
             transaction.downcast_ref::<P::Transaction>().unwrap(),
+            ctx,
         );
         (res, Box::new(state))
     }
 
-    fn remove(&mut self, transaction: &Self::Transaction, state: Option<Self::State>) -> OpResult {
+    fn remove(
+        &mut self,
+        transaction: &Self::Transaction,
+        state: Option<Self::State>,
+        ctx: ExecutionCtx,
+    ) -> OpResult {
         P::remove(
             &mut self.0,
             transaction.downcast_ref::<P::Transaction>().unwrap(),
             state.map(|res| *res.downcast::<P::State>().unwrap()),
+            ctx,
         )
     }
 }

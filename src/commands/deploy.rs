@@ -2,7 +2,11 @@ use color_eyre::{
     eyre::WrapErr,
     owo_colors::{OwoColorize, Style},
 };
-use interpreter::{provider::Manager, UnitPath};
+use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
+use interpreter::{
+    provider::{ExecutionCtx, Manager},
+    UnitPath,
+};
 use std::{
     collections::{HashMap, HashSet},
     io::Write,
@@ -74,13 +78,14 @@ impl Deploy {
         let root = loader.root();
         let mut modules = HashMap::new();
 
+        println!("Loading units:");
         let mut errn = load_modules(loader, &mut modules);
         let parse_failed = errn != 0;
 
         // Continue if there were no errors
         if errn == 0 {
             println!("Deploying units:");
-            let mut deployed = self.deploy_modules(root, &mut modules, &mut manager, context);
+            let deployed = self.deploy_modules(root, &mut modules, &mut manager, context);
             errn += deployed
                 .iter()
                 .map(|(_, _, is_err)| *is_err as usize)
@@ -94,12 +99,12 @@ impl Deploy {
                         (is_err || self.revert_all).then_some((id, states))
                     })
                     .collect();
-                println!("");
-                println!("Encountered an error, reverting changes:");
+                println!("\n\nEncountered an error, reverting changes:");
                 errn += remove_modules(to_remove, &modules, &mut manager, context);
             }
         }
 
+        println!("");
         failure_message(errn, parse_failed);
 
         // Print status of units
@@ -142,21 +147,24 @@ impl Deploy {
 
         for (i, id) in queue.into_iter().enumerate() {
             let module = modules.get_mut(&id).unwrap();
-            print!("[{}/{}] Deploying unit {}:", i + 1, queue_len, &module.path);
-            // Manually flush stdout to make sure that the user sees the message
-            flush_stdout();
+
+            let style = pb_style(&module.path);
+            let pb = ProgressBar::with_draw_target(None, ProgressDrawTarget::stdout());
+            pb.set_style(style);
+            pb.set_prefix(format!("[{}/{}]", i + 1, queue_len));
+            pb.set_message("Starting deployment");
 
             if self.dry_run {
-                println!(" Skipped");
+                pb.finish_with_message("Skipped".bright_black().to_string());
             } else {
-                let (res, states) = deploy_unit(module, manager, context);
+                let (res, states) = deploy_unit(module, &pb, manager, context);
                 let is_err = res.is_err();
                 deployed.push((id, states, is_err));
                 if let Err(err) = res {
-                    println!(" Error");
-                    eprintln!("Error:{err:?}");
+                    pb.finish_with_message("Error".red().to_string());
+                    print_error(err);
                 } else {
-                    println!(" Done");
+                    pb.finish_with_message("Done".bright_green().to_string());
                 }
                 if is_err && self.exit_early {
                     break;
@@ -167,10 +175,18 @@ impl Deploy {
     }
 }
 
-fn flush_stdout() {
-    if let Err(err) = std::io::stdout().flush() {
-        tracing::warn!(?err)
-    }
+fn print_error(err: color_eyre::Report) {
+    let msg = format!("Caused by:{err:?}");
+    // color-eyre indents using 3 spaces
+    let msg = indent::indent_all_by(3, msg);
+    eprintln!("{msg}");
+}
+
+fn pb_style(path: &UnitPath) -> ProgressStyle {
+    let style =
+        ProgressStyle::with_template(&format!("{{prefix:.bright.black}} {}: {{wide_msg}}", path))
+            .unwrap();
+    style
 }
 
 /// Filter modules based on the requested topics
@@ -266,13 +282,21 @@ fn remove_modules(
 ) -> usize {
     let mut errn = 0;
     let len = deployed.len();
+
     for (i, (id, states)) in deployed.into_iter().enumerate() {
         let module = modules.get(&id).unwrap();
-        print!("[{}/{}] Removing unit {}:", i + 1, len, module.path);
-        flush_stdout();
-        let errors = remove_unit(module, states, manager, context);
+
+        let style = pb_style(&module.path);
+        let pb = ProgressBar::with_draw_target(None, ProgressDrawTarget::stdout());
+        pb.set_style(style);
+        pb.set_prefix(format!("[{}/{}]", i + 1, len));
+        pb.set_message("Starting removal");
+
+        let errors = remove_unit(module, states, &pb, manager, context);
         if errors == 0 {
-            println!(" Done")
+            pb.finish_with_message("Done".bright_green().to_string());
+        } else {
+            pb.finish_with_message("Error".red().to_string());
         }
         errn += errors;
     }
@@ -332,6 +356,7 @@ fn load_modules(loader: loader::Loader, modules: &mut HashMap<UnitId, Module>) -
 fn remove_unit(
     module: &Module,
     states: Vec<interpreter::provider::State>,
+    pb: &ProgressBar,
     manager: &mut Manager,
     context: &crate::context::Context,
 ) -> usize {
@@ -339,11 +364,9 @@ fn remove_unit(
     let unit = module.unit.as_ref().expect("Unexpected error");
 
     for (transaction, state) in unit.transactions.iter().zip(states) {
-        if let Err(err) = manager.remove(transaction, Some(state)) {
-            if errn == 0 {
-                println!(" Error");
-            }
-            eprintln!("Error:{err:?}");
+        let ctx = ExecutionCtx::new(Box::new(|msg| pb.set_message(msg.to_owned())));
+        if let Err(err) = manager.remove(transaction, Some(state), ctx) {
+            print_error(err);
             errn += 1;
         }
     }
@@ -354,13 +377,7 @@ fn remove_unit(
 
         for hook in &unit.remove {
             if let Err(err) = hook.run(shell, &dir) {
-                if errn == 0 {
-                    println!(" Error");
-                }
-                eprintln!(
-                    "Error:{:?}",
-                    err.into_report().wrap_err("Uninstall hook failed")
-                );
+                print_error(err.into_report().wrap_err("Uninstall hook failed"));
                 errn += 1;
             }
         }
@@ -370,6 +387,7 @@ fn remove_unit(
 
 fn deploy_unit(
     module: &mut Module,
+    pb: &ProgressBar,
     manager: &mut Manager,
     ctx: &crate::context::Context,
 ) -> (
@@ -383,7 +401,8 @@ fn deploy_unit(
         .transactions
         .iter()
         .try_for_each(|transaction| {
-            let (res, state) = manager.install(transaction);
+            let ctx = ExecutionCtx::new(Box::new(|msg| pb.set_message(msg.to_owned())));
+            let (res, state) = manager.install(transaction, ctx);
             states.push(state);
             res
         })

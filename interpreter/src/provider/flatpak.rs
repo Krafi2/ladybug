@@ -2,6 +2,8 @@ use parser::span::AriadneSpan;
 
 use crate::error::IntoReport;
 
+use super::ExecutionCtx;
+
 #[derive(Debug)]
 pub struct Error;
 
@@ -32,7 +34,11 @@ impl super::Provider for Provider {
         todo!()
     }
 
-    fn install(&mut self, _transaction: &Self::Transaction) -> (super::OpResult, Self::State) {
+    fn install(
+        &mut self,
+        _transaction: &Self::Transaction,
+        _ctx: ExecutionCtx,
+    ) -> (super::OpResult, Self::State) {
         todo!()
     }
 
@@ -40,6 +46,7 @@ impl super::Provider for Provider {
         &mut self,
         _transaction: &Self::Transaction,
         _state: Option<Self::State>,
+        _ctx: ExecutionCtx,
     ) -> super::OpResult {
         todo!()
     }

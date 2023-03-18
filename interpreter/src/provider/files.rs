@@ -8,7 +8,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use super::OpResult;
+use super::{ExecutionCtx, OpResult};
 
 #[derive(Debug)]
 pub enum Error {
@@ -238,7 +238,11 @@ impl super::Provider for Provider {
         }
     }
 
-    fn install(&mut self, transaction: &Self::Transaction) -> (OpResult, Self::State) {
+    fn install(
+        &mut self,
+        transaction: &Self::Transaction,
+        mut ctx: ExecutionCtx,
+    ) -> (OpResult, Self::State) {
         let Payload {
             method,
             conflicts,
@@ -254,7 +258,11 @@ impl super::Provider for Provider {
             let source = source.join(&file);
             let dest = target.join(&file);
             match deploy_file(&source, &dest, *method, *conflicts) {
-                Ok(_) => tracing::debug!("Deployed {source} to {dest}"),
+                Ok(_) => {
+                    let msg = &format!("Deployed {source} to {dest}");
+                    tracing::debug!("{}", msg);
+                    ctx.set_message(msg);
+                }
                 Err(err) => {
                     tracing::error!("Failed to deploy {source} to {dest}: {err}");
                     return (Err(err), PayloadRes { deployed: i });
@@ -270,7 +278,12 @@ impl super::Provider for Provider {
         )
     }
 
-    fn remove(&mut self, transaction: &Self::Transaction, res: Option<Self::State>) -> OpResult {
+    fn remove(
+        &mut self,
+        transaction: &Self::Transaction,
+        res: Option<Self::State>,
+        mut ctx: ExecutionCtx,
+    ) -> OpResult {
         let Payload {
             method,
             conflicts: _,
@@ -294,7 +307,9 @@ impl super::Provider for Provider {
             let dest = target.join(&file);
             match remove_file(&source, &dest, *method) {
                 Ok(_) => {
-                    tracing::debug!("Removed {dest}");
+                    let msg = format!("Removed {dest}");
+                    tracing::debug!("{}", msg);
+                    ctx.set_message(&msg);
                 }
                 Err(err) => {
                     tracing::error!("Failed to remove {dest}: {err}");

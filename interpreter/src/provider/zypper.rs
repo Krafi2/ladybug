@@ -8,7 +8,7 @@ use color_eyre::eyre::{eyre, WrapErr};
 use quick_xml::events::Event;
 use quick_xml::reader::Reader as XmlReader;
 
-use super::ProviderError;
+use super::{ExecutionCtx, ProviderError};
 use crate::{
     structures::{FromArgs, RecoverFromArgs},
     Ctx, Span,
@@ -109,9 +109,8 @@ impl Provider {
                 Ok(Event::End(_)) => level -= 1,
                 Ok(Event::Text(message)) => {
                     let message = message.unescape().unwrap();
-                    let message = message.trim();
                     if handle_error {
-                        error = Some(message.to_owned());
+                        error = Some(message.into_owned());
                     } else if message == "No matching items found." {
                         found = Some(false);
                     }
@@ -143,6 +142,7 @@ impl Provider {
         &mut self,
         transaction: &Payload,
         op: Operation,
+        mut ctx: ExecutionCtx,
     ) -> Result<(), color_eyre::Report> {
         let from = if let Some(from) = &transaction.from {
             from.iter()
@@ -200,7 +200,7 @@ impl Provider {
                                 if done.key.local_name().as_ref() == b"done" {
                                     // Print what has been installed
                                     let name = String::from_utf8_lossy(&name.value);
-                                    tracing::debug!("zypper: {}", name);
+                                    ctx.set_message(&name);
 
                                     // The name is in the format "(n/n) blabla"
                                     // The transaction is complete if the numbers in the parantheses match
@@ -218,7 +218,12 @@ impl Provider {
                 Ok(Event::End(_)) => level -= 1,
                 Ok(Event::Text(message)) => {
                     let message = message.unescape().unwrap();
-                    let message = message.trim();
+
+                    // Zypper ends progress messages with '...'
+                    if message.ends_with("...") {
+                        ctx.set_message(&message);
+                    }
+
                     if handle_error {
                         if op == Operation::Remove
                             && message.starts_with("No provider of ")
@@ -227,7 +232,7 @@ impl Provider {
                             // Ignore errors related to unknown packages when removing
                             ()
                         } else {
-                            error = Some(message.to_owned());
+                            error = Some(message.into_owned());
                         }
                         handle_error = false;
                     }
@@ -277,7 +282,8 @@ impl super::ConstructProvider for Provider {
             .map_err(|e| ProviderError::Unavailable(std::rc::Rc::new(ProcessError::Spawn(e))))?;
 
         let reader = BufReader::new(zypper.stdout.take().unwrap());
-        let reader = XmlReader::from_reader(reader);
+        let mut reader = XmlReader::from_reader(reader);
+        reader.trim_text(true);
         let stdin = zypper.stdin.take().unwrap();
         let buf = Vec::new();
 
@@ -369,9 +375,13 @@ impl super::Provider for Provider {
         }
     }
 
-    fn install(&mut self, transaction: &Self::Transaction) -> (super::OpResult, Self::State) {
+    fn install(
+        &mut self,
+        transaction: &Self::Transaction,
+        ctx: ExecutionCtx,
+    ) -> (super::OpResult, Self::State) {
         let res = self
-            .send_command(transaction, Operation::Install)
+            .send_command(transaction, Operation::Install, ctx)
             .and_then(|_| {
                 self.check_health()
                     .wrap_err("Zypper process exited unexpectedly")
@@ -383,8 +393,9 @@ impl super::Provider for Provider {
         &mut self,
         transaction: &Self::Transaction,
         _state: Option<Self::State>,
+        ctx: ExecutionCtx,
     ) -> super::OpResult {
-        self.send_command(transaction, Operation::Remove)
+        self.send_command(transaction, Operation::Remove, ctx)
             .and_then(|_| {
                 self.check_health()
                     .wrap_err("Zypper process exited unexpectedly")
