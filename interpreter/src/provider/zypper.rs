@@ -1,12 +1,14 @@
 use std::{
     io::{BufReader, Write},
     process::{ChildStdin, ChildStdout, Stdio},
+    time::Duration,
 };
 
 use ariadne::{Color, Fmt, ReportKind};
 use color_eyre::eyre::{eyre, WrapErr};
 use quick_xml::events::Event;
 use quick_xml::reader::Reader as XmlReader;
+use timeout_readwrite::TimeoutReader;
 
 use super::{ExecutionCtx, ProviderError};
 use crate::{
@@ -63,7 +65,7 @@ pub struct Provider {
     /// The zypper process
     zypper: std::process::Child,
     stdin: ChildStdin,
-    reader: XmlReader<BufReader<ChildStdout>>,
+    reader: XmlReader<BufReader<TimeoutReader<ChildStdout>>>,
     buf: Vec<u8>,
 }
 
@@ -281,7 +283,8 @@ impl super::ConstructProvider for Provider {
             .spawn()
             .map_err(|e| ProviderError::Unavailable(std::rc::Rc::new(ProcessError::Spawn(e))))?;
 
-        let reader = BufReader::new(zypper.stdout.take().unwrap());
+        let reader = TimeoutReader::new(zypper.stdout.take().unwrap(), Duration::from_secs(10));
+        let reader = BufReader::new(reader);
         let mut reader = XmlReader::from_reader(reader);
         reader.trim_text(true);
         let stdin = zypper.stdin.take().unwrap();
