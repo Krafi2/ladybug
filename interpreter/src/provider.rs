@@ -51,8 +51,8 @@ impl std::fmt::Display for ProviderId {
 #[derive(Clone, Debug, thiserror::Error)]
 pub enum ProviderError {
     // Provider is unavailable
-    #[error("Provider is unavailable: {0}")]
-    Unavailable(std::rc::Rc<dyn std::error::Error>),
+    #[error("{0:#}")]
+    Unavailable(std::rc::Rc<color_eyre::Report>),
     // The provider requires root privileges to function
     #[error("Provider requires root permissions")]
     NeedRoot,
