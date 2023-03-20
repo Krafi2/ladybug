@@ -81,7 +81,7 @@ impl Routine {
             .stdout(stdout)
             .stderr(Stdio::piped());
 
-        common::command::run_command(command).map(|_| ())
+        common::command::run_command(&mut command).map(|_| ())
     }
 }
 
