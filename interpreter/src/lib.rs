@@ -415,7 +415,7 @@ impl UnitPath {
     }
 
     pub fn unit_file(self) -> LocalPath {
-        let file = self.name() + ".unit";
+        let file = self.name() + ".ldbg";
         LocalPath::from(self).join(file)
     }
 
