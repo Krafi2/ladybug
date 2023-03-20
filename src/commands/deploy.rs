@@ -26,9 +26,9 @@ pub struct Deploy {
     /// Run the command without making any changes to the system
     #[clap(long)]
     dry_run: bool,
-    /// Exit immediately upon encountering an error
+    /// Abort immediately upon encountering an error
     #[clap(long)]
-    exit_early: bool,
+    abort_early: bool,
     /// Topics to deploy
     topics: Option<Vec<String>>,
 }
@@ -166,7 +166,7 @@ impl Deploy {
                 } else {
                     pb.finish_with_message("Done".bright_green().to_string());
                 }
-                if is_err && self.exit_early {
+                if is_err && self.abort_early {
                     break;
                 }
             }
