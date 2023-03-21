@@ -1,22 +1,14 @@
-use color_eyre::{
-    eyre::WrapErr,
-    owo_colors::{OwoColorize, Style},
-};
-use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
-use interpreter::{
-    provider::{ExecutionCtx, Manager},
-    UnitPath,
-};
+use color_eyre::owo_colors::OwoColorize;
+use indicatif::{ProgressBar, ProgressDrawTarget};
+use interpreter::provider::{ExecutionCtx, Manager};
 use std::{
     collections::{HashMap, HashSet},
-    io::Write,
     iter::FromIterator,
 };
 
-use crate::unit::{
-    loader::{self, UnitId},
-    Unit,
-};
+use crate::{commands::Status, unit::loader::UnitId};
+
+use super::{pb_style, print_error, Module};
 
 #[derive(clap::Parser, Debug)]
 pub struct Deploy {
@@ -33,100 +25,22 @@ pub struct Deploy {
     topics: Option<Vec<String>>,
 }
 
-#[derive(Debug)]
-enum Status {
-    Undeployed,
-    Ok,
-    Err,
-    Skipped,
-}
-
-#[derive(Debug)]
-struct Module {
-    path: UnitPath,
-    unit: Option<Unit>,
-    members: Vec<UnitId>,
-    status: Status,
-}
-
 impl Deploy {
-    pub(super) fn run(self, context: &crate::context::Context) -> super::CmdResult {
-        let mut manager = Manager::new();
-        let env = HashMap::new();
-
-        let loader = match loader::Loader::new(env, context.interpreter(), &mut manager, context) {
-            Ok(loader) => loader,
-            Err(err) => {
-                match err {
-                    loader::LoaderError::DotfileDirError(err) => eprintln!(
-                        "The dotfile directory at '{}' is inaccessible: {}",
-                        context.dotfile_dir(),
-                        err
-                    ),
-                    loader::LoaderError::DotfileDirMissing => {
-                        eprintln!(
-                            "The dotfile directory at '{}' doesn't exist",
-                            context.dotfile_dir()
-                        )
-                    }
-                }
-                failure_message(1, true);
-                return Ok(Err(()));
-            }
-        };
-
-        let root = loader.root();
-        let mut modules = HashMap::new();
-
-        println!("Loading units:");
-        let mut errn = load_modules(loader, &mut modules);
-        let parse_failed = errn != 0;
-
-        // Continue if there were no errors
-        if errn == 0 {
-            println!("Deploying units:");
-            let deployed = self.deploy_modules(root, &mut modules, &mut manager, context);
-            errn += deployed
-                .iter()
-                .map(|(_, _, is_err)| *is_err as usize)
-                .sum::<usize>();
-
-            // Revert changes if the deployment failed
-            if errn > 0 {
-                let to_remove = deployed
-                    .into_iter()
-                    .filter_map(|(id, states, is_err)| {
-                        (is_err || self.revert_all).then_some((id, states))
-                    })
-                    .collect();
-                println!("\n\nEncountered an error, reverting changes:");
-                errn += remove_modules(to_remove, &modules, &mut manager, context);
-            }
-        }
-
-        println!("");
-        failure_message(errn, parse_failed);
-
-        // Print status of units
-        println!("\nUnit status:");
-        let mut stdout = std::io::stdout().lock();
-        write_tree(&mut stdout, root, modules).unwrap();
-
-        Ok(Ok(()))
-    }
-
-    fn deploy_modules(
-        &self,
+    pub(super) fn run(
+        self,
+        mut manager: Manager,
+        mut modules: HashMap<UnitId, Module>,
         root: UnitId,
-        modules: &mut HashMap<UnitId, Module>,
-        manager: &mut Manager,
         context: &crate::context::Context,
-    ) -> Vec<(UnitId, Vec<interpreter::provider::State>, bool)> {
+    ) -> super::CmdResult {
+        let mut errn = 0;
+
+        println!("Deploying units:");
         if let Some(topics) = self.topics.as_ref() {
             let topics = HashSet::from_iter(topics.iter().map(String::as_str));
-            filter_modules(topics, root, modules);
+            filter_modules(topics, root, &mut modules);
         }
-        let queue = generate_queue(root, modules);
+        let queue = generate_queue(root, &modules);
 
         if queue.is_empty() {
             if let Some(mut topics) = self.topics.clone() {
@@ -142,9 +56,55 @@ impl Deploy {
             }
         }
 
+        let deployed = self.deploy_modules(queue, &mut modules, &mut manager, context);
+
+        errn += deployed
+            .iter()
+            .map(|(_, _, is_err)| *is_err as usize)
+            .sum::<usize>();
+
+        // Revert changes if the deployment failed
+        if errn > 0 {
+            let to_remove = deployed
+                .into_iter()
+                .filter_map(|(id, states, is_err)| {
+                    (is_err || self.revert_all)
+                        .then(|| (id, states.into_iter().map(Some).collect()))
+                })
+                .collect();
+            println!("\n\nEncountered an error, reverting changes:");
+            errn +=
+                super::remove_modules(to_remove, &mut modules, self.dry_run, &mut manager, context);
+        }
+
+        println!("");
+        if errn != 0 {
+            if errn == 1 {
+                println!("\nDeployment failed due to previous error");
+            } else {
+                println!("\nDeployment failed due to {errn} previous errors");
+            }
+        };
+
+        // Print status of units
+        super::print_module_status(root, &modules);
+
+        if errn == 0 {
+            Ok(())
+        } else {
+            Err(())
+        }
+    }
+
+    fn deploy_modules(
+        &self,
+        queue: Vec<UnitId>,
+        modules: &mut HashMap<UnitId, Module>,
+        manager: &mut Manager,
+        context: &crate::context::Context,
+    ) -> Vec<(UnitId, Vec<interpreter::provider::State>, bool)> {
         let mut deployed = Vec::new();
         let queue_len = queue.len();
-
         for (i, id) in queue.into_iter().enumerate() {
             let module = modules.get_mut(&id).unwrap();
 
@@ -156,6 +116,7 @@ impl Deploy {
 
             if self.dry_run {
                 pb.finish_with_message("Skipped".bright_black().to_string());
+                module.status = Status::Skipped;
             } else {
                 let (res, states) = deploy_unit(module, &pb, manager, context);
                 let is_err = res.is_err();
@@ -175,21 +136,8 @@ impl Deploy {
     }
 }
 
-fn print_error(err: color_eyre::Report) {
-    let msg = format!("Caused by:{err:?}");
-    // color-eyre indents using 3 spaces
-    let msg = indent::indent_all_by(3, msg);
-    eprintln!("{msg}");
-}
-
-fn pb_style(path: &UnitPath) -> ProgressStyle {
-    let style =
-        ProgressStyle::with_template(&format!("{{prefix:.bright.black}} {}: {{wide_msg}}", path))
-            .unwrap();
-    style
-}
-
-/// Filter modules based on the requested topics
+/// Filter modules based on a set of topics. Member units depend on their
+/// parents, so we need to propagate deployment up the tree.
 fn filter_modules(topics: HashSet<&str>, root: UnitId, modules: &mut HashMap<UnitId, Module>) {
     struct Frame {
         members: Vec<UnitId>,
@@ -240,15 +188,16 @@ fn filter_modules(topics: HashSet<&str>, root: UnitId, modules: &mut HashMap<Uni
         }
     }
 }
-fn generate_queue(root: UnitId, modules: &mut HashMap<UnitId, Module>) -> Vec<UnitId> {
+
+/// Generate a queue of units to deploy so that no units are orphaned
+fn generate_queue(root: UnitId, modules: &HashMap<UnitId, Module>) -> Vec<UnitId> {
     let mut queue = Vec::new();
     let mut stack = vec![(vec![root], 0)];
-
     while let Some((members, current)) = stack.last_mut() {
         match members.get(*current) {
             Some(id) => {
                 let module = &modules[&id];
-                if let Status::Undeployed = module.status {
+                if let Status::Ready = module.status {
                     queue.push(*id);
                 }
                 *current += 1;
@@ -260,129 +209,6 @@ fn generate_queue(root: UnitId, modules: &mut HashMap<UnitId, Module>) -> Vec<Un
         }
     }
     queue
-}
-
-fn failure_message(errn: usize, aborted: bool) {
-    // Print number of errors
-    if errn != 0 {
-        let verb = if aborted { "aborted" } else { "failed" };
-        if errn == 1 {
-            println!("\nDeployment {verb} due to previous error");
-        } else {
-            println!("\nDeployment {verb} due to {errn} previous errors");
-        }
-    }
-}
-
-fn remove_modules(
-    deployed: Vec<(UnitId, Vec<interpreter::provider::State>)>,
-    modules: &HashMap<UnitId, Module>,
-    manager: &mut Manager,
-    context: &crate::context::Context,
-) -> usize {
-    let mut errn = 0;
-    let len = deployed.len();
-
-    for (i, (id, states)) in deployed.into_iter().enumerate() {
-        let module = modules.get(&id).unwrap();
-
-        let style = pb_style(&module.path);
-        let pb = ProgressBar::with_draw_target(None, ProgressDrawTarget::stdout());
-        pb.set_style(style);
-        pb.set_prefix(format!("[{}/{}]", i + 1, len));
-        pb.set_message("Starting removal");
-
-        let errors = remove_unit(module, states, &pb, manager, context);
-        if errors == 0 {
-            pb.finish_with_message("Done".bright_green().to_string());
-        } else {
-            pb.finish_with_message("Error".red().to_string());
-        }
-        errn += errors;
-    }
-    errn
-}
-
-fn load_modules(loader: loader::Loader, modules: &mut HashMap<UnitId, Module>) -> usize {
-    let root = loader.root();
-    let mut errn = 0;
-
-    for module in loader {
-        let (unit, status) = match module.status {
-            loader::Status::Ok(unit) => (Some(unit), Status::Undeployed),
-            loader::Status::Degraded(_, errors, src) => {
-                for err in errors {
-                    errn += 1;
-                    let filename = &module.path.clone().unit_file().to_string();
-                    let report = err.into_report(&filename);
-                    let res = report
-                        .eprint::<(&str, ariadne::Source)>((&filename, ariadne::Source::from(&src)))
-                        .wrap_err("Failed to print message");
-
-                    if let Err(err) = res {
-                        tracing::warn!("{:?}", err);
-                    }
-                }
-                (None, Status::Err)
-            }
-            loader::Status::Err(err) => {
-                // Non-root modules should have already reported their errors
-                if module.id == root {
-                    errn += 1;
-                    eprintln!("Cannot load root module:");
-                    match err {
-                        loader::Error::IO(io) => {
-                            eprintln!("    File {} not found: {}", module.path, io)
-                        }
-                    }
-                }
-                (None, Status::Err)
-            }
-        };
-
-        modules.insert(
-            module.id,
-            Module {
-                path: module.path,
-                unit,
-                members: module.members,
-                status,
-            },
-        );
-    }
-    errn
-}
-
-fn remove_unit(
-    module: &Module,
-    states: Vec<interpreter::provider::State>,
-    pb: &ProgressBar,
-    manager: &mut Manager,
-    context: &crate::context::Context,
-) -> usize {
-    let mut errn = 0;
-    let unit = module.unit.as_ref().expect("Unexpected error");
-
-    for (transaction, state) in unit.transactions.iter().zip(states) {
-        let ctx = ExecutionCtx::new(Box::new(|msg| pb.set_message(msg.to_owned())));
-        if let Err(err) = manager.remove(transaction, Some(state), ctx) {
-            print_error(err);
-            errn += 1;
-        }
-    }
-
-    if !unit.remove.is_empty() {
-        let shell = &unit.shell.as_ref().unwrap_or(context.default_shell());
-        let dir = module.path.bind(context.dotfile_dir().clone());
-
-        for hook in &unit.remove {
-            if let Err(err) = hook.run(shell, &dir) {
-                print_error(err.into_report().wrap_err("Uninstall hook failed"));
-                errn += 1;
-            }
-        }
-    }
-    errn
 }
 
 fn deploy_unit(
@@ -422,52 +248,4 @@ fn deploy_unit(
     };
 
     (res, states)
-}
-
-fn write_tree(
-    writer: &mut impl Write,
-    root: UnitId,
-    modules: HashMap<UnitId, Module>,
-) -> std::io::Result<()> {
-    let mut stack = vec![(vec![root], 0)];
-
-    while let Some((members, n)) = stack.last_mut() {
-        match members.get(*n) {
-            Some(id) => {
-                *n += 1;
-                let module = modules.get(&id).unwrap();
-                let last = members.len() == *n;
-                let depth = stack.len() - 1;
-
-                for _ in 0..depth {
-                    write!(writer, "    ")?;
-                }
-
-                let part = if depth == 0 {
-                    "  "
-                } else if last {
-                    "└─"
-                } else {
-                    "├─"
-                };
-                let name = module.path.name();
-                let (col, status) = match &module.status {
-                    Status::Undeployed => (Style::new().default_color(), "(Undeployed)"),
-                    Status::Ok => (Style::new().bright_green(), "(Ok)"),
-                    Status::Err => (Style::new().red(), "(Error)"),
-                    Status::Skipped => (Style::new().bright_black(), "(Skipped)"),
-                };
-
-                writeln!(writer, "{part} {} {}", name.style(col), status.style(col))?;
-
-                if !module.members.is_empty() {
-                    stack.push((module.members.clone(), 0));
-                }
-            }
-            None => {
-                stack.pop();
-            }
-        }
-    }
-    Ok(())
 }

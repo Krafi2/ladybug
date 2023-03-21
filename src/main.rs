@@ -102,7 +102,7 @@ fn run() -> Result<Result<(), ()>, Error> {
     // TODO allow the user to specify that some dotfile directories dont require root
     check_user(&opts)?;
 
-    opts.command.run(&context).map_err(From::from)
+    Ok(opts.command.run(&context))
 }
 
 fn check_user(opts: &Opts) -> Result<(), Error> {
