@@ -301,7 +301,6 @@ impl super::Provider for Provider {
             files.len()
         };
 
-        let mut failed = Vec::new();
         for file in &files[..deployed] {
             let source = source.join(&file);
             let dest = target.join(&file);
@@ -311,21 +310,13 @@ impl super::Provider for Provider {
                     tracing::debug!("{}", msg);
                     ctx.set_message(&msg);
                 }
+                // Log errors but don't report to user
                 Err(err) => {
                     tracing::error!("Failed to remove {dest}: {err}");
-                    failed.push(dest.to_string())
                 }
             }
         }
-
-        if failed.is_empty() {
-            Ok(())
-        } else {
-            Err(eyre!(
-                "Failed to remove the following files: {}",
-                failed.join(", ")
-            ))
-        }
+        Ok(())
     }
 }
 
