@@ -37,8 +37,8 @@ report! {
         }
         Error::Eyre(err, span) => {
             report(ReportKind::Error, span.start);
-            message("Encountered an error while proccessing package");
-            label(span, Color::Red, "{err}");
+            message("Encountered an error while processing package");
+            label(span, Color::Red, "{err:#}");
         }
     }
 }
