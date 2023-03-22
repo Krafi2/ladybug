@@ -43,16 +43,8 @@ impl Deploy {
         let queue = generate_queue(root, &modules);
 
         if queue.is_empty() {
-            if let Some(mut topics) = self.topics.clone() {
-                eprintln!(
-                    "No units match the {} {}",
-                    if topics.len() == 1 { "topic" } else { "topics" },
-                    if topics.len() == 1 {
-                        topics.pop().unwrap()
-                    } else {
-                        topics.join(", ")
-                    }
-                )
+            if let Some(topics) = &self.topics {
+                super::no_units_match(topics)
             }
         }
 
@@ -123,9 +115,11 @@ impl Deploy {
                 deployed.push((id, states, is_err));
                 if let Err(err) = res {
                     pb.finish_with_message("Error".red().to_string());
+                    module.status = Status::Err;
                     print_error(err);
                 } else {
                     pb.finish_with_message("Done".bright_green().to_string());
+                    module.status = Status::Ok;
                 }
                 if is_err && self.abort_early {
                     break;

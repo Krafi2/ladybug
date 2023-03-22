@@ -1,3 +1,4 @@
+mod capture;
 mod deploy;
 mod remove;
 
@@ -26,6 +27,7 @@ use crate::{
 pub enum Command {
     Deploy(deploy::Deploy),
     Remove(remove::Remove),
+    Capture(capture::Capture),
 }
 
 type CmdResult = Result<(), ()>;
@@ -75,6 +77,7 @@ impl Command {
         match self {
             Command::Deploy(deploy) => deploy.run(manager, modules, root, context),
             Command::Remove(remove) => remove.run(manager, modules, root, context),
+            Command::Capture(capture) => capture.run(manager, modules, root, context),
         }
     }
 }
@@ -170,16 +173,21 @@ fn remove_modules(
         pb.set_message("Starting removal");
 
         if dry_run {
-            pb.finish_with_message("Skipped");
+            pb.finish_with_message("Skipped".bright_black().to_string());
             module.status = Status::Skipped;
         } else {
             let errors = remove_unit(module, states, &pb, manager, context);
-            if errors == 0 {
+            errn += errors.len();
+            if errors.is_empty() {
                 pb.finish_with_message("Done".bright_green().to_string());
+                module.status = Status::Ok;
             } else {
                 pb.finish_with_message("Error".red().to_string());
+                module.status = Status::Err;
+                for err in errors {
+                    print_error(err);
+                }
             }
-            errn += errors;
         }
     }
     errn
@@ -191,15 +199,14 @@ fn remove_unit(
     pb: &ProgressBar,
     manager: &mut Manager,
     context: &crate::context::Context,
-) -> usize {
-    let mut errn = 0;
+) -> Vec<color_eyre::Report> {
     let unit = module.unit.as_ref().expect("Unexpected error");
+    let mut errors = Vec::new();
 
     for (transaction, state) in unit.transactions.iter().zip(states) {
         let ctx = ExecutionCtx::new(Box::new(|msg| pb.set_message(msg.to_owned())));
         if let Err(err) = manager.remove(transaction, state, ctx) {
-            print_error(err);
-            errn += 1;
+            errors.push(err);
         }
     }
 
@@ -209,12 +216,11 @@ fn remove_unit(
 
         for hook in &unit.remove {
             if let Err(err) = hook.run(shell, &dir) {
-                print_error(err.into_report().wrap_err("Uninstall hook failed"));
-                errn += 1;
+                errors.push(err.into_report().wrap_err("Uninstall hook failed"));
             }
         }
     }
-    errn
+    errors
 }
 
 fn pb_style(path: &UnitPath) -> ProgressStyle {
@@ -229,6 +235,18 @@ fn print_error(err: color_eyre::Report) {
     // color-eyre indents using 3 spaces
     let msg = indent::indent_all_by(3, msg);
     eprintln!("{msg}");
+}
+
+fn no_units_match(topics: &[String]) {
+    eprintln!(
+        "No units match the {} {}",
+        if topics.len() == 1 { "topic" } else { "topics" },
+        if topics.len() == 1 {
+            topics.last().unwrap().to_owned()
+        } else {
+            topics.join(", ")
+        }
+    )
 }
 
 fn print_module_status(root: UnitId, modules: &HashMap<UnitId, Module>) {

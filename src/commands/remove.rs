@@ -21,6 +21,7 @@ impl Remove {
         root: UnitId,
         ctx: &crate::context::Context,
     ) -> super::CmdResult {
+        println!("Removing units:");
         if let Some(topics) = self.topics.as_ref() {
             let topics = HashSet::from_iter(topics.iter().map(String::as_str));
             filter_modules(topics, root, &mut modules);
@@ -44,16 +45,8 @@ impl Remove {
             .collect::<Vec<_>>();
 
         if queue.is_empty() {
-            if let Some(mut topics) = self.topics.clone() {
-                eprintln!(
-                    "No units match the {} {}",
-                    if topics.len() == 1 { "topic" } else { "topics" },
-                    if topics.len() == 1 {
-                        topics.pop().unwrap()
-                    } else {
-                        topics.join(", ")
-                    }
-                )
+            if let Some(topics) = &self.topics {
+                super::no_units_match(topics)
             }
         }
 
@@ -125,7 +118,9 @@ fn generate_queue(root: UnitId, modules: &HashMap<UnitId, Module>) -> Vec<UnitId
                 let _ = stack.pop();
                 if let Some(frame) = stack.last_mut() {
                     let parent = frame.0[frame.1];
-                    queue.push(parent);
+                    if let Status::Ready = modules[&parent].status {
+                        queue.push(parent);
+                    }
                     frame.1 += 1;
                 }
             }
