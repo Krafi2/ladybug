@@ -2,7 +2,7 @@ mod capture;
 mod deploy;
 mod remove;
 
-use std::collections::HashMap;
+use std::{collections::HashMap, time::Duration};
 
 use clap::Subcommand;
 use color_eyre::{
@@ -61,8 +61,15 @@ impl Command {
         let root = loader.root();
         let mut modules = HashMap::new();
 
-        println!("Loading units:");
+        let style = ProgressStyle::with_template("Loading units{spinner}")
+            .unwrap()
+            .tick_strings(&[".", "..", "...", ""]);
+        let pb =
+            ProgressBar::with_draw_target(None, ProgressDrawTarget::stdout()).with_style(style);
+        pb.enable_steady_tick(Duration::from_millis(500));
+
         let errn = load_modules(loader, &mut modules);
+        pb.finish_and_clear();
 
         if errn != 0 {
             if errn == 1 {
