@@ -123,7 +123,7 @@ fn check_user(opts: &Opts) -> Result<(), Error> {
             let mut args = std::env::args();
 
             // Ask sudo to preserve some variables that we need
-            command.arg("--preserve-env=XDG_CACHE_HOME,XDG_CONFIG_HOME,XDG_DATA_DIRS,XDG_CONFIG_DIRS,USER,HOME");
+            command.arg("--preserve-env=XDG_CACHE_HOME,XDG_CONFIG_HOME,XDG_DATA_DIRS,XDG_CONFIG_DIRS,PATH,USER,HOME");
             command.arg(args.next().unwrap()); // Get the path to the executable currently running
             command.arg("--root"); // We certainly want to run as root
             command.args(args); // Carry over the rest of the args

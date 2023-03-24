@@ -1,0 +1,14 @@
+unit {
+	name: Helix
+	desc: Helix package and configuration
+	topic: devel
+}
+
+packages(provider: zypper) [
+	helix
+	helix-runtime
+]
+
+files(target: ~/.config/helix) [
+	config.toml
+]

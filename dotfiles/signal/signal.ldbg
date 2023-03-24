@@ -1,0 +1,8 @@
+unit {
+	name: Signal
+	desc: Install signal
+}
+
+packages(provider: flatpak) [
+	org.signal.Signal
+]

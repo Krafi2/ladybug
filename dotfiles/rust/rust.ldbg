@@ -1,0 +1,18 @@
+unit {
+	name: Rust
+	desc: Rust packages and configuration
+	topic: devel
+}
+
+packages(provider: zypper) [
+	rustup
+]
+
+files(target: ~/.cargo) [
+	config.toml
+]
+
+deploy {{
+	rustup default stable
+	rustup component add rust-analyzer
+}}

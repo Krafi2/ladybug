@@ -1,0 +1,12 @@
+unit {
+	name: Git
+	desc: Git package and config
+}
+
+packages(provider: zypper) [
+	git
+]
+
+files(target: ~/.config/git) [
+	config
+]

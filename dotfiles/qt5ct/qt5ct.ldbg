@@ -1,0 +1,13 @@
+unit {
+	name: qt5ct
+	desc: Configure qt theme using qt5ct
+}
+
+packages(provider: zypper) [
+	qt5ct
+]
+
+files(target: ~/.config/qt5ct) [
+	colors/Vimix-light.conf
+	qt5ct.conf
+]

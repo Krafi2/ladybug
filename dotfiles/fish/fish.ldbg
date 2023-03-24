@@ -1,0 +1,13 @@
+unit {
+	name: Fish
+	desc: Fish shell
+}
+
+packages(provider: zypper) [
+	fish
+	exa
+]
+
+files(target: ~/.config/fish) [
+	config.fish
+]

@@ -55,7 +55,7 @@ impl Routine {
     fn from_figment(figment: interpreter::RoutineFigment) -> Option<Self> {
         Some(Self {
             shell: figment.shell.map(Into::into),
-            stdout: figment.stdout.unwrap_or(true),
+            stdout: figment.stdout.unwrap_or(false),
             workdir: figment.workdir,
             code: figment.body,
         })
@@ -63,7 +63,7 @@ impl Routine {
 
     pub fn run(&self, shell: &Shell, dir: &Path) -> Result<(), common::command::Error> {
         let stdout = if self.stdout {
-            Stdio::piped()
+            Stdio::inherit()
         } else {
             Stdio::null()
         };
