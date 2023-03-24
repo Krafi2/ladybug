@@ -41,9 +41,9 @@ impl Capture {
         // Print number of errors
         if errn != 0 {
             if errn == 1 {
-                println!("\nRemoval failed due to previous error");
+                println!("\nCapture failed due to previous error");
             } else {
-                println!("\nRemoval failed due to {errn} previous errors");
+                println!("\nCapture failed due to {errn} previous errors");
             }
         }
 
