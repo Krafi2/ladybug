@@ -187,7 +187,10 @@ fn remove_modules(
             errn += errors.len();
             if errors.is_empty() {
                 pb.finish_with_message("Done".bright_green().to_string());
-                module.status = Status::Ok;
+                // Change the status if it hasn't been modified
+                if let Status::Ready = module.status {
+                    module.status = Status::Ok;
+                }
             } else {
                 pb.finish_with_message("Error".red().to_string());
                 module.status = Status::Err;
