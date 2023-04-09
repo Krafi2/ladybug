@@ -9,6 +9,7 @@ use color_eyre::eyre::{eyre, WrapErr};
 use quick_xml::events::Event;
 use quick_xml::reader::Reader as XmlReader;
 use timeout_readwrite::TimeoutReader;
+use tracing::debug;
 
 use super::{ExecutionCtx, ProviderError};
 use crate::{
@@ -348,6 +349,7 @@ impl Provider {
                                     // Print what has been installed
                                     let name = String::from_utf8_lossy(&name.value);
                                     ctx.set_message(&name);
+                                    debug!("zypper: {}", &name);
 
                                     // The name is in the format "(n/n) blabla"
                                     // The transaction is complete if the numbers in the parantheses match

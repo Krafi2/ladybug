@@ -4,7 +4,7 @@ use color_eyre::eyre::{eyre, WrapErr};
 use common::rel_path::RelPath;
 use parser::Spanned;
 use std::{
-    fs::OpenOptions,
+    fs::{OpenOptions, Permissions},
     path::{Path, PathBuf},
 };
 
@@ -151,7 +151,6 @@ impl super::Provider for Provider {
     type Transaction = Payload;
     type State = PayloadRes;
 
-    // TODO: check if files are withing the folders of unit members
     fn new_transaction(
         &mut self,
         args: crate::Args,
@@ -374,22 +373,24 @@ fn deploy_file(
                 // The parent directories may not exist
                 } else {
                     let dir = dest.parent().expect("Path too short");
-                    std::fs::create_dir_all(dir).context("Failed to create parent directories")?;
-                }
+                    create_parents(dir).wrap_err("Failed to create parent directories")?;
+                };
 
+                // We don't need to set permissions because on unix the link has
+                // the same metadata as the destination
                 match method {
                     Method::SoftLink => imp::symlink_file(source, dest).wrap_err_with(|| {
                         format!(
                             "Failed to create symlink: '{}' -> '{}'",
-                            dest.display(),
                             source.display(),
+                            dest.display(),
                         )
                     }),
                     Method::HardLink => std::fs::hard_link(source, dest).wrap_err_with(|| {
                         format!(
                             "Failed to create hardlink: '{}' -> '{}'",
-                            dest.display(),
                             source.display(),
+                            dest.display(),
                         )
                     }),
                     Method::Copy => unreachable!(),
@@ -425,6 +426,7 @@ fn deploy_file(
                     .wrap_err_with(|| format!("Failed to free file: '{}'", dest.display()))?;
             }
 
+            let perms = create_parents(dest).wrap_err("Failed to create parent directories")?;
             std::fs::copy(source, dest).wrap_err_with(|| {
                 format!(
                     "Failed to copy file: {} -> {}",
@@ -432,8 +434,25 @@ fn deploy_file(
                     dest.display()
                 )
             })?;
+            std::fs::set_permissions(dest, perms)
+                .wrap_err_with(|| format!("Failed to set permissions at {dest}"))?;
             Ok(())
         }
+    }
+}
+
+// Create dir's parents and set permissions to those of the last existing ancestor
+fn create_parents(dir: &Path) -> std::io::Result<Permissions> {
+    match dir.metadata() {
+        Ok(meta) => Ok(meta.permissions()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            // At least one of the ancestors should exist
+            let perm = create_parents(dir.parent().expect("Expected parent"))?;
+            std::fs::create_dir(dir)?;
+            std::fs::set_permissions(dir, perm.clone())?;
+            Ok(perm)
+        }
+        Err(err) => Err(err),
     }
 }
 

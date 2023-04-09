@@ -10,6 +10,7 @@ use color_eyre::{
     Result, Section,
 };
 use common::command::{check_output, run_command};
+use tracing::debug;
 
 use crate::{
     structures::{FromArgs, RecoverFromArgs},
@@ -222,6 +223,7 @@ fn flatpak_op(
                 match msg.next() {
                     Some("Info") => tracing::debug!("flatpak: {}", msg.next().unwrap()),
                     Some(s) if s.starts_with("Installing") || s.starts_with("Uninstalling") => {
+                        debug!("{}", &s);
                         ctx.set_message(&s);
                     }
                     _ => (),
