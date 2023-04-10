@@ -305,15 +305,16 @@ impl Provider {
             .iter()
             .fold(String::new(), |mut state, package| {
                 state.push_str(" ");
+                // Remove packages by prepending !
+                if let Operation::Remove = op {
+                    state.push('!');
+                }
                 state.push_str(&package.name);
                 state
             });
-        let cmd = match op {
-            Operation::Install => "install",
-            Operation::Remove => "remove",
-        };
-        writeln!(self.stdin(), "{}{} {}", cmd, from, packages)
-            .wrap_err("Failed to write to stdout")?;
+        let cmd = format!("install{} {}", from, packages);
+        debug!("Running '{cmd}'");
+        writeln!(self.stdin(), "{cmd}").wrap_err("Failed to write to stdout")?;
 
         let mut handle_error = false;
         let mut level = 0;
@@ -335,33 +336,43 @@ impl Provider {
                 }
                 Ok(Event::Empty(tag)) => {
                     let mut attributes = tag.attributes();
-                    if tag.local_name().as_ref() == b"progress" {
-                        let id = attributes.next().unwrap()?;
-                        let name = attributes.next().unwrap()?;
-                        assert_eq!(id.key.local_name().as_ref(), b"id");
-                        assert_eq!(name.key.local_name().as_ref(), b"name");
+                    match tag.local_name().as_ref() {
+                        b"progress" => {
+                            let id = attributes.next().unwrap()?;
+                            let name = attributes.next().unwrap()?;
+                            assert_eq!(id.key.local_name().as_ref(), b"id");
+                            assert_eq!(name.key.local_name().as_ref(), b"name");
 
-                        if id.value.as_ref() == b"install-resolvable"
-                            || id.value.as_ref() == b"remove-resolvable"
-                        {
-                            if let Some(done) = attributes.next().transpose()? {
-                                if done.key.local_name().as_ref() == b"done" {
-                                    // Print what has been installed
-                                    let name = String::from_utf8_lossy(&name.value);
-                                    ctx.set_message(&name);
-                                    debug!("zypper: {}", &name);
+                            if id.value.as_ref() == b"install-resolvable"
+                                || id.value.as_ref() == b"remove-resolvable"
+                            {
+                                if let Some(done) = attributes.next().transpose()? {
+                                    if done.key.local_name().as_ref() == b"done" {
+                                        // Print what has been installed
+                                        let name = String::from_utf8_lossy(&name.value);
+                                        ctx.set_message(&name);
+                                        debug!("{}", &name);
 
-                                    // The name is in the format "(n/n) blabla"
-                                    // The transaction is complete if the numbers in the parantheses match
-                                    let (s, _) =
-                                        name.strip_prefix('(').unwrap().split_once(')').unwrap();
-                                    let (left, right) = s.split_once('/').unwrap();
-                                    if left == right {
-                                        finished = true;
+                                        // The name is in the format "(n/n) blabla"
+                                        // The transaction is complete if the numbers in the parantheses match
+                                        let (s, _) = name
+                                            .strip_prefix('(')
+                                            .unwrap()
+                                            .split_once(')')
+                                            .unwrap();
+                                        let (left, right) = s.split_once('/').unwrap();
+                                        if left == right {
+                                            finished = true;
+                                        }
                                     }
                                 }
                             }
                         }
+                        // There were problems and the operation was canceled
+                        b"prompt" => {
+                            finished = true;
+                        }
+                        _ => (),
                     }
                 }
                 Ok(Event::End(_)) => level -= 1,
