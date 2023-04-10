@@ -310,6 +310,7 @@ dependencies = [
  "ariadne",
  "color-eyre",
  "common",
+ "nix",
  "parser",
  "quick-xml",
  "tempfile",

@@ -5,6 +5,7 @@ use std::{
     collections::{HashMap, HashSet},
     iter::FromIterator,
 };
+use tracing::debug;
 
 use crate::{commands::Status, unit::loader::UnitId};
 
@@ -214,6 +215,7 @@ fn deploy_unit(
     Result<(), color_eyre::Report>,
     Vec<interpreter::provider::State>,
 ) {
+    debug!("Deploying module {}", &module.path);
     let unit = module.unit.as_ref().expect("Unexpected error");
     let mut states = Vec::new();
 

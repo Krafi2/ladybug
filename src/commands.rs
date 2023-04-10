@@ -14,6 +14,7 @@ use interpreter::{
     provider::{ExecutionCtx, Manager},
     UnitPath,
 };
+use tracing::debug;
 
 use crate::{
     context::Context,
@@ -210,15 +211,9 @@ fn remove_unit(
     manager: &mut Manager,
     context: &crate::context::Context,
 ) -> Vec<color_eyre::Report> {
+    debug!("Removing module {}", &module.path);
     let unit = module.unit.as_ref().expect("Unexpected error");
     let mut errors = Vec::new();
-
-    for (transaction, state) in unit.transactions.iter().zip(states) {
-        let ctx = ExecutionCtx::new(Box::new(|msg| pb.set_message(msg.to_owned())));
-        if let Err(err) = manager.remove(transaction, state, ctx) {
-            errors.push(err);
-        }
-    }
 
     if !unit.remove.is_empty() {
         let shell = &unit.shell.as_ref().unwrap_or(context.default_shell());
@@ -230,6 +225,14 @@ fn remove_unit(
             }
         }
     }
+
+    for (transaction, state) in unit.transactions.iter().zip(states) {
+        let ctx = ExecutionCtx::new(Box::new(|msg| pb.set_message(msg.to_owned())));
+        if let Err(err) = manager.remove(transaction, state, ctx) {
+            errors.push(err);
+        }
+    }
+
     errors
 }
 

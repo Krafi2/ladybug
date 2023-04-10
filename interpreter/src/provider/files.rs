@@ -4,7 +4,7 @@ use color_eyre::eyre::{eyre, WrapErr};
 use common::rel_path::RelPath;
 use parser::Spanned;
 use std::{
-    fs::{OpenOptions, Permissions},
+    fs::{Metadata, OpenOptions},
     path::{Path, PathBuf},
 };
 
@@ -367,17 +367,17 @@ fn deploy_file(
             // Create a symlink only if it isn't already present
             if !file_eq(source, dest).unwrap_or(false) {
                 // Try to free the file if it exists
-                if dest.exists() {
+                let meta = if dest.exists() {
+                    let meta = dest.metadata()?;
                     free_file(dest, conflict)
                         .wrap_err_with(|| format!("Failed to free file: '{}'", dest.display()))?;
+                    meta
                 // The parent directories may not exist
                 } else {
                     let dir = dest.parent().expect("Path too short");
-                    create_parents(dir).wrap_err("Failed to create parent directories")?;
+                    create_dirs(dir).wrap_err("Failed to create parent directories")?
                 };
 
-                // We don't need to set permissions because on unix the link has
-                // the same metadata as the destination
                 match method {
                     Method::SoftLink => imp::symlink_file(source, dest).wrap_err_with(|| {
                         format!(
@@ -395,6 +395,8 @@ fn deploy_file(
                     }),
                     Method::Copy => unreachable!(),
                 }?;
+                imp::copy_permissions(dest, &meta)
+                    .wrap_err_with(|| format!("Failed to set permissions at {dest}"))?;
             }
             Ok(())
         }
@@ -426,7 +428,8 @@ fn deploy_file(
                     .wrap_err_with(|| format!("Failed to free file: '{}'", dest.display()))?;
             }
 
-            let perms = create_parents(dest).wrap_err("Failed to create parent directories")?;
+            let meta = create_dirs(dest.parent().unwrap())
+                .wrap_err("Failed to create parent directories")?;
             std::fs::copy(source, dest).wrap_err_with(|| {
                 format!(
                     "Failed to copy file: {} -> {}",
@@ -434,7 +437,7 @@ fn deploy_file(
                     dest.display()
                 )
             })?;
-            std::fs::set_permissions(dest, perms)
+            imp::copy_permissions(dest, &meta)
                 .wrap_err_with(|| format!("Failed to set permissions at {dest}"))?;
             Ok(())
         }
@@ -442,15 +445,15 @@ fn deploy_file(
 }
 
 // Create dir's parents and set permissions to those of the last existing ancestor
-fn create_parents(dir: &Path) -> std::io::Result<Permissions> {
+fn create_dirs(dir: &Path) -> std::io::Result<Metadata> {
     match dir.metadata() {
-        Ok(meta) => Ok(meta.permissions()),
+        Ok(meta) => Ok(meta),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
             // At least one of the ancestors should exist
-            let perm = create_parents(dir.parent().expect("Expected parent"))?;
+            let meta = create_dirs(dir.parent().expect("Expected parent"))?;
             std::fs::create_dir(dir)?;
-            std::fs::set_permissions(dir, perm.clone())?;
-            Ok(perm)
+            imp::copy_permissions(dir, &meta)?;
+            Ok(meta)
         }
         Err(err) => Err(err),
     }
@@ -526,11 +529,24 @@ where
 #[cfg(any(target_os = "redox", unix))]
 mod imp {
     pub use std::os::unix::fs::symlink as symlink_file;
+    use std::{fs::Metadata, os::unix::prelude::MetadataExt, path::Path};
+
+    pub fn copy_permissions(path: &Path, metadata: &Metadata) -> std::io::Result<()> {
+        let owner = nix::unistd::Uid::from_raw(metadata.uid());
+        let group = nix::unistd::Gid::from_raw(metadata.gid());
+        nix::unistd::chown(path, Some(owner), Some(group))
+            .map_err(|err| std::io::Error::from_raw_os_error(err as i32))
+    }
 }
 
 #[cfg(windows)]
 mod imp {
     pub use std::os::windows::fs::symlink_file;
+    use std::{fs::Metadata, path::Path};
+
+    pub fn copy_permissions(path: &Path, metadata: &Metadata) -> std::io::Result<()> {
+        unimplemented!()
+    }
 }
 
 #[cfg(test)]
