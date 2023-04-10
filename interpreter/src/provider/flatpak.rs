@@ -221,7 +221,7 @@ fn flatpak_op(
             Ok(_) => {
                 let mut msg = buf.split(':');
                 match msg.next() {
-                    Some("Info") => tracing::debug!("flatpak: {}", msg.next().unwrap()),
+                    Some("Info") => tracing::debug!("{}", msg.next().unwrap()),
                     Some(s) if s.starts_with("Installing") || s.starts_with("Uninstalling") => {
                         debug!("{}", &s);
                         ctx.set_message(&s);
