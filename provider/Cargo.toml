@@ -1,5 +1,5 @@
 [package]
-name = "interpreter"
+name = "provider"
 version = "0.1.0"
 edition = "2021"
 
@@ -7,13 +7,12 @@ edition = "2021"
 
 [dependencies]
 parser = { path = "../parser" }
-common = { path = "../common" }
 eval = { path = "../eval" }
+common = { path = "../common" }
 color-eyre = "0.6.2"
-ariadne = "0.2.0"
-thiserror = "1.0.39"
 tracing = "0.1.37"
-nix = { version = "0.26.0", default-features = false, features = ["fs"] }
-
-[dev-dependencies]
-tempfile = "3.4.0"
+ariadne = "0.2.0"
+serde = { version = "1.0", features = ["derive"] }
+thiserror = "1.0.40"
+quick-xml = "0.28.0"
+timeout-readwrite = "0.3.3"

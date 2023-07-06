@@ -6,7 +6,7 @@ use color_eyre::{eyre::eyre, Section, SectionExt};
 pub enum Error {
     Spawn(std::io::Error),
     IO(std::io::Error),
-    Failed(Output),
+    Failed { stderr: Vec<u8>, code: Option<i32> },
 }
 
 impl std::error::Error for Error {
@@ -14,7 +14,7 @@ impl std::error::Error for Error {
         match self {
             Error::Spawn(err) => Some(err),
             Error::IO(_) => None,
-            Error::Failed(_) => None,
+            Error::Failed { .. } => None,
         }
     }
 }
@@ -24,7 +24,7 @@ impl std::fmt::Display for Error {
         match self {
             Error::Spawn(_) => f.write_str("Cannot start process"),
             Error::IO(err) => err.fmt(f),
-            Error::Failed(output) => match output.status.code() {
+            Error::Failed { code, .. } => match code {
                 Some(code) => write!(f, "Process failed with exit code {code}"),
                 None => f.write_str("Process was terminated by a signal"),
             },
@@ -34,12 +34,12 @@ impl std::fmt::Display for Error {
 
 impl Error {
     pub fn into_report(self) -> color_eyre::Report {
-        let section = if let Error::Failed(output) = &self {
-            if output.stderr.is_empty() {
+        let section = if let Error::Failed { stderr, .. } = &self {
+            if stderr.is_empty() {
                 None
             } else {
                 Some(
-                    String::from_utf8_lossy(&output.stderr)
+                    String::from_utf8_lossy(&stderr)
                         .as_ref()
                         .trim()
                         .to_owned()
@@ -86,6 +86,9 @@ pub fn check_output(output: Output) -> Result<Output, Error> {
     if output.status.success() {
         Ok(output)
     } else {
-        Err(Error::Failed(output))
+        Err(Error::Failed {
+            stderr: output.stderr,
+            code: output.status.code(),
+        })
     }
 }

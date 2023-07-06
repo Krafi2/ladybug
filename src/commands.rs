@@ -274,8 +274,12 @@ fn print_module_status(root: UnitId, modules: &HashMap<UnitId, Module>) {
                 let last = members.len() == *n;
                 let depth = stack.len() - 1;
 
-                for _ in 0..depth {
-                    print!("  ");
+                for i in 0..depth {
+                    if i == 0 {
+                        print!("  ");
+                    } else {
+                        print!("│ ");
+                     }
                 }
 
                 let part = if depth == 0 {

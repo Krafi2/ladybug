@@ -1,40 +1,28 @@
-# This is a comment :)
 unit {
-    name: My App
-    desc: deploy My App
+    name: Foo
+    desc: Deploy Foo
     topic: development
-    shell: [bash -c %c]
-    members: [my_app your_app]
+    members: [member1 member2]
 }
 
 env {
-    arch: x64
+    arch: x86_64
 }
 
-packages(provider: zypper, bla: a) [
-    # The future?
-    ladybug(version: 1.0)
-    myapp(
-        lock: true,
-        version: 1.2.0,        
-    )
+packages(provider: zypper) [
+    rustup
+    git
 ]
 
-files(method: link, conflicts: rename, source: $arch, target: there) [
-    hello.txt
-
-    hi.txt(a: a)
+files(method: link, conflicts: rename, source: $arch, target: ~/.config/) [
+    config.ini
 ]
 
-deploy(stdout: true, shell: [python -c %c]) {{
-    echo "1" > ~/hello
+deploy(stdout: true, shell: [bash -c %c]) {{
+    dconf load -f / < settings.ini
 }}
 
+# Clean cache
 remove {{
-    rm ~/hello
-}}
-
-capture {{
-    {} braces {{{}}} {
-    }   
+    zypper clean
 }}

@@ -1,32 +1,26 @@
 use std::{
-    io::{BufReader, Write},
-    process::{ChildStdin, ChildStdout, Stdio},
+    fs::File,
+    io::{BufReader, Read, Write},
+    process::{Child, ChildStdin, ChildStdout, Stdio},
     time::Duration,
 };
 
 use ariadne::{Color, Fmt, ReportKind};
 use color_eyre::eyre::{eyre, WrapErr};
+use eval::{params, report, FromArgs, RecoverFromArgs};
+use parser::Span;
 use quick_xml::events::Event;
 use quick_xml::reader::Reader as XmlReader;
 use timeout_readwrite::TimeoutReader;
 use tracing::debug;
 
-use super::{ExecutionCtx, ProviderError};
-use crate::{
-    structures::{FromArgs, RecoverFromArgs},
-    Ctx, Span,
-};
+use super::ProviderError;
+use crate::{privileged::SuperCtx, EvalCtx};
 
 #[derive(Debug)]
 pub enum Error {
     PackageNotRecognized(String, Span),
     Eyre(color_eyre::Report, Span),
-}
-
-impl Into<crate::error::Error> for Error {
-    fn into(self) -> crate::error::Error {
-        super::TransactionError::Zypper(self).into()
-    }
 }
 
 report! {
@@ -50,46 +44,21 @@ enum Operation {
     Remove,
 }
 
-/// The zypper provider spawns a persistent zypper process using `zypper shell` and uses stdio to
-/// communicate commands.
-pub struct Provider {
-    /// The zypper process
-    zypper: std::process::Child,
-    stdin: ChildStdin,
-    reader: XmlReader<BufReader<TimeoutReader<ChildStdout>>>,
+struct Zypper<I, O> {
+    stdin: I,
+    reader: XmlReader<BufReader<O>>,
     buf: Vec<u8>,
 }
 
-impl super::ConstructProvider for Provider {
-    fn new(root: bool) -> Result<Self, ProviderError> {
-        if !root {
-            return Err(ProviderError::NeedRoot);
-        }
-
-        // Try to spawn the zypper subprocess
-        let mut zypper = std::process::Command::new("zypper")
-            .arg("--xmlout") // Enable XML output
-            .arg("--non-interactive") // Don't ask for confirmation
-            .arg("shell")
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .wrap_err("Failed to spawn zypper process")
-            .map_err(|err| ProviderError::Unavailable(std::rc::Rc::new(err)))?;
-
-        let reader = TimeoutReader::new(zypper.stdout.take().unwrap(), Duration::from_secs(10));
-        let reader = BufReader::new(reader);
-        let mut reader = XmlReader::from_reader(reader);
+impl<I: Write, O: Read> Zypper<I, O> {
+    fn new(stdin: I, stdout: O) -> color_eyre::Result<Self> {
+        let mut reader = XmlReader::from_reader(BufReader::new(stdout));
         reader.trim_text(true);
-        let stdin = zypper.stdin.take().unwrap();
-        let buf = Vec::new();
 
         let mut new = Self {
-            zypper,
             stdin,
             reader,
-            buf,
+            buf: Vec::new(),
         };
 
         // Pop the initialization events
@@ -100,123 +69,13 @@ impl super::ConstructProvider for Provider {
                         break;
                     }
                 }
-                // Let's hope that any errors here aren't fatal
+                Err(quick_xml::Error::Io(err)) => return Err(eyre!(err)).wrap_err("IO error"),
+                Err(e) => return Err(e).wrap_err("Failed to parse xml"),
                 _ => (),
             }
         }
 
-        // See if the subprocess exited unexpectedly
-        match new.check_health() {
-            Ok(_) => Ok(new),
-            Err(err) => Err(ProviderError::Unavailable(std::rc::Rc::new(err))),
-        }
-    }
-}
-
-struct Package {
-    name: String,
-}
-
-pub(super) struct Transaction {
-    from: Option<Vec<String>>,
-    packages: Vec<Package>,
-}
-
-params! { struct Params { from: Option<Vec<String>> } }
-params! { struct PackageParams {} }
-
-impl super::Provider for Provider {
-    type Transaction = Transaction;
-    type State = ();
-
-    fn new_transaction(
-        &mut self,
-        args: super::Args,
-        packages: super::Packages,
-        ctx: &mut Ctx,
-    ) -> Result<Self::Transaction, ()> {
-        // Parse the package block params
-        let params = Params::recover_default(args, ctx);
-
-        let mut packs = Vec::new();
-        let mut degraded = params.is_degraded();
-        // Verify packages
-        for package in packages.packages {
-            if let Some(args) = PackageParams::from_args(package.args, ctx) {
-                if args.is_degraded() {
-                    degraded = true;
-                    continue;
-                }
-
-                match self.exists(&package.name.inner) {
-                    // The package may exist
-                    Ok(exists) => {
-                        // All is well
-                        if exists {
-                            let package = Package {
-                                name: package.name.inner,
-                            };
-                            packs.push(package);
-                        // The package doesn't exist
-                        } else {
-                            ctx.emit(Error::PackageNotRecognized(
-                                package.name.inner,
-                                package.name.span,
-                            ));
-                            degraded = true;
-                        }
-                    }
-                    // Some other error happened while confirming the package's existence
-                    Err(other) => {
-                        ctx.emit(Error::Eyre(other, package.name.span));
-                        degraded = true;
-                    }
-                }
-            }
-        }
-
-        if !degraded && !params.is_degraded() {
-            Ok(Transaction {
-                from: params.value.from,
-                packages: packs,
-            })
-        } else {
-            Err(())
-        }
-    }
-
-    fn install(
-        &mut self,
-        transaction: &Self::Transaction,
-        ctx: ExecutionCtx,
-    ) -> (super::OpResult, Self::State) {
-        let res = self
-            .zypper_op(transaction, Operation::Install, ctx)
-            .and_then(|_| {
-                self.check_health()
-                    .wrap_err("Zypper process exited unexpectedly")
-            });
-        (res, ())
-    }
-
-    fn remove(
-        &mut self,
-        transaction: &Self::Transaction,
-        _state: Option<Self::State>,
-        ctx: ExecutionCtx,
-    ) -> super::OpResult {
-        self.zypper_op(transaction, Operation::Remove, ctx)
-            .and_then(|_| {
-                self.check_health()
-                    .wrap_err("Zypper process exited unexpectedly")
-            })
-    }
-}
-
-impl Provider {
-    /// Get the subprocess' stdin handle
-    fn stdin(&mut self) -> &mut ChildStdin {
-        &mut self.stdin
+        Ok(new)
     }
 
     fn read_event<'a>(&'a mut self) -> quick_xml::Result<Event<'a>> {
@@ -225,7 +84,7 @@ impl Provider {
 
     /// Check if the package named 'package' exists
     fn exists(&mut self, package: &str) -> color_eyre::Result<bool> {
-        writeln!(self.stdin(), "search --match-exact {}", &package)
+        writeln!(&mut self.stdin, "search --match-exact {}", &package)
             .wrap_err("Failed to write zypper stdin")?;
         let mut found = None;
         let mut level = 0;
@@ -277,20 +136,11 @@ impl Provider {
         }
     }
 
-    /// See if the subprocess exited unexpectedly
-    fn check_health(&mut self) -> color_eyre::Result<()> {
-        match self.zypper.try_wait() {
-            Ok(Some(status)) => Err(eyre!("Zypper process exited unexpectedly with: {status}")),
-            Err(e) => Err(eyre!(e)),
-            Ok(None) => Ok(()),
-        }
-    }
-
     fn zypper_op(
         &mut self,
         transaction: &Transaction,
         op: Operation,
-        mut ctx: ExecutionCtx,
+        mut ctx: SuperCtx,
     ) -> Result<(), color_eyre::Report> {
         let from = if let Some(from) = &transaction.from {
             from.iter()
@@ -314,7 +164,7 @@ impl Provider {
             });
         let cmd = format!("install{} {}", from, packages);
         debug!("Running '{cmd}'");
-        writeln!(self.stdin(), "{cmd}").wrap_err("Failed to write to stdout")?;
+        writeln!(&mut self.stdin, "{cmd}").wrap_err("Failed to write to stdout")?;
 
         let mut handle_error = false;
         let mut level = 0;
@@ -325,12 +175,23 @@ impl Provider {
             let event = self.read_event();
             match event {
                 Ok(Event::Start(tag)) => {
-                    if tag.local_name().as_ref() == b"message" {
-                        let ty = tag.attributes().next().unwrap()?;
-                        assert_eq!(ty.key.local_name().as_ref(), b"type");
-                        if ty.value.as_ref() == b"error" {
-                            handle_error = true;
+                    match tag.local_name().as_ref() {
+                        b"message" => {
+                            let ty = tag.attributes().next().unwrap()?;
+                            assert_eq!(ty.key.local_name().as_ref(), b"type");
+                            if ty.value.as_ref() == b"error" {
+                                handle_error = true;
+                            }
                         }
+                        // There were problems and the operation was canceled
+                        b"prompt" => {
+                            let id = tag.attributes().next().unwrap()?;
+                            assert_eq!(id.key.local_name().as_ref(), b"id");
+                            if id.value.as_ref() == b"1" {
+                                finished = true;
+                            }
+                        }
+                        _ => (),
                     }
                     level += 1;
                 }
@@ -350,7 +211,7 @@ impl Provider {
                                     if done.key.local_name().as_ref() == b"done" {
                                         // Print what has been installed
                                         let name = String::from_utf8_lossy(&name.value);
-                                        ctx.set_message(&name);
+                                        ctx.set_message(name.into_owned());
                                         debug!("{}", &name);
 
                                         // The name is in the format "(n/n) blabla"
@@ -368,10 +229,6 @@ impl Provider {
                                 }
                             }
                         }
-                        // There were problems and the operation was canceled
-                        b"prompt" => {
-                            finished = true;
-                        }
                         _ => (),
                     }
                 }
@@ -381,7 +238,7 @@ impl Provider {
 
                     // Zypper ends progress messages with '...'
                     if message.ends_with("...") {
-                        ctx.set_message(&message);
+                        ctx.set_message(message.into_owned());
                     }
 
                     // Zypper feels like it's finished
@@ -415,6 +272,178 @@ impl Provider {
                     return Ok(());
                 }
             }
+        }
+    }
+}
+
+type SuperZypper = Zypper<File, TimeoutReader<File>>;
+type UserZypper = Zypper<ChildStdin, TimeoutReader<ChildStdout>>;
+
+/// The zypper provider spawns a persistent zypper process using `zypper shell` and uses stdio to
+/// communicate commands.
+pub enum Provider {
+    /// A normal proccess running without privileges
+    Process { zypper: UserZypper, proc: Child },
+    /// A privileged process spawned by the super context
+    Super { zypper: SuperZypper },
+}
+
+const CMD: &str = "zypper";
+const ARGS: [&str; 3] = ["--xmlout", "--non-interactive", "shell"];
+const TIMEOUT: Duration = Duration::from_secs(10);
+
+impl super::ConstructProvider for Provider {
+    fn new() -> Result<Self, ProviderError> {
+        // Try to spawn the zypper subprocess
+        let mut zypper = Self::zypper_cmd()
+            .spawn()
+            .wrap_err("Failed to spawn zypper process")
+            .map_err(|err| ProviderError::Unavailable(std::rc::Rc::new(err)))?;
+
+        let reader = TimeoutReader::new(zypper.stdout.take().unwrap(), TIMEOUT);
+        let stdin = zypper.stdin.take().unwrap();
+
+        Ok(Self::Process {
+            zypper: Zypper::new(stdin, reader)
+                .map_err(|err| ProviderError::Unavailable(std::rc::Rc::new(err)))?,
+            proc: zypper,
+        })
+    }
+}
+
+struct Package {
+    name: String,
+}
+
+pub(super) struct Transaction {
+    from: Option<Vec<String>>,
+    packages: Vec<Package>,
+}
+
+params! { struct Params { from: Option<Vec<String>> } }
+params! { struct PackageParams {} }
+
+impl super::Provider for Provider {
+    type Transaction = Transaction;
+    type State = ();
+
+    fn new_transaction(
+        &mut self,
+        args: super::Args,
+        packages: super::Packages,
+        ctx: &mut EvalCtx,
+    ) -> Result<Self::Transaction, ()> {
+        // Parse the package block params
+        let params = Params::recover_default(args, ctx);
+
+        let mut packs = Vec::new();
+        let mut degraded = params.is_degraded();
+        // Verify packages
+        for package in packages.packages {
+            if let Some(args) = PackageParams::from_args(package.args, ctx) {
+                if args.is_degraded() {
+                    degraded = true;
+                    continue;
+                }
+
+                let exists = match self {
+                    Provider::Process { zypper, proc } => zypper.exists(&package.name.inner),
+                    Provider::Super { zypper } => zypper.exists(&package.name.inner),
+                };
+
+                match exists {
+                    // The package may exist
+                    Ok(exists) => {
+                        // All is well
+                        if exists {
+                            let package = Package {
+                                name: package.name.inner,
+                            };
+                            packs.push(package);
+                        // The package doesn't exist
+                        } else {
+                            ctx.emit(Error::PackageNotRecognized(
+                                package.name.inner,
+                                package.name.span,
+                            ));
+                            degraded = true;
+                        }
+                    }
+                    // Some other error happened while confirming the package's existence
+                    Err(other) => {
+                        ctx.emit(Error::Eyre(other, package.name.span));
+                        degraded = true;
+                    }
+                }
+            }
+        }
+
+        if !degraded && !params.is_degraded() {
+            Ok(Transaction {
+                from: params.value.from,
+                packages: packs,
+            })
+        } else {
+            Err(())
+        }
+    }
+
+    fn install(
+        &mut self,
+        transaction: &Self::Transaction,
+        ctx: SuperCtx,
+    ) -> (super::OpResult, Self::State) {
+        let res = self
+            .get_super(&mut ctx)
+            .and_then(|zypper| zypper.zypper_op(transaction, Operation::Install, ctx));
+        (res, ())
+    }
+
+    fn remove(
+        &mut self,
+        transaction: &Self::Transaction,
+        _state: Option<Self::State>,
+        ctx: SuperCtx,
+    ) -> super::OpResult {
+        self.get_super(&mut ctx)?
+            .zypper_op(transaction, Operation::Remove, ctx)
+    }
+}
+
+impl Provider {
+    fn zypper_cmd() -> std::process::Command {
+        let mut cmd = std::process::Command::new("zypper");
+        cmd.args(["--xmlout", "--non-interactive", "shell"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        cmd
+    }
+
+    /// Create a new pivileged super instance
+    fn new_super(ctx: &mut SuperCtx) -> color_eyre::Result<SuperZypper> {
+        let proc = ctx.spawn(Self::zypper_cmd())?;
+        SuperZypper::new(proc.stdin, TimeoutReader::new(proc.stdout, TIMEOUT))
+    }
+
+    /// Get a privileged super instance
+    fn get_super(&mut self, ctx: &mut SuperCtx) -> color_eyre::Result<&mut SuperZypper> {
+        match self {
+            // If we have a normal process, kill it and launch a privileged instance
+            Provider::Process { zypper, proc } => {
+                // Zypper claims to exit gracefully when killed
+                proc.kill().wrap_err("Old process already exited")?;
+                // Update the process
+                *self = Self::Super {
+                    zypper: Self::new_super(ctx)?,
+                };
+            }
+            _ => (),
+        }
+        // We should be running a super now
+        match self {
+            Provider::Super { zypper } => Ok(zypper),
+            Provider::Process { zypper, proc } => unreachable!(),
         }
     }
 }
