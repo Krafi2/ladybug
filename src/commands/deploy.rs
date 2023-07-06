@@ -1,13 +1,13 @@
 use color_eyre::owo_colors::OwoColorize;
 use indicatif::{ProgressBar, ProgressDrawTarget};
-use interpreter::provider::{ExecutionCtx, Manager};
+use provider::ExecCtx;
 use std::{
     collections::{HashMap, HashSet},
     iter::FromIterator,
 };
 use tracing::debug;
 
-use crate::{commands::Status, unit::loader::UnitId};
+use crate::{commands::Status, context::Context, unit::loader::UnitId};
 
 use super::{pb_style, print_error, Module};
 
@@ -29,10 +29,9 @@ pub struct Deploy {
 impl Deploy {
     pub(super) fn run(
         self,
-        mut manager: Manager,
         mut modules: HashMap<UnitId, Module>,
         root: UnitId,
-        context: &crate::context::Context,
+        context: &mut Context,
     ) -> super::CmdResult {
         let mut errn = 0;
 
@@ -49,7 +48,7 @@ impl Deploy {
             }
         }
 
-        let deployed = self.deploy_modules(queue, &mut modules, &mut manager, context);
+        let deployed = self.deploy_modules(queue, &mut modules, context);
 
         errn += deployed
             .iter()
@@ -66,8 +65,7 @@ impl Deploy {
                 })
                 .collect();
             println!("\n\nEncountered an error, reverting changes:");
-            errn +=
-                super::remove_modules(to_remove, &mut modules, self.dry_run, &mut manager, context);
+            errn += super::remove_modules(to_remove, &mut modules, self.dry_run, context);
         }
 
         println!("");
@@ -93,9 +91,8 @@ impl Deploy {
         &self,
         queue: Vec<UnitId>,
         modules: &mut HashMap<UnitId, Module>,
-        manager: &mut Manager,
-        context: &crate::context::Context,
-    ) -> Vec<(UnitId, Vec<interpreter::provider::State>, bool)> {
+        context: &mut Context,
+    ) -> Vec<(UnitId, Vec<provider::State>, bool)> {
         let mut deployed = Vec::new();
         let queue_len = queue.len();
         for (i, id) in queue.into_iter().enumerate() {
@@ -111,7 +108,7 @@ impl Deploy {
                 pb.finish_with_message("Skipped".bright_black().to_string());
                 module.status = Status::Skipped;
             } else {
-                let (res, states) = deploy_unit(module, &pb, manager, context);
+                let (res, states) = deploy_unit(module, &pb, context);
                 let is_err = res.is_err();
                 deployed.push((id, states, is_err));
                 if let Err(err) = res {
@@ -209,22 +206,19 @@ fn generate_queue(root: UnitId, modules: &HashMap<UnitId, Module>) -> Vec<UnitId
 fn deploy_unit(
     module: &mut Module,
     pb: &ProgressBar,
-    manager: &mut Manager,
-    ctx: &crate::context::Context,
-) -> (
-    Result<(), color_eyre::Report>,
-    Vec<interpreter::provider::State>,
-) {
+    ctx: &mut Context,
+) -> (Result<(), color_eyre::Report>, Vec<provider::State>) {
     debug!("Deploying module {}", &module.path);
     let unit = module.unit.as_ref().expect("Unexpected error");
     let mut states = Vec::new();
+    let set_msg = |msg| pb.set_message(msg);
+    let exec = ExecCtx::new(&set_msg, module.path.bind(ctx.dotfile_dir().clone()));
 
     let res = unit
         .transactions
         .iter()
         .try_for_each(|transaction| {
-            let ctx = ExecutionCtx::new(Box::new(|msg| pb.set_message(msg.to_owned())));
-            let (res, state) = manager.install(transaction, ctx);
+            let (res, state) = ctx.interpreter().install(transaction, &exec);
             states.push(state);
             res
         })

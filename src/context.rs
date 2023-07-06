@@ -1,5 +1,6 @@
 use color_eyre::eyre::{bail, eyre, ContextCompat, Result, WrapErr};
 use common::rel_path::{HomeError, RelPath};
+use eval::IntoReport;
 use interpreter::Interpreter;
 use std::path::{Path, PathBuf};
 
@@ -9,7 +10,6 @@ pub struct Context {
     dotfile_dir: RelPath,
     home_dir: Result<PathBuf, HomeError>,
     shell: Shell,
-    root: bool,
     interpreter: Interpreter,
 }
 
@@ -19,7 +19,6 @@ impl std::fmt::Debug for Context {
             .field("dotfile_dir", &self.dotfile_dir)
             .field("home_dir", &self.home_dir)
             .field("shell", &self.shell)
-            .field("root", &self.root)
             .finish_non_exhaustive()
     }
 }
@@ -31,12 +30,11 @@ impl Context {
 
         let config_src = std::fs::read_to_string(&config_path)
             .wrap_err_with(|| format!("Failed to read config from file '{}'", config_path))?;
-        let (config, errors) =
-            interpreter.eval_config(&config_src, home_dir.as_deref().map_err(Clone::clone));
+        let (config, errors) = interpreter.eval_config(&config_src, home_dir.clone());
 
         let errn = errors.len();
         for err in errors {
-            let filename = &config_path.to_string();
+            let filename = config_path.to_string();
             let report = err.into_report(&filename);
             let res = report
                 .eprint::<(&str, ariadne::Source)>((&filename, ariadne::Source::from(&config_src)))
@@ -63,13 +61,8 @@ impl Context {
             dotfile_dir: dotfiles,
             home_dir,
             shell: config.shell.map(From::from).unwrap_or_else(default_shell),
-            root: detect_root(),
             interpreter,
         })
-    }
-
-    pub fn is_root(&self) -> bool {
-        self.root
     }
 
     pub fn dotfile_dir(&self) -> &RelPath {
@@ -87,8 +80,8 @@ impl Context {
             .map_err(Clone::clone)
     }
 
-    pub fn interpreter(&self) -> &Interpreter {
-        &self.interpreter
+    pub fn interpreter(&mut self) -> &mut Interpreter {
+        &mut self.interpreter
     }
 }
 

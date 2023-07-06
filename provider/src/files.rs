@@ -1,14 +1,17 @@
-use crate::{structures::FromArgs, Ctx, Span};
-use ariadne::{Color, Fmt, ReportKind};
-use color_eyre::eyre::{eyre, WrapErr};
-use common::rel_path::RelPath;
-use parser::Spanned;
 use std::{
     fs::{Metadata, OpenOptions},
     path::{Path, PathBuf},
 };
 
-use super::{ExecutionCtx, OpResult};
+use ariadne::{Color, Fmt, ReportKind};
+use color_eyre::eyre::{eyre, WrapErr};
+use common::rel_path::RelPath;
+use eval::{params, report, FromArgs};
+use parser::{Span, Spanned};
+
+use crate::{privileged::SuperCtx, EvalCtx, ExecCtx};
+
+use super::OpResult;
 
 #[derive(Debug)]
 pub enum Error {
@@ -18,12 +21,6 @@ pub enum Error {
     PathDoesntExist(RelPath, Span),
     PathUnreachable(RelPath, std::io::Error, Span),
     SourceNotADirectory(RelPath, Span),
-}
-
-impl Into<crate::error::Error> for Error {
-    fn into(self) -> crate::error::Error {
-        super::TransactionError::Files(self).into()
-    }
 }
 
 report! {
@@ -142,7 +139,7 @@ params! { struct ItemParams {} }
 pub struct Provider;
 
 impl super::ConstructProvider for Provider {
-    fn new(_root: bool) -> Result<Self, super::ProviderError> {
+    fn new() -> Result<Self, super::ProviderError> {
         Ok(Provider)
     }
 }
@@ -155,7 +152,8 @@ impl super::Provider for Provider {
         &mut self,
         args: crate::Args,
         packages: crate::Packages,
-        ctx: &mut Ctx,
+        ctx: &mut EvalCtx,
+        exec: &ExecCtx,
     ) -> Result<Self::Transaction, ()> {
         // Parse the package block params
         let params = Params::from_args(args, ctx).expect("Parser should be infallible");
@@ -194,7 +192,7 @@ impl super::Provider for Provider {
             })
             .unwrap_or(Conflict::Rename);
 
-        let dir = ctx.unit_dir().bind(ctx.dotfile_dir().clone());
+        let dir = exec.dir();
         let source = match source {
             // Attempt to create the specified source
             Some(source) => Source::from_path(&dir, source)
@@ -240,7 +238,8 @@ impl super::Provider for Provider {
     fn install(
         &mut self,
         transaction: &Self::Transaction,
-        mut ctx: ExecutionCtx,
+        _ctx: &mut SuperCtx,
+        exec: &ExecCtx,
     ) -> (OpResult, Self::State) {
         let Payload {
             method,
@@ -258,9 +257,9 @@ impl super::Provider for Provider {
             let dest = target.join(&file);
             match deploy_file(&source, &dest, *method, *conflicts) {
                 Ok(_) => {
-                    let msg = &format!("Deployed {source} to {dest}");
+                    let msg = format!("Deployed {source} to {dest}");
                     tracing::debug!("{}", msg);
-                    ctx.set_message(msg);
+                    exec.set_message(msg);
                 }
                 Err(err) => {
                     tracing::error!("Failed to deploy {source} to {dest}: {err}");
@@ -281,7 +280,8 @@ impl super::Provider for Provider {
         &mut self,
         transaction: &Self::Transaction,
         res: Option<Self::State>,
-        mut ctx: ExecutionCtx,
+        _ctx: &mut SuperCtx,
+        exec: &ExecCtx,
     ) -> OpResult {
         let Payload {
             method,
@@ -307,7 +307,7 @@ impl super::Provider for Provider {
                 Ok(_) => {
                     let msg = format!("Removed {dest}");
                     tracing::debug!("{}", msg);
-                    ctx.set_message(&msg);
+                    exec.set_message(msg);
                 }
                 // Log errors but don't report to user
                 Err(err) => {

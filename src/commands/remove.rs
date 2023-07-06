@@ -1,7 +1,5 @@
 use std::collections::{HashMap, HashSet};
 
-use interpreter::provider::Manager;
-
 use crate::unit::loader::UnitId;
 
 use super::{Module, Status};
@@ -16,10 +14,9 @@ pub struct Remove {
 impl Remove {
     pub(super) fn run(
         self,
-        mut manager: Manager,
         mut modules: HashMap<UnitId, Module>,
         root: UnitId,
-        ctx: &crate::context::Context,
+        ctx: &mut crate::context::Context,
     ) -> super::CmdResult {
         println!("Removing units:");
         if let Some(topics) = self.topics.as_ref() {
@@ -50,7 +47,7 @@ impl Remove {
             }
         }
 
-        let errn = super::remove_modules(queue, &mut modules, self.dry_run, &mut manager, ctx);
+        let errn = super::remove_modules(queue, &mut modules, self.dry_run, ctx);
 
         println!("");
         // Print number of errors

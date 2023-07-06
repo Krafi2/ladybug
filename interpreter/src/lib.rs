@@ -1,8 +1,4 @@
-#[macro_use]
 pub mod error;
-#[macro_use]
-pub mod structures;
-pub mod provider;
 
 use std::{
     collections::HashMap,
@@ -12,14 +8,15 @@ use std::{
 
 use ariadne::{Color, Fmt, ReportKind};
 
-use common::rel_path::RelPath;
-use error::IntoReport;
-use parser::{span::AriadneSpan, Ident, Span, Spanned};
-use structures::Partial;
+use common::{
+    command::Command,
+    rel_path::{HomeError, RelPath},
+};
+use eval::{params, report, Args, Env, IntoReport, Partial, RecoverFromArgs, Value};
+use parser::{Body, Ident, Span, Spanned};
+use provider::{ExecCtx, Manager, Package, Transaction};
 
-use self::structures::FromValue;
-
-pub type Env = HashMap<Ident, Spanned<Value>>;
+type EvalCtx = eval::Ctx;
 
 #[derive(Debug)]
 enum BlockType {
@@ -141,209 +138,6 @@ report! {
     }
 }
 
-#[derive(Debug, Clone)]
-pub enum Value {
-    String(String),
-    Bool(bool),
-    List(Vec<Spanned<Value>>),
-    Map(Vec<Spanned<Arg>>),
-    Code(String),
-    Item(Spanned<Ident>, Args),
-    Error(ValueError),
-}
-
-#[derive(Debug, Clone)]
-pub enum ValueError {
-    UnknownVar(Ident),
-    VarError(Ident, Box<Spanned<ValueError>>),
-}
-
-impl IntoReport for Spanned<ValueError> {
-    fn into_report(self, filename: &str) -> ariadne::Report<AriadneSpan> {
-        (self.inner, self.span).into_report(filename)
-    }
-}
-
-report! {
-    (ValueError, Span) {
-        (ValueError::UnknownVar(var), span) => {
-            report(ReportKind::Error, span.start);
-            message("Undefined variable ${}", var.fg(Color::Red));
-            label(span, Color::Red, "This variable is not defined");
-        }
-        (ValueError::VarError(var, _), span) => {
-            report(ReportKind::Error, span.start);
-            message("Encountered an error while evaluating variable ${}", var.fg(Color::Red));
-            label(span, Color::Red, "Cannot evaluate this variable");
-        }
-    }
-}
-
-impl Value {
-    fn from_expr(expr: parser::Expr, env: &Env) -> Self {
-        match expr {
-            parser::Expr::Variable(var) => match env.get(&var).cloned() {
-                Some(v) => match v.inner {
-                    Value::Error(e) => Value::Error(ValueError::VarError(
-                        var,
-                        Box::new(Spanned::new(e.clone(), v.span)),
-                    )),
-                    v => v,
-                },
-                None => Value::Error(ValueError::UnknownVar(var)),
-            },
-            parser::Expr::String(s) => Self::String(s),
-            parser::Expr::Bool(b) => Self::Bool(b),
-            parser::Expr::List(list) => Self::List(
-                list.into_iter()
-                    .map(|expr| expr.map(|expr| Self::from_expr(expr, env)))
-                    .collect(),
-            ),
-            parser::Expr::Map(_) => todo!(),
-            parser::Expr::Code(_) => todo!(),
-            parser::Expr::Item(_, _) => todo!(),
-        }
-    }
-
-    fn get_type(&self) -> Type {
-        match self {
-            Value::String(_) => Type::String,
-            Value::Bool(_) => Type::Bool,
-            Value::List(_) => Type::List,
-            Value::Map(_) => Type::Map,
-            Value::Code(_) => Type::Code,
-            Value::Item(_, _) => Type::Item,
-            Value::Error(_) => Type::Error,
-        }
-    }
-}
-#[derive(Debug, Clone, Copy)]
-enum Type {
-    String,
-    Bool,
-    List,
-    Map,
-    Code,
-    Item,
-    Error,
-}
-
-impl Display for Type {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let s = match self {
-            Type::String => "String",
-            Type::Bool => "Bool",
-            Type::List => "List",
-            Type::Map => "Map",
-            Type::Code => "Code",
-            Type::Item => "Item",
-            Type::Error => "Error",
-        };
-        f.write_str(s)
-    }
-}
-
-struct Package {
-    name: Spanned<String>,
-    args: Args,
-    span: Span,
-}
-
-struct Packages {
-    packages: Vec<Package>,
-    span: Span,
-}
-
-impl Packages {
-    fn from_exprs(items: Spanned<Vec<Spanned<parser::Expr>>>, env: &Env, ctx: &mut Ctx) -> Self {
-        Self {
-            packages: items
-                .inner
-                .into_iter()
-                .filter_map(|item| match Value::from_expr(item.inner, env) {
-                    Value::String(name) => Some(Package {
-                        name: Spanned::new(name.clone(), item.span),
-                        args: Args::from_item(&Spanned::new(Ident(name), item.span), None, env),
-                        span: item.span,
-                    }),
-                    Value::Item(ident, args) => Some(Package {
-                        name: ident.map(|ident| ident.0),
-                        args,
-                        span: item.span,
-                    }),
-                    other => {
-                        ctx.emit(structures::ConvertError::TypeErr {
-                            span: item.span,
-                            // TODO: Better handle expected types
-                            // TODO: Improve errors when the type is a value of a variable
-                            expected: Type::String,
-                            found: other.get_type(),
-                        });
-                        None
-                    }
-                })
-                .collect(),
-
-            span: items.span,
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct Arg {
-    pub name: Spanned<Ident>,
-    pub value: Spanned<Value>,
-    pub span: Span,
-}
-
-impl Arg {
-    fn from_expr(expr: Spanned<parser::Param>, env: &Env) -> Self {
-        Arg {
-            name: expr.inner.name,
-            value: expr.inner.val.map(|val| Value::from_expr(val, &env)),
-            span: expr.span,
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct Args {
-    pub args: Vec<Arg>,
-    pub span: Span,
-    /// If true, the args were present in the source code and the span is accurate.
-    /// Otherwise were omitted and should be assumed empty. The provided span
-    /// points to the space where args could be placed.
-    pub accurate_span: bool,
-}
-
-impl Args {
-    fn from_exprs(exprs: Spanned<Vec<Spanned<parser::Param>>>, env: &Env) -> Self {
-        Self {
-            args: exprs
-                .inner
-                .into_iter()
-                .map(|arg| Arg::from_expr(arg, env))
-                .collect(),
-            span: exprs.span,
-            accurate_span: true,
-        }
-    }
-    fn from_item(
-        ident: &Spanned<Ident>,
-        args: Option<Spanned<Vec<Spanned<parser::Param>>>>,
-        env: &Env,
-    ) -> Self {
-        match args {
-            Some(expr) => Self::from_exprs(expr, env),
-            None => Self {
-                args: Vec::new(),
-                span: ident.span,
-                accurate_span: false,
-            },
-        }
-    }
-}
-
 // A path relative to the dotfile directory
 #[derive(Debug, Clone)]
 pub struct LocalPath(PathBuf);
@@ -440,49 +234,48 @@ impl UnitPath {
         location.push(LocalPath::from(self.clone()).0);
         location
     }
-}
 
-impl FromValue for UnitPath {
-    fn from_value(value: Spanned<Value>, ctx: &mut Ctx) -> Option<Partial<Self>> {
-        <Spanned<PathBuf>>::from_value(value, ctx).and_then(|path| {
-            path.map(|path| {
-                let span = path.span;
-                let path = path.inner;
+    pub fn from_path(
+        path: Spanned<PathBuf>,
+        ctx: &mut EvalCtx,
+        unit_dir: UnitPath,
+        dotfile_dir: RelPath,
+    ) -> Option<Partial<Self>> {
+        let span = path.span;
+        let path = path.inner;
 
-                let res = if path.is_absolute() || path.starts_with("~") {
-                    Err(PathError::NotRelative(span, LocalPath(path)))
-                } else {
-                    match path.components().count() {
-                        0 => Err(PathError::Empty(span)),
-                        1 => {
-                            let path =
-                                UnitPath(UnitPathInner::Path(ctx.unit_dir().clone().join(path)));
-                            if path
-                                .clone()
-                                .unit_file()
-                                .bind(ctx.dotfile_dir().clone())
-                                .exists()
-                            {
-                                Ok(path)
-                            } else {
-                                Err(PathError::NotFound(span, path))
-                            }
-                        }
-                        _ => Err(PathError::TooDeep(span, LocalPath(path))),
-                    }
-                };
-                match res {
-                    Ok(path) => Partial::complete(Some(path)),
-                    Err(err) => {
-                        ctx.emit(err);
-                        Partial::degraded(None)
+        let res = if path.is_absolute() || path.starts_with("~") {
+            Err(PathError::NotRelative(span, LocalPath(path)))
+        } else {
+            match path.components().count() {
+                0 => Err(PathError::Empty(span)),
+                1 => {
+                    let path = UnitPath(UnitPathInner::Path(unit_dir.join(path)));
+                    if path.clone().unit_file().bind(dotfile_dir).exists() {
+                        Ok(path)
+                    } else {
+                        Err(PathError::NotFound(span, path))
                     }
                 }
-            })
-            .transpose()
-        })
+                _ => Err(PathError::TooDeep(span, LocalPath(path))),
+            }
+        };
+        match res {
+            Ok(path) => Partial::complete(Some(path)),
+            Err(err) => {
+                ctx.emit(err.boxed());
+                Partial::degraded(None)
+            }
+        }
+        .transpose()
     }
 }
+
+// impl FromValue for UnitPath {
+//     fn from_value(value: Spanned<Value>, ctx: &mut EvalCtx) -> Option<Partial<Self>> {
+//         <Spanned<PathBuf>>::from_value(value, ctx).and_then(|path| )
+//     }
+// }
 
 impl Display for UnitPath {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -493,319 +286,330 @@ impl Display for UnitPath {
     }
 }
 
-pub use eval::Ctx;
-pub use eval::{Interpreter, RoutineFigment, UnitFigment};
-mod eval {
-    use std::{collections::HashMap, path::Path};
+#[derive(Clone, Copy)]
+enum Name {
+    Unit,
+    Env,
+    Files,
+    Packages,
+    Deploy,
+    Remove,
+    Capture,
+}
 
-    use super::{error::Error, Args, Env, Packages, Spanned, UnitPath, Value};
-    use crate::{provider::Transaction, structures::RecoverFromArgs, BlockType, StructureError};
-    use common::{command::Command, rel_path::RelPath};
-    use parser::{Body, Ident};
-
-    #[derive(Clone, Copy)]
-    enum Name {
-        Unit,
-        Env,
-        Files,
-        Packages,
-        Deploy,
-        Remove,
-        Capture,
-    }
-
-    impl Name {
-        fn from_ident(ident: &Ident) -> Option<Name> {
-            match ident.0.as_str() {
-                "unit" => Some(Self::Unit),
-                "env" => Some(Self::Env),
-                "files" => Some(Self::Files),
-                "packages" => Some(Self::Packages),
-                "deploy" => Some(Self::Deploy),
-                "remove" => Some(Self::Remove),
-                "capture" => Some(Self::Capture),
-                _ => None,
-            }
+impl Name {
+    fn from_ident(ident: &Ident) -> Option<Name> {
+        match ident.0.as_str() {
+            "unit" => Some(Self::Unit),
+            "env" => Some(Self::Env),
+            "files" => Some(Self::Files),
+            "packages" => Some(Self::Packages),
+            "deploy" => Some(Self::Deploy),
+            "remove" => Some(Self::Remove),
+            "capture" => Some(Self::Capture),
+            _ => None,
         }
     }
+}
 
-    params! { struct NoParams {} }
+params! { struct NoParams {} }
 
-    params! {
-        struct RoutineParams {
-            shell: Option<Command>,
-            stdout: Option<bool>,
-            workdir: Option<RelPath>,
-        }
+params! {
+    struct RoutineParams {
+        shell: Option<Command>,
+        stdout: Option<bool>,
+        workdir: Option<RelPath>,
     }
+}
 
-    params! {
-        struct UnitHeader {
-            name: Option<String>,
-            desc: Option<String>,
-            topic: Option<String>,
-            shell: Option<Command>,
-            members: Option<Vec<UnitPath>>,
-        }
+params! {
+    struct UnitHeaderFigment {
+        name: Option<String>,
+        desc: Option<String>,
+        topic: Option<String>,
+        shell: Option<Command>,
+        members: Option<Vec<Spanned<PathBuf>>>,
     }
+}
 
-    #[derive(Debug, Default)]
-    pub struct RoutineFigment {
+struct UnitHeader {
+    name: Option<String>,
+    desc: Option<String>,
+    topic: Option<String>,
+    shell: Option<Command>,
+    members: Option<Vec<UnitPath>>,
+}
+
+impl UnitHeader {
+    fn parse(
+        body: Args,
+        path: &UnitPath,
+        dotfile_dir: &RelPath,
+        ctx: &mut EvalCtx,
+    ) -> Partial<UnitHeader> {
+        UnitHeaderFigment::parse_raw_params(body, ctx).map(|(name, desc, topic, shell, members)| {
+            let members = members.flatten().map(|members| {
+                members
+                    .into_iter()
+                    .fold(Partial::complete(None), |members, p| {
+                        if let Some(path) =
+                            UnitPath::from_path(p, ctx, path.clone(), dotfile_dir.clone())
+                        {
+                            path.map(|path| {
+                                members.map_complete(|members: Option<Vec<UnitPath>>| match members
+                                {
+                                    Some(mut members) => {
+                                        members.push(path);
+                                        Some(members)
+                                    }
+                                    None => Some(vec![path]),
+                                })
+                            })
+                        } else {
+                            members
+                        }
+                    })
+            });
+            members
+                .unwrap_or_default()
+                .map_complete(|members| UnitHeader {
+                    name: name.unwrap_or_default(),
+                    desc: desc.unwrap_or_default(),
+                    topic: topic.unwrap_or_default(),
+                    shell: shell.unwrap_or_default(),
+                    members,
+                })
+        })
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct RoutineFigment {
+    pub shell: Option<Command>,
+    pub stdout: Option<bool>,
+    pub workdir: Option<RelPath>,
+    pub body: String,
+}
+
+#[derive(Debug, Default)]
+pub struct UnitFigment {
+    pub name: Option<String>,
+    pub desc: Option<String>,
+    pub topic: Option<String>,
+    pub shell: Option<Command>,
+
+    pub transactions: Vec<Transaction>,
+    pub deploy: Vec<RoutineFigment>,
+    pub remove: Vec<RoutineFigment>,
+    pub capture: Vec<RoutineFigment>,
+}
+
+pub struct UnitData {
+    pub figment: UnitFigment,
+    pub env: Env,
+    pub members: Option<Vec<UnitPath>>,
+    pub errors: Vec<eval::Error>,
+}
+
+params! {
+    pub struct Config {
+        pub dotfiles: Option<RelPath>,
         pub shell: Option<Command>,
-        pub stdout: Option<bool>,
-        pub workdir: Option<RelPath>,
-        pub body: String,
     }
+}
 
-    #[derive(Debug, Default)]
-    pub struct UnitFigment {
-        pub name: Option<String>,
-        pub desc: Option<String>,
-        pub topic: Option<String>,
-        pub shell: Option<Command>,
+pub struct Interpreter {
+    parser: parser::Parser,
+    manager: Manager,
+}
 
-        pub transactions: Vec<Transaction>,
-        pub deploy: Vec<RoutineFigment>,
-        pub remove: Vec<RoutineFigment>,
-        pub capture: Vec<RoutineFigment>,
-    }
-
-    pub struct UnitData {
-        pub figment: UnitFigment,
-        pub env: Env,
-        pub members: Option<Vec<UnitPath>>,
-        pub errors: Vec<Error>,
-    }
-
-    params! {
-        pub struct Config {
-            pub dotfiles: Option<RelPath>,
-            pub shell: Option<Command>,
+impl Interpreter {
+    pub fn new() -> Self {
+        Self {
+            parser: parser::Parser::new(),
+            manager: Manager::new(),
         }
     }
 
-    pub struct Ctx<'a> {
-        members: Vec<UnitPath>,
-        dir: Option<UnitPath>,
-        home_dir: Result<&'a Path, common::rel_path::HomeError>,
-        dotfile_dir: Option<&'a RelPath>,
-        root: bool,
-        errors: Vec<crate::error::Error>,
-    }
+    pub fn eval_config(
+        &self,
+        src: &str,
+        home_dir: Result<PathBuf, common::rel_path::HomeError>,
+    ) -> (Config, Vec<eval::Error>) {
+        let mut ctx = EvalCtx {
+            home_dir,
 
-    impl<'a> Ctx<'a> {
-        pub fn members(&self) -> &[UnitPath] {
-            &self.members
+            errors: Vec::new(),
+        };
+        let env = &HashMap::new();
+
+        let (blocks, errors) = self.parser.parse(src);
+        for err in errors {
+            ctx.emit(err);
         }
 
-        pub fn unit_dir(&self) -> &UnitPath {
-            self.dir.as_ref().expect("Not in unit context")
-        }
+        let mut dotfiles = None;
+        let mut shell = None;
 
-        pub fn home_dir(&self) -> Result<&Path, common::rel_path::HomeError> {
-            self.home_dir
-        }
+        for block in blocks {
+            let block = block.inner;
+            let ident = block.ident;
+            let args = Args::from_item(&ident, block.params, &env);
+            match ident.inner.0.as_str() {
+                "config" => {
+                    let _ = NoParams::recover_default(args, &mut ctx);
+                    match block.body.inner {
+                        Body::Map(body) => {
+                            let body = Args::from_exprs(Spanned::new(body, block.body.span), &env);
+                            let config = Config::recover_default(body, &mut ctx);
 
-        pub fn dotfile_dir(&self) -> &RelPath {
-            self.dotfile_dir.expect("Not in unit context")
-        }
-
-        pub fn emit<E: Into<crate::error::Error>>(&mut self, error: E) {
-            self.errors.push(error.into());
-        }
-
-        pub fn has_root(&self) -> bool {
-            self.root
-        }
-    }
-
-    pub struct Interpreter {
-        parser: parser::Parser,
-    }
-
-    impl Interpreter {
-        pub fn new() -> Self {
-            Self {
-                parser: parser::Parser::new(),
-            }
-        }
-
-        pub fn eval_config(
-            &self,
-            src: &str,
-            home_dir: Result<&Path, common::rel_path::HomeError>,
-        ) -> (Config, Vec<Error>) {
-            let mut ctx = Ctx {
-                members: Vec::new(),
-                dir: None,
-                home_dir,
-                dotfile_dir: None,
-                root: false,
-                errors: Vec::new(),
-            };
-            let env = &HashMap::new();
-
-            let (blocks, errors) = self.parser.parse(src);
-            for err in errors {
-                ctx.emit(err);
-            }
-
-            let mut dotfiles = None;
-            let mut shell = None;
-
-            for block in blocks {
-                let block = block.inner;
-                let ident = block.ident;
-                let args = Args::from_item(&ident, block.params, &env);
-                match ident.inner.0.as_str() {
-                    "config" => {
-                        let _ = NoParams::recover_default(args, &mut ctx);
-                        match block.body.inner {
-                            Body::Map(body) => {
-                                let body =
-                                    Args::from_exprs(Spanned::new(body, block.body.span), &env);
-                                let config = Config::recover_default(body, &mut ctx);
-
-                                dotfiles = config.value.dotfiles;
-                                shell = config.value.shell;
-                            }
-                            other => ctx.emit(StructureError::WrongType {
+                            dotfiles = config.value.dotfiles;
+                            shell = config.value.shell;
+                        }
+                        other => ctx.emit(
+                            StructureError::WrongType {
                                 span: block.body.span,
                                 found: BlockType::from(other),
                                 expected: BlockType::Map,
-                            }),
-                        }
+                            }
+                            .boxed(),
+                        ),
                     }
-                    _ => ctx.emit(StructureError::UnexpectedBlock {
+                }
+                _ => ctx.emit(
+                    StructureError::UnexpectedBlock {
                         span: ident.span,
                         found: ident.inner,
                         expected: vec!["config"],
-                    }),
-                }
+                    }
+                    .boxed(),
+                ),
             }
-
-            (Config { dotfiles, shell }, ctx.errors)
         }
 
-        pub fn eval(
-            &self,
-            src: &str,
-            path: UnitPath,
-            manager: &mut super::provider::Manager,
-            mut env: Env,
-            home_dir: Result<&Path, common::rel_path::HomeError>,
-            dotfile_dir: &RelPath,
-            root: bool,
-        ) -> UnitData {
-            let mut ctx = Ctx {
-                members: Vec::new(),
-                dir: Some(path),
-                home_dir,
-                dotfile_dir: Some(dotfile_dir),
-                root,
-                errors: Vec::new(),
-            };
+        (Config { dotfiles, shell }, ctx.errors)
+    }
 
-            let (blocks, errors) = self.parser.parse(src);
-            for err in errors {
-                ctx.emit(err);
-            }
+    pub fn eval(
+        &mut self,
+        src: &str,
+        path: UnitPath,
+        mut env: Env,
+        home_dir: Result<PathBuf, HomeError>,
+        dotfile_dir: RelPath,
+        set_msg: &dyn Fn(String),
+    ) -> UnitData {
+        let mut ctx = EvalCtx {
+            home_dir,
+            errors: Vec::new(),
+        };
 
-            let mut unit_name = None;
-            let mut desc = None;
-            let mut topic = None;
-            let mut shell = None;
-            let mut members = None;
+        let (blocks, errors) = self.parser.parse(src);
+        for err in errors {
+            ctx.emit(err);
+        }
 
-            let mut transactions = Vec::new();
-            let mut deploy = Vec::new();
-            let mut remove = Vec::new();
-            let mut capture = Vec::new();
+        let mut unit_name = None;
+        let mut desc = None;
+        let mut topic = None;
+        let mut shell = None;
+        let mut members = None;
 
-            for (i, block) in blocks.into_iter().enumerate() {
-                let block = block.inner;
-                let ident = block.ident;
-                let args = Args::from_item(&ident, block.params, &env);
-                let name = match Name::from_ident(&ident.inner) {
-                    Some(name) => name,
-                    None => {
-                        ctx.emit(StructureError::UnexpectedBlock {
+        let mut transactions = Vec::new();
+        let mut deploy = Vec::new();
+        let mut remove = Vec::new();
+        let mut capture = Vec::new();
+
+        for (i, block) in blocks.into_iter().enumerate() {
+            let block = block.inner;
+            let ident = block.ident;
+            let args = Args::from_item(&ident, block.params, &env);
+            let name = match Name::from_ident(&ident.inner) {
+                Some(name) => name,
+                None => {
+                    ctx.emit(
+                        StructureError::UnexpectedBlock {
                             span: ident.span,
                             found: ident.inner,
                             expected: vec![
                                 "unit", "env", "packages", "files", "deploy", "remove", "capture",
                             ],
-                        });
+                        }
+                        .boxed(),
+                    );
 
-                        continue;
-                    }
-                };
+                    continue;
+                }
+            };
 
-                match name {
-                    Name::Unit if i == 0 => (),
-                    Name::Unit => ctx.emit(StructureError::MisplacedUnit(ident.span)),
-                    Name::Env if i > 1 => ctx.emit(StructureError::MisplacedEnv(ident.span)),
-                    _ if i == 0 => ctx.emit(StructureError::ExpectedUnit(ident.span, ident.inner)),
-                    _ => (),
+            match name {
+                Name::Unit if i == 0 => (),
+                Name::Unit => ctx.emit(StructureError::MisplacedUnit(ident.span).boxed()),
+                Name::Env if i > 1 => ctx.emit(StructureError::MisplacedEnv(ident.span).boxed()),
+                _ if i == 0 => {
+                    ctx.emit(StructureError::ExpectedUnit(ident.span, ident.inner).boxed())
+                }
+                _ => (),
+            }
+
+            match (name, block.body.inner) {
+                (Name::Unit, Body::Map(body)) => {
+                    let _ = NoParams::recover_default(args, &mut ctx);
+                    let body = Args::from_exprs(Spanned::new(body, block.body.span), &env);
+                    let header = UnitHeader::parse(body, &path, &dotfile_dir, &mut ctx).value;
+                    unit_name = header.name;
+                    desc = header.desc;
+                    topic = header.topic;
+                    shell = header.shell;
+                    members = header.members;
                 }
 
-                match (name, block.body.inner) {
-                    (Name::Unit, Body::Map(body)) => {
-                        let _ = NoParams::recover_default(args, &mut ctx);
-                        let body = Args::from_exprs(Spanned::new(body, block.body.span), &env);
-                        let header = UnitHeader::recover_default(body, &mut ctx).value;
-                        unit_name = header.name;
-                        desc = header.desc;
-                        topic = header.topic;
-                        shell = header.shell;
-                        members = header.members;
-                        if let Some(members) = members.as_ref() {
-                            ctx.members = members.clone();
-                        }
-                    }
-                    (Name::Env, Body::Map(body)) => {
-                        let _ = NoParams::recover_default(args, &mut ctx);
-                        for arg in body {
-                            let name = arg.inner.name.inner;
-                            let val = arg.inner.val.map(|val| Value::from_expr(val, &env));
+                (Name::Env, Body::Map(body)) => {
+                    let _ = NoParams::recover_default(args, &mut ctx);
+                    for arg in body {
+                        let name = arg.inner.name.inner;
+                        let val = arg.inner.val.map(|val| Value::from_expr(val, &env));
 
-                            if let Value::Error(err) = &val.inner {
-                                ctx.emit(Spanned::new(err.clone(), val.span));
-                            }
-                            env.insert(name, val);
+                        if let Value::Error(err) = &val.inner {
+                            ctx.emit(Spanned::new(err.clone(), val.span));
                         }
+                        env.insert(name, val);
                     }
-                    (Name::Files | Name::Packages, Body::List(items)) => {
-                        let packages = Packages::from_exprs(
-                            Spanned::new(items, block.body.span),
-                            &env,
-                            &mut ctx,
-                        );
-                        let res = match name {
-                            Name::Files => manager.new_files(ident.span, args, packages, &mut ctx),
-                            Name::Packages => manager.new_transaction(args, packages, &mut ctx),
-                            _ => unreachable!(),
-                        };
-                        if let Ok(trans) = res {
-                            transactions.push(trans)
-                        }
+                }
+                (Name::Files | Name::Packages, Body::List(items)) => {
+                    let exec = ExecCtx::new(set_msg, path.bind(dotfile_dir.clone()));
+                    let packages =
+                        new_packages(Spanned::new(items, block.body.span), &env, &mut ctx);
+                    let res = match name {
+                        Name::Files => self
+                            .manager
+                            .new_files(ident.span, args, packages, &mut ctx, &exec),
+                        Name::Packages => self
+                            .manager
+                            .new_transaction(args, packages, &mut ctx, &exec),
+                        _ => unreachable!(),
+                    };
+                    if let Ok(trans) = res {
+                        transactions.push(trans)
                     }
-                    (Name::Deploy | Name::Remove | Name::Capture, Body::Code(code)) => {
-                        let params = RoutineParams::recover_default(args, &mut ctx).value;
-                        let routine = RoutineFigment {
-                            shell: params.shell,
-                            stdout: params.stdout,
-                            workdir: params.workdir,
-                            body: code,
-                        };
-                        match name {
-                            Name::Deploy => deploy.push(routine),
-                            Name::Remove => remove.push(routine),
-                            Name::Capture => capture.push(routine),
-                            _ => unreachable!(),
-                        }
+                }
+                (Name::Deploy | Name::Remove | Name::Capture, Body::Code(code)) => {
+                    let params = RoutineParams::recover_default(args, &mut ctx).value;
+                    let routine = RoutineFigment {
+                        shell: params.shell,
+                        stdout: params.stdout,
+                        workdir: params.workdir,
+                        body: code,
+                    };
+                    match name {
+                        Name::Deploy => deploy.push(routine),
+                        Name::Remove => remove.push(routine),
+                        Name::Capture => capture.push(routine),
+                        _ => unreachable!(),
                     }
-                    (name, other) => ctx.emit(StructureError::WrongType {
+                }
+                (name, other) => ctx.emit(
+                    StructureError::WrongType {
                         span: block.body.span,
                         found: BlockType::from(other),
                         expected: match name {
@@ -817,25 +621,77 @@ mod eval {
                             Name::Remove => BlockType::Code,
                             Name::Capture => BlockType::Code,
                         },
-                    }),
-                }
-            }
-
-            UnitData {
-                figment: UnitFigment {
-                    name: unit_name,
-                    desc,
-                    topic,
-                    shell,
-                    transactions,
-                    deploy,
-                    remove,
-                    capture,
-                },
-                env,
-                members,
-                errors: ctx.errors,
+                    }
+                    .boxed(),
+                ),
             }
         }
+
+        UnitData {
+            figment: UnitFigment {
+                name: unit_name,
+                desc,
+                topic,
+                shell,
+                transactions,
+                deploy,
+                remove,
+                capture,
+            },
+            env,
+            members,
+            errors: ctx.errors,
+        }
+    }
+}
+
+impl std::ops::Deref for Interpreter {
+    type Target = Manager;
+
+    fn deref(&self) -> &Self::Target {
+        &self.manager
+    }
+}
+
+impl std::ops::DerefMut for Interpreter {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.manager
+    }
+}
+
+fn new_packages(
+    items: Spanned<Vec<Spanned<parser::Expr>>>,
+    env: &eval::Env,
+    ctx: &mut eval::Ctx,
+) -> provider::Packages {
+    provider::Packages {
+        packages: items
+            .inner
+            .into_iter()
+            .filter_map(|item| match Value::from_expr(item.inner, env) {
+                Value::String(name) => Some(Package {
+                    name: Spanned::new(name.clone(), item.span),
+                    args: Args::from_item(&Spanned::new(parser::Ident(name), item.span), None, env),
+                    span: item.span,
+                }),
+                Value::Item(ident, args) => Some(Package {
+                    name: ident.map(|ident| ident.0),
+                    args,
+                    span: item.span,
+                }),
+                other => {
+                    ctx.emit(eval::ConvertError::TypeErr {
+                        span: item.span,
+                        // TODO: Better handle expected types
+                        // TODO: Improve errors when the type is a value of a variable
+                        expected: eval::Type::String,
+                        found: other.get_type(),
+                    });
+                    None
+                }
+            })
+            .collect(),
+
+        span: items.span,
     }
 }

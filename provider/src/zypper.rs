@@ -1,32 +1,28 @@
 use std::{
     io::{BufReader, Write},
-    process::{ChildStdin, ChildStdout, Stdio},
+    process::{Child, Stdio},
     time::Duration,
 };
 
 use ariadne::{Color, Fmt, ReportKind};
 use color_eyre::eyre::{eyre, WrapErr};
+use eval::{params, report, FromArgs, RecoverFromArgs};
+use parser::Span;
 use quick_xml::events::Event;
 use quick_xml::reader::Reader as XmlReader;
 use timeout_readwrite::TimeoutReader;
 use tracing::debug;
 
-use super::{ExecutionCtx, ProviderError};
+use super::ProviderError;
 use crate::{
-    structures::{FromArgs, RecoverFromArgs},
-    Ctx, Span,
+    privileged::{Stdin, Stdout, SuperCtx, SuperProc},
+    EvalCtx, ExecCtx,
 };
 
 #[derive(Debug)]
 pub enum Error {
     PackageNotRecognized(String, Span),
     Eyre(color_eyre::Report, Span),
-}
-
-impl Into<crate::error::Error> for Error {
-    fn into(self) -> crate::error::Error {
-        super::TransactionError::Zypper(self).into()
-    }
 }
 
 report! {
@@ -44,72 +40,19 @@ report! {
     }
 }
 
-#[derive(PartialEq)]
-enum Operation {
-    Install,
-    Remove,
-}
-
 /// The zypper provider spawns a persistent zypper process using `zypper shell` and uses stdio to
 /// communicate commands.
-pub struct Provider {
-    /// The zypper process
-    zypper: std::process::Child,
-    stdin: ChildStdin,
-    reader: XmlReader<BufReader<TimeoutReader<ChildStdout>>>,
-    buf: Vec<u8>,
+pub enum Provider {
+    Super(Zypper<SuperProc>),
+    User(Zypper<Child>),
 }
 
 impl super::ConstructProvider for Provider {
-    fn new(root: bool) -> Result<Self, ProviderError> {
-        if !root {
-            return Err(ProviderError::NeedRoot);
-        }
-
-        // Try to spawn the zypper subprocess
-        let mut zypper = std::process::Command::new("zypper")
-            .arg("--xmlout") // Enable XML output
-            .arg("--non-interactive") // Don't ask for confirmation
-            .arg("shell")
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
+    fn new() -> Result<Self, ProviderError> {
+        Zypper::new_user()
+            .map(Self::User)
             .wrap_err("Failed to spawn zypper process")
-            .map_err(|err| ProviderError::Unavailable(std::rc::Rc::new(err)))?;
-
-        let reader = TimeoutReader::new(zypper.stdout.take().unwrap(), Duration::from_secs(10));
-        let reader = BufReader::new(reader);
-        let mut reader = XmlReader::from_reader(reader);
-        reader.trim_text(true);
-        let stdin = zypper.stdin.take().unwrap();
-        let buf = Vec::new();
-
-        let mut new = Self {
-            zypper,
-            stdin,
-            reader,
-            buf,
-        };
-
-        // Pop the initialization events
-        loop {
-            match new.read_event() {
-                Ok(Event::Start(tag)) => {
-                    if tag.local_name().as_ref() == b"stream" {
-                        break;
-                    }
-                }
-                // Let's hope that any errors here aren't fatal
-                _ => (),
-            }
-        }
-
-        // See if the subprocess exited unexpectedly
-        match new.check_health() {
-            Ok(_) => Ok(new),
-            Err(err) => Err(ProviderError::Unavailable(std::rc::Rc::new(err))),
-        }
+            .map_err(|err| ProviderError::Unavailable(std::rc::Rc::new(err)))
     }
 }
 
@@ -117,7 +60,7 @@ struct Package {
     name: String,
 }
 
-pub(super) struct Transaction {
+pub struct Transaction {
     from: Option<Vec<String>>,
     packages: Vec<Package>,
 }
@@ -133,22 +76,28 @@ impl super::Provider for Provider {
         &mut self,
         args: super::Args,
         packages: super::Packages,
-        ctx: &mut Ctx,
+        mut ctx: &mut EvalCtx,
+        _exec: &ExecCtx,
     ) -> Result<Self::Transaction, ()> {
         // Parse the package block params
-        let params = Params::recover_default(args, ctx);
+        let params = Params::recover_default(args, &mut ctx);
 
         let mut packs = Vec::new();
         let mut degraded = params.is_degraded();
         // Verify packages
         for package in packages.packages {
-            if let Some(args) = PackageParams::from_args(package.args, ctx) {
+            if let Some(args) = PackageParams::from_args(package.args, &mut ctx) {
                 if args.is_degraded() {
                     degraded = true;
                     continue;
                 }
 
-                match self.exists(&package.name.inner) {
+                let exists = match self {
+                    Provider::User(zypper) => zypper.exists(&package.name.inner),
+                    Provider::Super(zypper) => zypper.exists(&package.name.inner),
+                };
+
+                match exists {
                     // The package may exist
                     Ok(exists) => {
                         // All is well
@@ -188,14 +137,12 @@ impl super::Provider for Provider {
     fn install(
         &mut self,
         transaction: &Self::Transaction,
-        ctx: ExecutionCtx,
+        mut ctx: &mut SuperCtx,
+        exec: &ExecCtx,
     ) -> (super::OpResult, Self::State) {
         let res = self
-            .zypper_op(transaction, Operation::Install, ctx)
-            .and_then(|_| {
-                self.check_health()
-                    .wrap_err("Zypper process exited unexpectedly")
-            });
+            .get_super(&mut ctx)
+            .and_then(|zypper| zypper.zypper_op(transaction, Operation::Install, exec));
         (res, ())
     }
 
@@ -203,30 +150,253 @@ impl super::Provider for Provider {
         &mut self,
         transaction: &Self::Transaction,
         _state: Option<Self::State>,
-        ctx: ExecutionCtx,
+        ctx: &mut SuperCtx,
+        exec: &ExecCtx,
     ) -> super::OpResult {
-        self.zypper_op(transaction, Operation::Remove, ctx)
-            .and_then(|_| {
-                self.check_health()
-                    .wrap_err("Zypper process exited unexpectedly")
-            })
+        self.get_super(ctx)?
+            .zypper_op(transaction, Operation::Remove, exec)
     }
 }
 
 impl Provider {
-    /// Get the subprocess' stdin handle
-    fn stdin(&mut self) -> &mut ChildStdin {
-        &mut self.stdin
+    /// Get a privileged super instance
+    fn get_super(&mut self, ctx: &mut SuperCtx) -> color_eyre::Result<&mut Zypper<SuperProc>> {
+        match self {
+            // If we have a normal process, kill it and launch a privileged instance
+            Provider::User(Zypper { zypper, .. }) => {
+                // Zypper claims to exit gracefully when killed
+                zypper.kill().wrap_err("Old process already exited")?;
+                // Update the process
+                *self = Self::Super(Zypper::new_super(ctx)?);
+            }
+            _ => (),
+        }
+        // We should be running a super now
+        match self {
+            Provider::Super(zypper) => Ok(zypper),
+            Provider::User(_) => unreachable!(),
+        }
+    }
+}
+
+#[derive(PartialEq)]
+enum Operation {
+    Install,
+    Remove,
+}
+
+pub struct Zypper<T> {
+    zypper: T,
+    stdin: Stdin,
+    reader: XmlReader<BufReader<TimeoutReader<Stdout>>>,
+    buf: Vec<u8>,
+}
+
+impl Zypper<Child> {
+    fn new_user() -> color_eyre::Result<Self> {
+        let mut child = Self::zypper_cmd()
+            .spawn()
+            .wrap_err("Failed to spawn zypper process")?;
+        let stdin = child.stdin.take().unwrap().into();
+        let stdout = child.stdout.take().unwrap().into();
+        Self::new(child, stdin, stdout)
+    }
+}
+
+impl Zypper<SuperProc> {
+    fn new_super(ctx: &mut SuperCtx) -> color_eyre::Result<Self> {
+        let mut child = ctx
+            .spawn(&mut Self::zypper_cmd())
+            .wrap_err("Failed to spawn zypper process")?;
+        let stdin = child.stdin.take().unwrap().into();
+        let stdout = child.stdout.take().unwrap().into();
+        Self::new(child, stdin, stdout)
     }
 
-    fn read_event<'a>(&'a mut self) -> quick_xml::Result<Event<'a>> {
-        self.reader.read_event_into(&mut self.buf)
+    fn zypper_op(
+        &mut self,
+        transaction: &Transaction,
+        op: Operation,
+        exec: &ExecCtx,
+    ) -> Result<(), color_eyre::Report> {
+        let from = if let Some(from) = &transaction.from {
+            from.iter()
+                .map(String::as_str)
+                .flat_map(|s| [" --from ", s])
+                .collect::<String>()
+        } else {
+            "".to_owned()
+        };
+        let packages = transaction
+            .packages
+            .iter()
+            .fold(String::new(), |mut state, package| {
+                state.push_str(" ");
+                // Remove packages by prepending !
+                if let Operation::Remove = op {
+                    state.push('!');
+                }
+                state.push_str(&package.name);
+                state
+            });
+        let cmd = format!("install{} {}", from, packages);
+        debug!("Running '{cmd}'");
+        self.command(&cmd)?;
+
+        let mut handle_error = false;
+        let mut level = 0;
+        let mut error = None;
+        let mut finished = false;
+
+        loop {
+            let event = self.read_event();
+            match event {
+                Ok(Event::Start(tag)) => {
+                    match tag.local_name().as_ref() {
+                        b"message" => {
+                            let ty = tag.attributes().next().unwrap()?;
+                            assert_eq!(ty.key.local_name().as_ref(), b"type");
+                            if ty.value.as_ref() == b"error" {
+                                handle_error = true;
+                            }
+                        }
+                        // There were problems and the operation was canceled
+                        b"prompt" => {
+                            let id = tag.attributes().next().unwrap()?;
+                            assert_eq!(id.key.local_name().as_ref(), b"id");
+                            if id.value.as_ref() == b"1" {
+                                finished = true;
+                            }
+                        }
+                        _ => (),
+                    }
+                    level += 1;
+                }
+                Ok(Event::Empty(tag)) => {
+                    let mut attributes = tag.attributes();
+                    match tag.local_name().as_ref() {
+                        b"progress" => {
+                            let id = attributes.next().unwrap()?;
+                            let name = attributes.next().unwrap()?;
+                            assert_eq!(id.key.local_name().as_ref(), b"id");
+                            assert_eq!(name.key.local_name().as_ref(), b"name");
+
+                            if id.value.as_ref() == b"install-resolvable"
+                                || id.value.as_ref() == b"remove-resolvable"
+                            {
+                                if let Some(done) = attributes.next().transpose()? {
+                                    if done.key.local_name().as_ref() == b"done" {
+                                        // Print what has been installed
+                                        let name = String::from_utf8_lossy(&name.value);
+                                        exec.set_message(name.as_ref().to_owned());
+                                        debug!("{}", &name);
+
+                                        // The name is in the format "(n/n) blabla"
+                                        // The transaction is complete if the numbers in the parantheses match
+                                        let (s, _) = name
+                                            .strip_prefix('(')
+                                            .unwrap()
+                                            .split_once(')')
+                                            .unwrap();
+                                        let (left, right) = s.split_once('/').unwrap();
+                                        if left == right {
+                                            finished = true;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        _ => (),
+                    }
+                }
+                Ok(Event::End(_)) => level -= 1,
+                Ok(Event::Text(message)) => {
+                    let message = message.unescape().unwrap();
+
+                    // Zypper ends progress messages with '...'
+                    if message.ends_with("...") {
+                        exec.set_message(message.as_ref().to_owned());
+                    }
+
+                    // Zypper feels like it's finished
+                    if message == "Nothing to do." {
+                        finished = true;
+                    }
+
+                    if handle_error {
+                        // Ignore errors related to unknown packages when removing
+                        if op == Operation::Remove
+                            && message.starts_with("No provider of ")
+                            && message.ends_with(" found.")
+                        {
+                            ()
+                        } else {
+                            error = Some(message.into_owned());
+                        }
+                        handle_error = false;
+                    }
+                }
+                Ok(Event::Eof) => return Err(eyre!("Unexpected EOF")),
+                Err(quick_xml::Error::Io(err)) => return Err(eyre!(err)).wrap_err("IO error"),
+                Err(e) => return Err(e).wrap_err("Failed to parse xml"),
+                _ => (),
+            }
+            if level == 0 {
+                if let Some(error) = error {
+                    return Err(eyre!(error));
+                }
+                if finished {
+                    return Ok(());
+                }
+            }
+        }
+    }
+}
+
+impl<T> Zypper<T> {
+    fn new(proc: T, stdin: Stdin, stdout: Stdout) -> color_eyre::Result<Self> {
+        let mut reader = XmlReader::from_reader(BufReader::new(TimeoutReader::new(
+            stdout,
+            Duration::from_secs(8),
+        )));
+        reader.trim_text(true);
+
+        let mut new = Self {
+            zypper: proc,
+            stdin,
+            reader,
+            buf: Vec::new(),
+        };
+
+        // Pop the initialization events
+        loop {
+            match new.read_event() {
+                Ok(Event::Start(tag)) => {
+                    if tag.local_name().as_ref() == b"stream" {
+                        break;
+                    }
+                }
+                Err(quick_xml::Error::Io(err)) => return Err(eyre!(err)).wrap_err("IO error"),
+                Err(e) => return Err(e).wrap_err("Failed to parse xml"),
+                _ => (),
+            }
+        }
+
+        Ok(new)
+    }
+
+    fn zypper_cmd() -> std::process::Command {
+        let mut cmd = std::process::Command::new("zypper");
+        cmd.args(["--xmlout", "--non-interactive", "shell"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        cmd
     }
 
     /// Check if the package named 'package' exists
     fn exists(&mut self, package: &str) -> color_eyre::Result<bool> {
-        writeln!(self.stdin(), "search --match-exact {}", &package)
-            .wrap_err("Failed to write zypper stdin")?;
+        self.command(&format!("search --match-exact {}", &package))?;
         let mut found = None;
         let mut level = 0;
         let mut handle_error = false;
@@ -277,144 +447,11 @@ impl Provider {
         }
     }
 
-    /// See if the subprocess exited unexpectedly
-    fn check_health(&mut self) -> color_eyre::Result<()> {
-        match self.zypper.try_wait() {
-            Ok(Some(status)) => Err(eyre!("Zypper process exited unexpectedly with: {status}")),
-            Err(e) => Err(eyre!(e)),
-            Ok(None) => Ok(()),
-        }
+    fn command(&mut self, cmd: &str) -> color_eyre::Result<()> {
+        writeln!(&mut self.stdin, "{cmd}").wrap_err("Failed to write to stdin")
     }
 
-    fn zypper_op(
-        &mut self,
-        transaction: &Transaction,
-        op: Operation,
-        mut ctx: ExecutionCtx,
-    ) -> Result<(), color_eyre::Report> {
-        let from = if let Some(from) = &transaction.from {
-            from.iter()
-                .map(String::as_str)
-                .flat_map(|s| [" --from ", s])
-                .collect::<String>()
-        } else {
-            "".to_owned()
-        };
-        let packages = transaction
-            .packages
-            .iter()
-            .fold(String::new(), |mut state, package| {
-                state.push_str(" ");
-                // Remove packages by prepending !
-                if let Operation::Remove = op {
-                    state.push('!');
-                }
-                state.push_str(&package.name);
-                state
-            });
-        let cmd = format!("install{} {}", from, packages);
-        debug!("Running '{cmd}'");
-        writeln!(self.stdin(), "{cmd}").wrap_err("Failed to write to stdout")?;
-
-        let mut handle_error = false;
-        let mut level = 0;
-        let mut error = None;
-        let mut finished = false;
-
-        loop {
-            let event = self.read_event();
-            match event {
-                Ok(Event::Start(tag)) => {
-                    if tag.local_name().as_ref() == b"message" {
-                        let ty = tag.attributes().next().unwrap()?;
-                        assert_eq!(ty.key.local_name().as_ref(), b"type");
-                        if ty.value.as_ref() == b"error" {
-                            handle_error = true;
-                        }
-                    }
-                    level += 1;
-                }
-                Ok(Event::Empty(tag)) => {
-                    let mut attributes = tag.attributes();
-                    match tag.local_name().as_ref() {
-                        b"progress" => {
-                            let id = attributes.next().unwrap()?;
-                            let name = attributes.next().unwrap()?;
-                            assert_eq!(id.key.local_name().as_ref(), b"id");
-                            assert_eq!(name.key.local_name().as_ref(), b"name");
-
-                            if id.value.as_ref() == b"install-resolvable"
-                                || id.value.as_ref() == b"remove-resolvable"
-                            {
-                                if let Some(done) = attributes.next().transpose()? {
-                                    if done.key.local_name().as_ref() == b"done" {
-                                        // Print what has been installed
-                                        let name = String::from_utf8_lossy(&name.value);
-                                        ctx.set_message(&name);
-                                        debug!("{}", &name);
-
-                                        // The name is in the format "(n/n) blabla"
-                                        // The transaction is complete if the numbers in the parantheses match
-                                        let (s, _) = name
-                                            .strip_prefix('(')
-                                            .unwrap()
-                                            .split_once(')')
-                                            .unwrap();
-                                        let (left, right) = s.split_once('/').unwrap();
-                                        if left == right {
-                                            finished = true;
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        // There were problems and the operation was canceled
-                        b"prompt" => {
-                            finished = true;
-                        }
-                        _ => (),
-                    }
-                }
-                Ok(Event::End(_)) => level -= 1,
-                Ok(Event::Text(message)) => {
-                    let message = message.unescape().unwrap();
-
-                    // Zypper ends progress messages with '...'
-                    if message.ends_with("...") {
-                        ctx.set_message(&message);
-                    }
-
-                    // Zypper feels like it's finished
-                    if message == "Nothing to do." {
-                        finished = true;
-                    }
-
-                    if handle_error {
-                        // Ignore errors related to unknown packages when removing
-                        if op == Operation::Remove
-                            && message.starts_with("No provider of ")
-                            && message.ends_with(" found.")
-                        {
-                            ()
-                        } else {
-                            error = Some(message.into_owned());
-                        }
-                        handle_error = false;
-                    }
-                }
-                Ok(Event::Eof) => return Err(eyre!("Unexpected EOF")),
-                Err(quick_xml::Error::Io(err)) => return Err(eyre!(err)).wrap_err("IO error"),
-                Err(e) => return Err(e).wrap_err("Failed to parse xml"),
-                _ => (),
-            }
-            if level == 0 {
-                if let Some(error) = error {
-                    return Err(eyre!(error));
-                }
-                if finished {
-                    return Ok(());
-                }
-            }
-        }
+    fn read_event<'a>(&'a mut self) -> quick_xml::Result<Event<'a>> {
+        self.reader.read_event_into(&mut self.buf)
     }
 }

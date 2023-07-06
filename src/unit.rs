@@ -3,10 +3,7 @@ use std::{path::Path, process::Stdio};
 use crate::shell::Shell;
 
 use common::rel_path::RelPath;
-pub use interpreter::{
-    provider::{Manager, Transaction},
-    Env, Interpreter,
-};
+use provider::Transaction;
 
 #[derive(Debug)]
 pub struct Unit {
@@ -88,7 +85,8 @@ impl Routine {
 pub mod loader {
     use super::Unit;
     use crate::context::Context;
-    use interpreter::{self, provider::Manager, Env, Interpreter, UnitFigment, UnitPath};
+    use eval::Env;
+    use interpreter::{self, UnitFigment, UnitPath};
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
     pub struct UnitId(u32);
@@ -99,7 +97,7 @@ pub mod loader {
 
     pub enum Status {
         Ok(Unit),
-        Degraded(UnitFigment, Vec<interpreter::error::Error>, String),
+        Degraded(UnitFigment, Vec<eval::Error>, String),
         Err(Error),
     }
 
@@ -116,12 +114,9 @@ pub mod loader {
         queue: Vec<(UnitId, UnitPath)>,
     }
 
-    pub struct Loader<'a> {
+    pub struct Loader {
         stack: Vec<Frame>,
         env: Option<Env>,
-        interpreter: &'a Interpreter,
-        manager: &'a mut Manager,
-        context: &'a Context,
         next_id: u32,
     }
 
@@ -132,13 +127,8 @@ pub mod loader {
         DotfileDirMissing,
     }
 
-    impl<'a> Loader<'a> {
-        pub fn new(
-            env: Env,
-            interpreter: &'a Interpreter,
-            manager: &'a mut Manager,
-            context: &'a Context,
-        ) -> Result<Self, LoaderError> {
+    impl Loader {
+        pub fn new(env: Env, context: &Context) -> Result<Self, LoaderError> {
             match context.dotfile_dir().try_exists() {
                 Ok(true) => (),
                 Ok(false) => {
@@ -152,9 +142,6 @@ pub mod loader {
             Ok(Self {
                 stack: Vec::new(),
                 env: Some(env),
-                interpreter,
-                manager,
-                context,
                 next_id: 0,
             })
         }
@@ -169,24 +156,29 @@ pub mod loader {
             UnitId(id)
         }
 
-        fn load_module(&mut self, id: UnitId, path: UnitPath, env: Env) -> Module {
-            let src = std::fs::read_to_string(
-                path.clone()
-                    .unit_file()
-                    .bind(self.context.dotfile_dir().clone()),
-            )
-            .map_err(Error::IO);
+        fn load_module(
+            &mut self,
+            id: UnitId,
+            path: UnitPath,
+            env: Env,
+            set_msg: &dyn Fn(String),
+            ctx: &mut Context,
+        ) -> Module {
+            let src =
+                std::fs::read_to_string(path.clone().unit_file().bind(ctx.dotfile_dir().clone()))
+                    .map_err(Error::IO);
 
             let (status, env, queue) = match src {
                 Ok(src) => {
-                    let data = self.interpreter.eval(
+                    let home_dir = ctx.home_dir().map(ToOwned::to_owned);
+                    let dotfile_dir = ctx.dotfile_dir().clone();
+                    let data = ctx.interpreter().eval(
                         &src,
                         path.clone(),
-                        self.manager,
                         env,
-                        self.context.home_dir(),
-                        self.context.dotfile_dir(),
-                        self.context.is_root(),
+                        home_dir,
+                        dotfile_dir,
+                        set_msg,
                     );
                     let status =
                         if data.errors.is_empty() {
@@ -218,18 +210,14 @@ pub mod loader {
                 members,
             }
         }
-    }
 
-    impl<'a> Iterator for Loader<'a> {
-        type Item = Module;
-
-        fn next(&mut self) -> Option<Self::Item> {
+        pub fn load(&mut self, set_msg: &dyn Fn(String), ctx: &mut Context) -> Option<Module> {
             loop {
                 match self.stack.last_mut() {
                     Some(frame) => match frame.queue.pop() {
                         Some((id, path)) => {
                             let env = frame.env.clone();
-                            let module = self.load_module(id, path, env);
+                            let module = self.load_module(id, path, env, set_msg, ctx);
                             break Some(module);
                         }
                         None => {
@@ -241,7 +229,7 @@ pub mod loader {
                         // This is the first iteration so we load the root node
                         Some(env) => {
                             let id = self.next_id();
-                            let module = self.load_module(id, UnitPath::root(), env);
+                            let module = self.load_module(id, UnitPath::root(), env, set_msg, ctx);
                             break Some(module);
                         }
                         // This is the last iteration
@@ -251,6 +239,4 @@ pub mod loader {
             }
         }
     }
-
-    impl<'a> std::iter::FusedIterator for Loader<'a> {}
 }

@@ -9,11 +9,10 @@ use color_eyre::{
     eyre::WrapErr,
     owo_colors::{OwoColorize, Style},
 };
+use eval::IntoReport;
 use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
-use interpreter::{
-    provider::{ExecutionCtx, Manager},
-    UnitPath,
-};
+use interpreter::UnitPath;
+use provider::ExecCtx;
 use tracing::debug;
 
 use crate::{
@@ -34,11 +33,10 @@ pub enum Command {
 type CmdResult = Result<(), ()>;
 
 impl Command {
-    pub fn run(self, context: &Context) -> CmdResult {
-        let mut manager = Manager::new();
+    pub fn run(self, context: &mut Context) -> CmdResult {
         let env = HashMap::new();
 
-        let loader = match loader::Loader::new(env, context.interpreter(), &mut manager, context) {
+        let mut loader = match loader::Loader::new(env, context) {
             Ok(loader) => loader,
             Err(err) => {
                 match err {
@@ -69,7 +67,12 @@ impl Command {
             ProgressBar::with_draw_target(None, ProgressDrawTarget::stdout()).with_style(style);
         pb.enable_steady_tick(Duration::from_millis(500));
 
-        let errn = load_modules(loader, &mut modules);
+        let errn = load_modules(
+            &mut loader,
+            &mut modules,
+            &|msg| pb.set_message(msg),
+            context,
+        );
         pb.finish_and_clear();
 
         if errn != 0 {
@@ -83,9 +86,9 @@ impl Command {
         }
 
         match self {
-            Command::Deploy(deploy) => deploy.run(manager, modules, root, context),
-            Command::Remove(remove) => remove.run(manager, modules, root, context),
-            Command::Capture(capture) => capture.run(manager, modules, root, context),
+            Command::Deploy(deploy) => deploy.run(modules, root, context),
+            Command::Remove(remove) => remove.run(modules, root, context),
+            Command::Capture(capture) => capture.run(modules, root, context),
         }
     }
 }
@@ -106,17 +109,22 @@ struct Module {
     status: Status,
 }
 
-fn load_modules(loader: loader::Loader, modules: &mut HashMap<UnitId, Module>) -> usize {
+fn load_modules(
+    loader: &mut loader::Loader,
+    modules: &mut HashMap<UnitId, Module>,
+    set_msg: &dyn Fn(String),
+    ctx: &mut Context,
+) -> usize {
     let root = loader.root();
     let mut errn = 0;
 
-    for module in loader {
+    while let Some(module) = loader.load(set_msg, ctx) {
         let (unit, status) = match module.status {
             loader::Status::Ok(unit) => (Some(unit), Status::Ready),
             loader::Status::Degraded(_, errors, src) => {
                 for err in errors {
                     errn += 1;
-                    let filename = &module.path.clone().unit_file().to_string();
+                    let filename = module.path.clone().unit_file().to_string();
                     let report = err.into_report(&filename);
                     let res = report
                         .eprint::<(&str, ariadne::Source)>((&filename, ariadne::Source::from(&src)))
@@ -162,11 +170,10 @@ fn load_modules(loader: loader::Loader, modules: &mut HashMap<UnitId, Module>) -
 }
 
 fn remove_modules(
-    deployed: Vec<(UnitId, Vec<Option<interpreter::provider::State>>)>,
+    deployed: Vec<(UnitId, Vec<Option<provider::State>>)>,
     modules: &mut HashMap<UnitId, Module>,
     dry_run: bool,
-    manager: &mut Manager,
-    context: &crate::context::Context,
+    ctx: &mut Context,
 ) -> usize {
     let mut errn = 0;
     let len = deployed.len();
@@ -184,7 +191,7 @@ fn remove_modules(
             pb.finish_with_message("Skipped".bright_black().to_string());
             module.status = Status::Skipped;
         } else {
-            let errors = remove_unit(module, states, &pb, manager, context);
+            let errors = remove_unit(module, states, &pb, ctx);
             errn += errors.len();
             if errors.is_empty() {
                 pb.finish_with_message("Done".bright_green().to_string());
@@ -206,18 +213,17 @@ fn remove_modules(
 
 fn remove_unit(
     module: &Module,
-    states: Vec<Option<interpreter::provider::State>>,
+    states: Vec<Option<provider::State>>,
     pb: &ProgressBar,
-    manager: &mut Manager,
-    context: &crate::context::Context,
+    ctx: &mut Context,
 ) -> Vec<color_eyre::Report> {
     debug!("Removing module {}", &module.path);
     let unit = module.unit.as_ref().expect("Unexpected error");
     let mut errors = Vec::new();
 
     if !unit.remove.is_empty() {
-        let shell = &unit.shell.as_ref().unwrap_or(context.default_shell());
-        let dir = module.path.bind(context.dotfile_dir().clone());
+        let shell = &unit.shell.as_ref().unwrap_or(ctx.default_shell());
+        let dir = module.path.bind(ctx.dotfile_dir().clone());
 
         for hook in &unit.remove {
             if let Err(err) = hook.run(shell, &dir) {
@@ -227,8 +233,9 @@ fn remove_unit(
     }
 
     for (transaction, state) in unit.transactions.iter().zip(states) {
-        let ctx = ExecutionCtx::new(Box::new(|msg| pb.set_message(msg.to_owned())));
-        if let Err(err) = manager.remove(transaction, state, ctx) {
+        let set_msg = |msg| pb.set_message(msg);
+        let exec = ExecCtx::new(&set_msg, module.path.bind(ctx.dotfile_dir().clone()));
+        if let Err(err) = ctx.interpreter().remove(transaction, state, &exec) {
             errors.push(err);
         }
     }
@@ -270,12 +277,16 @@ fn print_module_status(root: UnitId, modules: &HashMap<UnitId, Module>) {
         match members.get(*n) {
             Some(id) => {
                 *n += 1;
-                let module = modules.get(&id).unwrap();
+                let module = modules.get(id).unwrap();
                 let last = members.len() == *n;
                 let depth = stack.len() - 1;
 
-                for _ in 0..depth {
-                    print!("  ");
+                for i in 0..depth {
+                    if i == 0 {
+                        print!("  ");
+                    } else {
+                        print!("│ ");
+                    }
                 }
 
                 let part = if depth == 0 {

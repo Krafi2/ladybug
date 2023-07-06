@@ -9,27 +9,23 @@ use color_eyre::{
     eyre::{bail, eyre, WrapErr},
     Result, Section,
 };
-use common::command::{check_output, run_command};
+use common::command;
+use eval::{params, report, FromArgs, RecoverFromArgs};
+use parser::Span;
 use tracing::debug;
 
 use crate::{
-    structures::{FromArgs, RecoverFromArgs},
-    Span,
+    privileged::{self, SuperCtx},
+    ExecCtx,
 };
 
-use super::{ExecutionCtx, ProviderError};
+use super::ProviderError;
 
 #[derive(Debug)]
 pub enum Error {
     PackageNotRecognized(String, Span),
     AmbiguousPackage(String, Span),
     Eyre(color_eyre::Report, Span),
-}
-
-impl Into<crate::error::Error> for Error {
-    fn into(self) -> crate::error::Error {
-        super::TransactionError::Flatpak(self).into()
-    }
 }
 
 report! {
@@ -56,7 +52,7 @@ report! {
 pub struct Provider;
 
 impl super::ConstructProvider for Provider {
-    fn new(_root: bool) -> Result<Self, ProviderError> {
+    fn new() -> Result<Self, ProviderError> {
         // try to run 'flatpak --version' to see whether flatpak is installed
         let out = Command::new("flatpak")
             .arg("--version")
@@ -109,7 +105,8 @@ impl super::Provider for Provider {
         &mut self,
         args: crate::Args,
         packages: crate::Packages,
-        ctx: &mut crate::eval::Ctx,
+        ctx: &mut super::EvalCtx,
+        _exec: &ExecCtx,
     ) -> Result<Self::Transaction, ()> {
         // Parse the package block params
         let params = Params::recover_default(args, ctx);
@@ -167,9 +164,10 @@ impl super::Provider for Provider {
     fn install(
         &mut self,
         transaction: &Self::Transaction,
-        ctx: ExecutionCtx,
+        ctx: &mut SuperCtx,
+        exec: &ExecCtx,
     ) -> (super::OpResult, Self::State) {
-        let res = flatpak_op(Operation::Install, transaction, ctx);
+        let res = flatpak_op(Operation::Install, transaction, ctx, exec);
         (res, ())
     }
 
@@ -177,9 +175,10 @@ impl super::Provider for Provider {
         &mut self,
         transaction: &Self::Transaction,
         _state: Option<Self::State>,
-        ctx: ExecutionCtx,
+        ctx: &mut SuperCtx,
+        exec: &ExecCtx,
     ) -> super::OpResult {
-        flatpak_op(Operation::Remove, transaction, ctx)
+        flatpak_op(Operation::Remove, transaction, ctx, exec)
     }
 }
 
@@ -191,26 +190,28 @@ enum Operation {
 fn flatpak_op(
     operation: Operation,
     transaction: &Transaction,
-    mut ctx: ExecutionCtx,
+    mut ctx: &mut SuperCtx,
+    exec: &ExecCtx,
 ) -> super::OpResult {
     let op = match operation {
         Operation::Install => "install",
         Operation::Remove => "remove",
     };
+
     let mut cmd = Command::new("flatpak");
     cmd.arg(op);
     if transaction.user {
         cmd.arg("--user");
     }
-    let mut proc = cmd
-        .arg("--noninteractive")
+    cmd.arg("--noninteractive")
         .args(transaction.packages.iter().map(|p| &p.name))
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .wrap_err("Failed to run flatpak")?;
-    let mut stdout = BufReader::new(proc.stdout.take().unwrap());
+        .stderr(Stdio::piped());
+    let mut proc =
+        spawn_command(&mut cmd, transaction.user, &mut ctx).wrap_err("Failed to run flatpak")?;
+
+    let mut stdout = BufReader::new(proc.take_stdout().unwrap());
     let mut buf = String::new();
 
     let res = loop {
@@ -224,7 +225,7 @@ fn flatpak_op(
                     Some("Info") => tracing::debug!("{}", msg.next().unwrap()),
                     Some(s) if s.starts_with("Installing") || s.starts_with("Uninstalling") => {
                         debug!("{}", &s);
-                        ctx.set_message(&s);
+                        exec.set_message(s.into());
                     }
                     _ => (),
                 }
@@ -232,11 +233,13 @@ fn flatpak_op(
             Err(err) => break Err(err),
         }
     };
-    let output = proc
-        .wait_with_output()
-        .map_err(common::command::Error::IO)
-        .and_then(check_output)
-        .map_err(|e| e.into_report());
+
+    proc.put_stdout(stdout.into_inner());
+    let output = ctx
+        .wait_with_output(proc)
+        .wrap_err("Failed to run flatpak")
+        .and_then(|output| output.into_result().map_err(|err| err.into_report()));
+
     match (output, res) {
         (Err(e1), Err(e2)) => Err(e1).error(e2),
         (Err(err), _) => Err(err),
@@ -263,7 +266,7 @@ fn exists(name: &str, user: bool) -> color_eyre::Result<PackageStatus> {
         cmd.arg("--user");
     };
 
-    match run_command(&mut cmd) {
+    match command::run_command(&mut cmd) {
         Ok(output) => {
             let stdout = String::from_utf8_lossy(&output.stdout);
             let mut lines = stdout.lines();
@@ -280,5 +283,19 @@ fn exists(name: &str, user: bool) -> color_eyre::Result<PackageStatus> {
             }
         }
         Err(err) => Err(err.into_report()).wrap_err("Failed to run flatpak"),
+    }
+}
+
+fn spawn_command(
+    cmd: &mut std::process::Command,
+    user: bool,
+    ctx: &mut SuperCtx,
+) -> Result<privileged::Process, privileged::Error> {
+    if user {
+        cmd.spawn()
+            .map(Into::into)
+            .map_err(privileged::Error::Other)
+    } else {
+        ctx.spawn(cmd).map(Into::into)
     }
 }

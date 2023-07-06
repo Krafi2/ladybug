@@ -2,7 +2,6 @@ use std::collections::{HashMap, HashSet};
 
 use color_eyre::{owo_colors::OwoColorize, Section};
 use indicatif::{ProgressBar, ProgressDrawTarget};
-use interpreter::provider::Manager;
 
 use crate::{context::Context, unit::loader::UnitId};
 
@@ -16,10 +15,9 @@ pub struct Capture {
 impl Capture {
     pub(super) fn run(
         self,
-        _manager: Manager,
         mut modules: HashMap<UnitId, Module>,
         root: UnitId,
-        ctx: &crate::context::Context,
+        ctx: &Context,
     ) -> super::CmdResult {
         filter_modules(
             self.topics

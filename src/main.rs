@@ -71,9 +71,13 @@ fn main() {
 }
 
 fn run() -> Result<Result<(), ()>, Error> {
-    info!("Application started");
     install_eyre()?;
     install_tracing()?;
+
+    // Detect if the proccess should switch to a privileged entrypoint
+    provider::detect_privileged();
+
+    info!("Application started");
 
     let opts = Opts::try_parse()?;
     debug!(?opts);
@@ -96,21 +100,20 @@ fn run() -> Result<Result<(), ()>, Error> {
         })
         .transpose()?;
 
-    let context = context::Context::new(config.clone(), dotfiles.clone())?;
-    debug!(?context);
+    let mut ctx = context::Context::new(config.clone(), dotfiles.clone())?;
+    debug!(?ctx);
 
-    // TODO allow the user to specify that some dotfile directories dont require root
     check_user(&opts)?;
 
-    Ok(opts.command.run(&context))
+    Ok(opts.command.run(&mut ctx))
 }
 
 fn check_user(opts: &Opts) -> Result<(), Error> {
-    Ok(if context::detect_root() {
+    if context::detect_root() {
         // Warn the user if the program is running as root without the `root` flag being set
         if !opts.root {
             return Err(eyre!(
-                "Running as root is not recommended! Please note that ladybug will use polkit to request\
+                "Running as root is not recommended! Please note that ladybug will use sudo to request\
                  root access if neccessary. If you are certain that you want to do this, use the `--root` flag."
             )).map_err(Error::Eyre);
         }
@@ -135,7 +138,8 @@ fn check_user(opts: &Opts) -> Result<(), Error> {
                 .wrap_err("Failed to elevate to root privileges")
                 .map_err(From::from);
         }
-    })
+    }
+    Ok(())
 }
 
 fn install_tracing() -> color_eyre::Result<()> {
