@@ -127,9 +127,9 @@ impl From<ErrorKindDef> for IoError {
     }
 }
 
-impl Into<ErrorKindDef> for IoError {
-    fn into(self) -> ErrorKindDef {
-        match self.0.kind() {
+impl From<IoError> for ErrorKindDef {
+    fn from(val: IoError) -> Self {
+        match val.0.kind() {
             std::io::ErrorKind::NotFound => ErrorKindDef::NotFound,
             std::io::ErrorKind::PermissionDenied => ErrorKindDef::PermissionDenied,
             std::io::ErrorKind::ConnectionRefused => ErrorKindDef::ConnectionRefused,
@@ -183,7 +183,7 @@ pub enum ErrorKindDef {
 /// Take over execution if the current proccess is the privileged one
 pub fn detect_privileged() {
     // The privileged process wil set `LADYBUG_PRIVILEGED`
-    if let Ok(_) = std::env::var("LADYBUG_PRIVILEGED") {
+    if std::env::var("LADYBUG_PRIVILEGED").is_ok() {
         other_side::main();
         std::process::exit(0);
     }
@@ -330,7 +330,7 @@ impl Server {
         Self { inner: None }
     }
 
-    pub fn super_ctx<'a>(&'a mut self) -> SuperCtx<'a> {
+    pub fn super_ctx(&mut self) -> SuperCtx<'_> {
         SuperCtx { server: self }
     }
 
@@ -482,7 +482,7 @@ impl<'a> SuperCtx<'a> {
                     (
                         key.to_owned(),
                         val.map(ToOwned::to_owned)
-                            .unwrap_or_else(|| OsString::default()),
+                            .unwrap_or_else(OsString::default),
                     )
                 })
                 .collect(),

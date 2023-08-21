@@ -14,9 +14,9 @@ impl Span {
     }
 }
 
-impl Into<std::ops::Range<usize>> for Span {
-    fn into(self) -> std::ops::Range<usize> {
-        self.as_range()
+impl From<Span> for std::ops::Range<usize> {
+    fn from(val: Span) -> Self {
+        val.as_range()
     }
 }
 
@@ -35,7 +35,7 @@ impl chumsky::Span for Span {
     }
 
     fn context(&self) -> Self::Context {
-        ()
+        
     }
 
     fn start(&self) -> Self::Offset {

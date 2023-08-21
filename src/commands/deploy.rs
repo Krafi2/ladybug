@@ -68,7 +68,7 @@ impl Deploy {
             errn += super::remove_modules(to_remove, &mut modules, self.dry_run, context);
         }
 
-        println!("");
+        println!();
         if errn != 0 {
             if errn == 1 {
                 println!("\nDeployment failed due to previous error");
@@ -151,7 +151,7 @@ fn filter_modules(topics: HashSet<&str>, root: UnitId, modules: &mut HashMap<Uni
     {
         match members.get(*current) {
             Some(id) => {
-                let module = modules.get_mut(&id).unwrap();
+                let module = modules.get_mut(id).unwrap();
                 let enabled = match &module.unit.as_ref().unwrap().topic {
                     // Enable if topics match
                     Some(topic) => topics.contains(topic.as_str()),
@@ -188,7 +188,7 @@ fn generate_queue(root: UnitId, modules: &HashMap<UnitId, Module>) -> Vec<UnitId
     while let Some((members, current)) = stack.last_mut() {
         match members.get(*current) {
             Some(id) => {
-                let module = &modules[&id];
+                let module = &modules[id];
                 if let Status::Ready = module.status {
                     queue.push(*id);
                 }

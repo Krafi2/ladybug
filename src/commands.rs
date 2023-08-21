@@ -244,10 +244,9 @@ fn remove_unit(
 }
 
 fn pb_style(path: &UnitPath) -> ProgressStyle {
-    let style =
-        ProgressStyle::with_template(&format!("{{prefix:.bright.black}} {}: {{wide_msg}}", path))
-            .unwrap();
-    style
+    
+    ProgressStyle::with_template(&format!("{{prefix:.bright.black}} {}: {{wide_msg}}", path))
+            .unwrap()
 }
 
 fn print_error(err: color_eyre::Report) {

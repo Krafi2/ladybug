@@ -454,13 +454,13 @@ impl Interpreter {
         for block in blocks {
             let block = block.inner;
             let ident = block.ident;
-            let args = Args::from_item(&ident, block.params, &env);
+            let args = Args::from_item(&ident, block.params, env);
             match ident.inner.0.as_str() {
                 "config" => {
                     let _ = NoParams::recover_default(args, &mut ctx);
                     match block.body.inner {
                         Body::Map(body) => {
-                            let body = Args::from_exprs(Spanned::new(body, block.body.span), &env);
+                            let body = Args::from_exprs(Spanned::new(body, block.body.span), env);
                             let config = Config::recover_default(body, &mut ctx);
 
                             dotfiles = config.value.dotfiles;

@@ -49,7 +49,7 @@ impl Remove {
 
         let errn = super::remove_modules(queue, &mut modules, self.dry_run, ctx);
 
-        println!("");
+        println!();
         // Print number of errors
         if errn != 0 {
             if errn == 1 {

@@ -76,17 +76,17 @@ impl super::Provider for Provider {
         &mut self,
         args: super::Args,
         packages: super::Packages,
-        mut ctx: &mut EvalCtx,
+        ctx: &mut EvalCtx,
         _exec: &ExecCtx,
     ) -> Result<Self::Transaction, ()> {
         // Parse the package block params
-        let params = Params::recover_default(args, &mut ctx);
+        let params = Params::recover_default(args, ctx);
 
         let mut packs = Vec::new();
         let mut degraded = params.is_degraded();
         // Verify packages
         for package in packages.packages {
-            if let Some(args) = PackageParams::from_args(package.args, &mut ctx) {
+            if let Some(args) = PackageParams::from_args(package.args, ctx) {
                 if args.is_degraded() {
                     degraded = true;
                     continue;
@@ -137,11 +137,11 @@ impl super::Provider for Provider {
     fn install(
         &mut self,
         transaction: &Self::Transaction,
-        mut ctx: &mut SuperCtx,
+        ctx: &mut SuperCtx,
         exec: &ExecCtx,
     ) -> (super::OpResult, Self::State) {
         let res = self
-            .get_super(&mut ctx)
+            .get_super(ctx)
             .and_then(|zypper| zypper.zypper_op(transaction, Operation::Install, exec));
         (res, ())
     }
@@ -231,7 +231,7 @@ impl Zypper<SuperProc> {
             .packages
             .iter()
             .fold(String::new(), |mut state, package| {
-                state.push_str(" ");
+                state.push(' ');
                 // Remove packages by prepending !
                 if let Operation::Remove = op {
                     state.push('!');
@@ -329,7 +329,7 @@ impl Zypper<SuperProc> {
                             && message.starts_with("No provider of ")
                             && message.ends_with(" found.")
                         {
-                            ()
+                            
                         } else {
                             error = Some(message.into_owned());
                         }
@@ -451,7 +451,7 @@ impl<T> Zypper<T> {
         writeln!(&mut self.stdin, "{cmd}").wrap_err("Failed to write to stdin")
     }
 
-    fn read_event<'a>(&'a mut self) -> quick_xml::Result<Event<'a>> {
+    fn read_event(&mut self) -> quick_xml::Result<Event<'_>> {
         self.reader.read_event_into(&mut self.buf)
     }
 }

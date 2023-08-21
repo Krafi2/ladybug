@@ -189,7 +189,7 @@ impl Arg {
     fn from_expr(expr: Spanned<parser::Param>, env: &Env) -> Self {
         Arg {
             name: expr.inner.name,
-            value: expr.inner.val.map(|val| Value::from_expr(val, &env)),
+            value: expr.inner.val.map(|val| Value::from_expr(val, env)),
             span: expr.span,
         }
     }
@@ -674,7 +674,7 @@ impl Matchmaker {
             .enumerate()
             .map(|(i, p)| (ParamId(i), p))
             .collect::<Vec<_>>();
-        params.sort_unstable_by(|a, b| a.1.cmp(&b.1));
+        params.sort_unstable_by(|a, b| a.1.cmp(b.1));
 
         Self {
             args: args.into_iter(),

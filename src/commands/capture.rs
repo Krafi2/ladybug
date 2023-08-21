@@ -35,7 +35,7 @@ impl Capture {
         println!("Capturing units:");
         let errn = capture_modules(queue, &mut modules, ctx);
 
-        println!("");
+        println!();
         // Print number of errors
         if errn != 0 {
             if errn == 1 {

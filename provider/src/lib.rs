@@ -243,7 +243,7 @@ impl Manager {
             }
         };
 
-        let provider_id = match ProviderId::from_name(&provider_name) {
+        let provider_id = match ProviderId::from_name(provider_name) {
             Some(id) => id,
             None => {
                 ctx.emit(ConvertError::ValueErr {

@@ -190,7 +190,7 @@ enum Operation {
 fn flatpak_op(
     operation: Operation,
     transaction: &Transaction,
-    mut ctx: &mut SuperCtx,
+    ctx: &mut SuperCtx,
     exec: &ExecCtx,
 ) -> super::OpResult {
     let op = match operation {
@@ -209,7 +209,7 @@ fn flatpak_op(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     let mut proc =
-        spawn_command(&mut cmd, transaction.user, &mut ctx).wrap_err("Failed to run flatpak")?;
+        spawn_command(&mut cmd, transaction.user, ctx).wrap_err("Failed to run flatpak")?;
 
     let mut stdout = BufReader::new(proc.take_stdout().unwrap());
     let mut buf = String::new();

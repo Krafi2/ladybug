@@ -214,10 +214,10 @@ mod tests {
         Ok(t)
     }
 
-    fn stream<'a>(
-        src: &'a [Token],
+    fn stream(
+        src: &[Token],
     ) -> chumsky::Stream<
-        'a,
+        '_,
         Token,
         Span,
         std::iter::Map<
@@ -228,7 +228,7 @@ mod tests {
         let len = src.len();
         chumsky::Stream::<_, Span, _>::from_iter(
             Span::new(len, len),
-            src.into_iter()
+            src.iter()
                 .enumerate()
                 .map(|(i, c)| (c.clone(), Span::new(i, i + 1))),
         )

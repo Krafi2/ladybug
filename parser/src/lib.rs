@@ -84,7 +84,7 @@ enum ErrorKind {
 pub struct Error(ErrorKind);
 
 impl Error {
-    pub fn into_report<'a>(self, filename: &'a str) -> Report<span::AriadneSpan> {
+    pub fn into_report(self, filename: &str) -> Report<span::AriadneSpan> {
         fn token_or_end<T: ToString>(t: &Option<T>) -> String {
             match t {
                 Some(t) => {
@@ -151,7 +151,7 @@ impl Error {
                 .with_message(format!("Invalid identifier '{ident}'"))
                 .with_label(
                     Label::new(AriadneSpan::new(filename, span))
-                        .with_message(format!("This identifier is not valid"))
+                        .with_message("This identifier is not valid".to_string())
                         .with_color(Color::Red),
                 )
                 .with_help("Identifiers cannot contain whitespace and must not begin with a number")
@@ -165,7 +165,7 @@ impl Error {
                     chumsky::error::SimpleReason::Unclosed { span, delimiter } => report
                         .with_message(format!("Unclosed delimiter {}", delimiter.fg(Color::Red)))
                         .with_label(
-                            Label::new(AriadneSpan::new(filename, span.clone()))
+                            Label::new(AriadneSpan::new(filename, *span))
                                 .with_message(format!(
                                     "Unclosed delimiter {}",
                                     delimiter.fg(Color::Red)
@@ -190,7 +190,7 @@ impl Error {
                                 _ => format!(
                                     "one of {}",
                                     err.expected()
-                                        .map(|t| format!("'{}'", token_or_end(&t)))
+                                        .map(|t| format!("'{}'", token_or_end(t)))
                                         .collect::<Vec<_>>()
                                         .join(", ")
                                 ),
@@ -287,10 +287,10 @@ fn tts_to_stream(tts: Vec<Spanned<TokenTree>>) -> chumsky::BoxStream<'static, To
     )
 }
 
-fn stream_from_str<'a>(
-    src: &'a str,
+fn stream_from_str(
+    src: &str,
 ) -> chumsky::Stream<
-    'a,
+    '_,
     char,
     Span,
     std::iter::Map<std::iter::Enumerate<std::str::Chars>, fn((usize, char)) -> (char, Span)>,

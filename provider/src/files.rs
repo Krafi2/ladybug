@@ -195,7 +195,7 @@ impl super::Provider for Provider {
         let dir = exec.dir();
         let source = match source {
             // Attempt to create the specified source
-            Some(source) => Source::from_path(&dir, source)
+            Some(source) => Source::from_path(dir, source)
                 .map_err(|err| ctx.emit(err))
                 .ok(),
             // Default to the unit directory if no source was provided
@@ -253,8 +253,8 @@ impl super::Provider for Provider {
         tracing::debug_span!("deploy", "Deploying files from {source} to {target}");
 
         for (i, file) in files.iter().enumerate() {
-            let source = source.join(&file);
-            let dest = target.join(&file);
+            let source = source.join(file);
+            let dest = target.join(file);
             match deploy_file(&source, &dest, *method, *conflicts) {
                 Ok(_) => {
                     let msg = format!("Deployed {source} to {dest}");
@@ -301,8 +301,8 @@ impl super::Provider for Provider {
         };
 
         for file in &files[..deployed] {
-            let source = source.join(&file);
-            let dest = target.join(&file);
+            let source = source.join(file);
+            let dest = target.join(file);
             match remove_file(&source, &dest, *method) {
                 Ok(_) => {
                     let msg = format!("Removed {dest}");
@@ -581,8 +581,8 @@ mod tests {
 
     #[test]
     fn rename_conflicting_file() {
-        const NAME: &'static str = "test.test";
-        const NEW_NAME: &'static str = "test.test.old";
+        const NAME: &str = "test.test";
+        const NEW_NAME: &str = "test.test.old";
 
         let dir = tempdir().expect("Failed to create tempdir");
         let path = dir.path().join(NAME);
