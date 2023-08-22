@@ -1,12 +1,5 @@
 use std::path::{Path, PathBuf};
 
-/// A path that might be relative to the home directory. Relative paths start with `~`.
-#[derive(Debug, Clone)]
-pub struct RelPath {
-    relative: PathBuf,
-    absolute: PathBuf,
-}
-
 #[derive(Debug, Clone, Copy)]
 pub enum HomeError {
     NoHome,
@@ -42,23 +35,36 @@ impl std::error::Error for Error {
     }
 }
 
+/// A path that might be relative to the home directory. Relative paths start with `~`.
+#[derive(Debug, Clone)]
+pub struct RelPath {
+    relative: PathBuf,
+    absolute: PathBuf,
+}
+
 impl RelPath {
     /// Construct a new relative path
     pub fn new<P: AsRef<Path>>(path: PathBuf, home: Result<P, HomeError>) -> Result<Self, Error> {
-        let absolute = match path.strip_prefix("~") {
-            Ok(path) => match home {
-                Ok(prefix) => Ok(prefix.as_ref().join(path)),
-                Err(err) => Err(Error {
-                    path: path.to_owned(),
-                    err,
+        if let Ok(rel) = path.strip_prefix("~") {
+            return match home {
+                Ok(home) => Ok(RelPath {
+                    absolute: home.as_ref().join(rel),
+                    relative: path,
                 }),
-            },
-            Err(_) => Ok(path.clone()),
-        }?;
-
-        Ok(Self {
-            relative: path,
-            absolute,
+                Err(err) => Err(Error { path, err }),
+            };
+        }
+        if let Ok(home) = home {
+            if let Ok(rel) = path.strip_prefix(home) {
+                return Ok(RelPath {
+                    relative: PathBuf::from("~").join(rel),
+                    absolute: path,
+                });
+            }
+        }
+        Ok(RelPath {
+            relative: path.clone(),
+            absolute: path.clone(),
         })
     }
 
