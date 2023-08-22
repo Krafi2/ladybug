@@ -244,9 +244,8 @@ fn remove_unit(
 }
 
 fn pb_style(path: &UnitPath) -> ProgressStyle {
-    
     ProgressStyle::with_template(&format!("{{prefix:.bright.black}} {}: {{wide_msg}}", path))
-            .unwrap()
+        .unwrap()
 }
 
 fn print_error(err: color_eyre::Report) {
@@ -272,29 +271,22 @@ fn print_module_status(root: UnitId, modules: &HashMap<UnitId, Module>) {
     println!("\nUnit status:");
     let mut stack = vec![(vec![root], 0)];
 
-    while let Some((members, n)) = stack.last_mut() {
-        match members.get(*n) {
+    while !stack.is_empty() {
+        let (members, n) = stack.last_mut().unwrap();
+        match members.get(*n).copied() {
             Some(id) => {
                 *n += 1;
-                let module = modules.get(id).unwrap();
-                let last = members.len() == *n;
-                let depth = stack.len() - 1;
-
-                for i in 0..depth {
-                    if i == 0 {
-                        print!("  ");
-                    } else {
-                        print!("│ ");
+                for (i, (members, n)) in stack.iter().enumerate() {
+                    match (i, i + 1 == stack.len(), *n == members.len()) {
+                        (0, _, _) => (),
+                        (_, true, true) => print!("  └─ "),
+                        (_, true, false) => print!("  ├─ "),
+                        (_, false, false) => print!("  │ "),
+                        (_, false, true) => print!("    "),
                     }
                 }
 
-                let part = if depth == 0 {
-                    ""
-                } else if last {
-                    "└─ "
-                } else {
-                    "├─ "
-                };
+                let module = modules.get(&id).unwrap();
                 let name = module.path.name();
                 let (col, status) = match &module.status {
                     Status::Ready => (Style::new().default_color(), ""),
@@ -303,7 +295,7 @@ fn print_module_status(root: UnitId, modules: &HashMap<UnitId, Module>) {
                     Status::Skipped => (Style::new().bright_black(), " (Skipped)"),
                 };
 
-                println!("{part}{}{}", name.style(col), status.style(col));
+                println!("{}{}", name.style(col), status.style(col));
 
                 if !module.members.is_empty() {
                     stack.push((module.members.clone(), 0));
