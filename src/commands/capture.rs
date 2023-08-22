@@ -9,6 +9,10 @@ use super::{Module, Status};
 
 #[derive(clap::Parser, Debug)]
 pub struct Capture {
+    /// Run the command without making any changes to the system
+    #[clap(long)]
+    dry_run: bool,
+    /// Topics to capture
     topics: Option<Vec<String>>,
 }
 
@@ -33,7 +37,7 @@ impl Capture {
             }
         }
         println!("Capturing units:");
-        let errn = capture_modules(queue, &mut modules, ctx);
+        let errn = self.capture_modules(queue, &mut modules, ctx);
 
         println!();
         // Print number of errors
@@ -53,38 +57,44 @@ impl Capture {
             Err(())
         }
     }
-}
 
-fn capture_modules(
-    queue: Vec<UnitId>,
-    modules: &mut HashMap<UnitId, Module>,
-    ctx: &Context,
-) -> usize {
-    let len = queue.len();
-    let mut errn = 0;
-    for (i, id) in queue.into_iter().enumerate() {
-        let module = modules.get_mut(&id).unwrap();
+    fn capture_modules(
+        &self,
+        queue: Vec<UnitId>,
+        modules: &mut HashMap<UnitId, Module>,
+        ctx: &Context,
+    ) -> usize {
+        let len = queue.len();
+        let mut errn = 0;
+        for (i, id) in queue.into_iter().enumerate() {
+            let module = modules.get_mut(&id).unwrap();
 
-        let style = super::pb_style(&module.path);
-        let pb = ProgressBar::with_draw_target(None, ProgressDrawTarget::stdout());
-        pb.set_style(style);
-        pb.set_prefix(format!("[{}/{}]", i + 1, len));
-        pb.set_message("Starting capture");
+            let style = super::pb_style(&module.path);
+            let pb = ProgressBar::with_draw_target(None, ProgressDrawTarget::stdout());
+            pb.set_style(style);
+            pb.set_prefix(format!("[{}/{}]", i + 1, len));
+            pb.set_message("Starting capture");
 
-        match capture_unit(module, &pb, ctx) {
-            (_, Ok(_)) => {
-                pb.finish_with_message("Done".bright_green().to_string());
-                module.status = Status::Ok
-            }
-            (errors, Err(err)) => {
-                pb.finish_with_message("Error".red().to_string());
-                module.status = Status::Err;
-                super::print_error(err);
-                errn += errors;
+            if self.dry_run {
+                pb.finish_with_message("Skipped".bright_black().to_string());
+                module.status = Status::Skipped;
+            } else {
+                match capture_unit(module, &pb, ctx) {
+                    (_, Ok(_)) => {
+                        pb.finish_with_message("Done".bright_green().to_string());
+                        module.status = Status::Ok
+                    }
+                    (errors, Err(err)) => {
+                        pb.finish_with_message("Error".red().to_string());
+                        module.status = Status::Err;
+                        super::print_error(err);
+                        errn += errors;
+                    }
+                }
             }
         }
+        errn
     }
-    errn
 }
 
 #[derive(thiserror::Error, Debug)]

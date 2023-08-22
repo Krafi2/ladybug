@@ -110,6 +110,7 @@ impl Deploy {
             } else {
                 let (res, states) = deploy_unit(module, &pb, context);
                 let is_err = res.is_err();
+
                 deployed.push((id, states, is_err));
                 if let Err(err) = res {
                     pb.finish_with_message("Error".red().to_string());
@@ -119,6 +120,7 @@ impl Deploy {
                     pb.finish_with_message("Done".bright_green().to_string());
                     module.status = Status::Ok;
                 }
+
                 if is_err && self.abort_early {
                     break;
                 }
