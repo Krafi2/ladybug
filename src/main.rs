@@ -3,13 +3,13 @@ mod context;
 mod shell;
 mod unit;
 
-use std::{fs::File, os::unix::process::CommandExt, path::PathBuf};
+use std::{fs::File, path::PathBuf};
 
 use clap::Parser;
 use color_eyre::eyre::{eyre, WrapErr};
 use tracing::{debug, info};
 
-use common::rel_path::RelPath;
+use crate::context::Context;
 
 enum Error {
     Clap(clap::Error),
@@ -30,7 +30,7 @@ impl From<color_eyre::Report> for Error {
 
 #[derive(Parser)]
 #[clap(author = "Krafi", version = "0.1.0", about = "A cute dotfile manager", long_about = None)]
-struct Opts {
+pub struct Opts {
     #[clap(long, action)]
     no_root: bool,
     #[clap(long, action)]
@@ -82,28 +82,10 @@ fn run() -> Result<Result<(), ()>, Error> {
     let opts = Opts::try_parse()?;
     debug!(?opts);
 
-    let config = opts
-        .config
-        .clone()
-        .ok_or(())
-        .or_else(|_| context::default_config_path())
-        .and_then(|path| {
-            RelPath::new(path, context::home_dir()).wrap_err("Failed to expand config path")
-        })?;
-
-    let dotfiles = opts
-        .dotfiles
-        .clone()
-        .map(|path| {
-            RelPath::new(path, context::home_dir())
-                .wrap_err("Failed to expand dotfile directory path")
-        })
-        .transpose()?;
-
-    let mut ctx = context::Context::new(config.clone(), dotfiles.clone())?;
-    debug!(?ctx);
-
     check_user(&opts)?;
+
+    let mut ctx = Context::new(&opts)?;
+    debug!(?ctx);
 
     Ok(opts.command.run(&mut ctx))
 }
@@ -116,27 +98,6 @@ fn check_user(opts: &Opts) -> Result<(), Error> {
                 "Running as root is not recommended! Please note that ladybug will use sudo to request\
                  root access if neccessary. If you are certain that you want to do this, use the `--root` flag."
             )).map_err(Error::Eyre);
-        }
-    } else {
-        // Try to elevate the process to root privileges using sudo if it's running as a user and the
-        // `no-root` option isn't set.
-        if !opts.no_root {
-            debug!("Running sudo");
-            let mut command = std::process::Command::new("sudo");
-            let mut args = std::env::args();
-
-            // Ask sudo to preserve some variables that we need
-            command.arg("--preserve-env=XDG_CACHE_HOME,XDG_CONFIG_HOME,XDG_DATA_DIRS,XDG_CONFIG_DIRS,PATH,USER,HOME");
-            command.arg(args.next().unwrap()); // Get the path to the executable currently running
-            command.arg("--root"); // We certainly want to run as root
-            command.args(args); // Carry over the rest of the args
-
-            let err = command.exec();
-
-            // There was an error if the previous statement exited
-            return Err(err)
-                .wrap_err("Failed to elevate to root privileges")
-                .map_err(From::from);
         }
     }
     Ok(())

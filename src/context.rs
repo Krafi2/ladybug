@@ -1,8 +1,9 @@
-use color_eyre::eyre::{bail, eyre, ContextCompat, Result, WrapErr};
+use std::path::{Path, PathBuf};
+
+use color_eyre::eyre::{bail, ContextCompat, Result, WrapErr};
 use common::rel_path::{HomeError, RelPath};
 use eval::IntoReport;
-use interpreter::Interpreter;
-use std::path::{Path, PathBuf};
+use interpreter::{Config, Interpreter};
 
 use crate::shell::Shell;
 
@@ -24,37 +25,68 @@ impl std::fmt::Debug for Context {
 }
 
 impl Context {
-    pub fn new(config_path: RelPath, dotfiles: Option<RelPath>) -> Result<Self> {
+    pub fn new(opts: &crate::Opts) -> Result<Self> {
+        let config_path = opts
+            .config
+            .clone()
+            .ok_or(())
+            .or_else(|_| default_config_path())
+            .and_then(|path| {
+                RelPath::new(path, home_dir()).wrap_err("Failed to expand config path")
+            })?;
+
+        let dotfiles = opts
+            .dotfiles
+            .clone()
+            .map(|path| {
+                RelPath::new(path, home_dir()).wrap_err("Failed to expand dotfile directory path")
+            })
+            .transpose()?;
+
         let home_dir = home_dir();
         let interpreter = Interpreter::new();
 
-        let config_src = std::fs::read_to_string(&config_path)
-            .wrap_err_with(|| format!("Failed to read config from file '{}'", config_path))?;
-        let (config, errors) = interpreter.eval_config(&config_src, home_dir.clone());
+        let config = match std::fs::read_to_string(&config_path) {
+            Ok(config_src) => {
+                let (config, errors) = interpreter.eval_config(&config_src, home_dir.clone());
 
-        let errn = errors.len();
-        for err in errors {
-            let filename = config_path.to_string();
-            let report = err.into_report(&filename);
-            let res = report
-                .eprint::<(&str, ariadne::Source)>((&filename, ariadne::Source::from(&config_src)))
-                .wrap_err("Failed to print message");
-            tracing::warn!("{res:?}");
-        }
+                let errn = errors.len();
+                for err in errors {
+                    let filename = config_path.to_string();
+                    let report = err.into_report(&filename);
+                    let res = report
+                        .eprint::<(&str, ariadne::Source)>((
+                            &filename,
+                            ariadne::Source::from(&config_src),
+                        ))
+                        .wrap_err("Failed to print message");
+                    tracing::warn!("{res:?}");
+                }
 
-        if errn == 1 {
-            bail!("Failed to load config due to previous error");
-        } else if errn > 1 {
-            bail!("Failed to load config due to {errn} previous errors")
-        }
+                if errn == 1 {
+                    bail!("Failed to load config due to previous error");
+                } else if errn > 1 {
+                    bail!("Failed to load config due to {errn} previous errors")
+                }
+
+                config
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                println!("Config not found at '{config_path}', using default");
+                Config {
+                    dotfiles: None,
+                    shell: None,
+                }
+            }
+            Err(err) => {
+                dbg!(&config_path);
+                return Err(err).wrap_err(format!("Failed to read config at '{config_path}'"));
+            }
+        };
 
         let dotfiles = dotfiles
+            .or(config.dotfiles)
             .ok_or(())
-            .or_else(|_| {
-                config
-                    .dotfiles
-                    .ok_or_else(|| eyre!("No dotfile direcory set in config"))
-            })
             .or_else(|_| default_dotfile_dir())?;
 
         Ok(Self {
@@ -112,7 +144,7 @@ pub fn log_path() -> Result<PathBuf> {
 }
 
 pub fn default_dotfile_dir() -> Result<RelPath> {
-    RelPath::new("~/ladybug".into(), home_dir())
+    RelPath::new("~/dotfiles".into(), home_dir())
         .wrap_err("Default dotfile directory isn't available")
 }
 
