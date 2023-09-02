@@ -133,9 +133,17 @@ impl Value {
                     .map(|expr| expr.map(|expr| Self::from_expr(expr, env)))
                     .collect(),
             ),
-            parser::Expr::Map(_) => todo!(),
-            parser::Expr::Code(_) => todo!(),
-            parser::Expr::Item(_, _) => todo!(),
+            parser::Expr::Map(params) => Self::Map(
+                params
+                    .into_iter()
+                    .map(|param| {
+                        let span = param.span;
+                        Spanned::new(Arg::from_expr(param, env), span)
+                    })
+                    .collect(),
+            ),
+            parser::Expr::Code(code) => Self::Code(code),
+            parser::Expr::Item(ident, params) => Self::Item(ident, Args::from_exprs(params, env)),
         }
     }
 

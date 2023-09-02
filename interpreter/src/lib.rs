@@ -1,5 +1,3 @@
-pub mod error;
-
 use std::{
     collections::HashMap,
     fmt::Display,

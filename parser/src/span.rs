@@ -1,3 +1,4 @@
+// TODO: include info about the file this span comes from
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Span {
     pub start: usize,
@@ -34,9 +35,7 @@ impl chumsky::Span for Span {
         Self::new(range.start, range.end)
     }
 
-    fn context(&self) -> Self::Context {
-        
-    }
+    fn context(&self) -> Self::Context {}
 
     fn start(&self) -> Self::Offset {
         self.start
@@ -90,22 +89,6 @@ impl<T> Spanned<T> {
             span: span.into(),
         }
     }
-
-    // pub fn span(&self) -> Span {
-    //     self.span.clone()
-    // }
-
-    // pub fn into_inner(self) -> T {
-    //     self.inner
-    // }
-
-    // pub fn inner(&self) -> &T {
-    //     &self.inner
-    // }
-
-    // pub fn get_mut(&mut self) -> &mut T {
-    //     &mut self.0
-    // }
 
     pub fn map<O, F: FnOnce(T) -> O>(self, f: F) -> Spanned<O> {
         Spanned::new(f(self.inner), self.span)

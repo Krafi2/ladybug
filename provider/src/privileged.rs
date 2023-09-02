@@ -481,8 +481,7 @@ impl<'a> SuperCtx<'a> {
                 .map(|(key, val)| {
                     (
                         key.to_owned(),
-                        val.map(ToOwned::to_owned)
-                            .unwrap_or_else(OsString::default),
+                        val.map(ToOwned::to_owned).unwrap_or_else(OsString::default),
                     )
                 })
                 .collect(),
@@ -970,42 +969,3 @@ impl From<std::process::ExitStatus> for ExitStatus {
         Self { code: value.code() }
     }
 }
-
-// #[cfg(any(target_os = "redox", unix))]
-// mod imp {
-//     use std::{
-//         fs::File,
-//         os::fd::{AsRawFd, FromRawFd},
-//         process::{ChildStderr, ChildStdin, ChildStdout},
-//     };
-
-//     use serde::{Deserialize, Serialize};
-
-//     #[derive(Debug, Serialize, Deserialize)]
-//     pub struct Inner(File);
-
-//     impl From<Inner> for std::fs::File {
-//         fn from(handle: Inner) -> Self {
-//             // This should be a valid open handle
-//             unsafe { std::os::fd::FromRawFd::from_raw_fd(handle.0) }
-//         }
-//     }
-
-//     impl From<&ChildStdin> for Inner {
-//         fn from(value: &ChildStdin) -> Self {
-//             unsafe { Self(File::from_raw_fd(value.as_raw_fd())) }
-//         }
-//     }
-
-//     impl From<&ChildStdout> for Inner {
-//         fn from(value: &ChildStdout) -> Self {
-//             Self(value.as_raw_fd())
-//         }
-//     }
-
-//     impl From<&ChildStderr> for Inner {
-//         fn from(value: &ChildStderr) -> Self {
-//             Self(value.as_raw_fd())
-//         }
-//     }
-// }

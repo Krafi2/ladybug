@@ -60,7 +60,7 @@ impl Command {
         let root = loader.root();
         let mut modules = HashMap::new();
 
-        let style = ProgressStyle::with_template("Loading units{spinner}")
+        let style = ProgressStyle::with_template("Loading units: {wide_msg}{spinner}")
             .unwrap()
             .tick_strings(&[".", "..", "...", ""]);
         let pb =

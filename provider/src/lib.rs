@@ -271,11 +271,6 @@ impl Manager {
                 Err(())
             }
         }
-        // .map_err(|err| {
-        //     if let Some(err) = err {
-        //         ctx.emit(err);
-        //     }
-        // })
     }
 
     pub fn new_files(

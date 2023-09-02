@@ -293,8 +293,6 @@ mod tests {
         })
     }
 
-    // fn trans_output(out: (Option<Token>, Vec<chumsky::Error>)) ->
-
     test_parsers! {
         @stream: crate::stream_from_str;
         @expected: ok;
