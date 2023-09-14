@@ -10,6 +10,7 @@ parser = { path = "../parser" }
 common = { path = "../common" }
 eval = { path = "../eval" }
 provider= { path = "../provider" }
+data = { path = "../data" }
 color-eyre = "0.6.2"
 ariadne = "0.2.0"
 thiserror = "1.0.39"

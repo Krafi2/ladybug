@@ -2,17 +2,18 @@ mod capture;
 mod deploy;
 mod remove;
 
-use std::{collections::HashMap, time::Duration};
+use std::{collections::HashMap, rc::Rc, time::Duration};
 
 use clap::Subcommand;
 use color_eyre::{
     eyre::WrapErr,
     owo_colors::{OwoColorize, Style},
 };
+use data::Topic;
 use eval::IntoReport;
 use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
 use interpreter::UnitPath;
-use provider::ExecCtx;
+use provider::{OpError, OpResult, RuntimeCtx};
 use tracing::debug;
 
 use crate::{
@@ -65,12 +66,13 @@ impl Command {
             .tick_strings(&[".", "..", "...", ""]);
         let pb =
             ProgressBar::with_draw_target(None, ProgressDrawTarget::stdout()).with_style(style);
+        let pb_ref = &pb;
         pb.enable_steady_tick(Duration::from_millis(500));
 
         let errn = load_modules(
             &mut loader,
             &mut modules,
-            &|msg| pb.set_message(msg),
+            Rc::new(move |msg| pb_ref.set_message(msg)),
             context,
         );
         pb.finish_and_clear();
@@ -93,10 +95,11 @@ impl Command {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 enum Status {
     Ready,
     Ok,
+    Reverted,
     Err,
     Skipped,
 }
@@ -112,13 +115,13 @@ struct Module {
 fn load_modules(
     loader: &mut loader::Loader,
     modules: &mut HashMap<UnitId, Module>,
-    set_msg: &dyn Fn(String),
+    set_msg: Rc<dyn Fn(String) + '_>,
     ctx: &mut Context,
 ) -> usize {
     let root = loader.root();
     let mut errn = 0;
 
-    while let Some(module) = loader.load(set_msg, ctx) {
+    while let Some(module) = loader.load(set_msg.clone(), ctx) {
         let (unit, status) = match module.status {
             loader::Status::Ok(unit) => (Some(unit), Status::Ready),
             loader::Status::Degraded(_, errors, src) => {
@@ -169,56 +172,89 @@ fn load_modules(
     errn
 }
 
+/// Remove modules that are ready or deployed
 fn remove_modules(
-    deployed: Vec<(UnitId, Vec<Option<provider::State>>)>,
+    root: UnitId,
     modules: &mut HashMap<UnitId, Module>,
     dry_run: bool,
+    revert_all: bool,
     ctx: &mut Context,
-) -> usize {
+) -> (Vec<(UnitId, OpResult)>, usize) {
+    let len = modules
+        .values()
+        .filter(|m| m.status == Status::Err || revert_all && m.status == Status::Ok)
+        .count();
     let mut errn = 0;
-    let len = deployed.len();
+    let mut i = 1;
+    let mut stack = vec![(vec![root], 0, None)];
+    let mut removed = Vec::new();
 
-    for (i, (id, states)) in deployed.into_iter().enumerate() {
-        let module = modules.get_mut(&id).unwrap();
+    while let Some((members, current, _)) = stack.last_mut() {
+        match members.get(*current) {
+            Some(&id) => {
+                let module = modules.get_mut(&id).unwrap();
+                *current += 1;
+                let members = module.members.clone();
+                stack.push((members, 0, Some(id)));
+            }
+            None => {
+                let (_, _, id) = stack.pop().unwrap();
 
-        let style = pb_style(&module.path);
-        let pb = ProgressBar::with_draw_target(None, ProgressDrawTarget::stdout());
-        pb.set_style(style);
-        pb.set_prefix(format!("[{}/{}]", i + 1, len));
-        pb.set_message("Starting removal");
+                // Continue if we've reached the root
+                let Some(id) = id else {
+                    continue;
+                };
 
-        if dry_run {
-            pb.finish_with_message("Skipped".bright_black().to_string());
-            module.status = Status::Skipped;
-        } else {
-            let errors = remove_unit(module, states, &pb, ctx);
-            errn += errors.len();
-            if errors.is_empty() {
-                pb.finish_with_message("Done".bright_green().to_string());
-                // Change the status if it hasn't been modified
-                if let Status::Ready = module.status {
-                    module.status = Status::Ok;
+                let module = modules.get_mut(&id).unwrap();
+
+                // Remove if the deployment previously failed or the revert_all flag is set
+                if !(module.status == Status::Err || module.status == Status::Ok && revert_all) {
+                    continue;
                 }
-            } else {
-                pb.finish_with_message("Error".red().to_string());
-                module.status = Status::Err;
-                for err in errors {
-                    print_error(err);
+
+                let style = pb_style(&module.path);
+                let pb = ProgressBar::with_draw_target(None, ProgressDrawTarget::stdout());
+                pb.set_style(style);
+                pb.set_prefix(format!("[{}/{}]", i, len));
+                pb.set_message("Starting removal");
+                i += 1;
+
+                if dry_run {
+                    pb.finish_with_message("Skipped".bright_black().to_string());
+                    module.status = Status::Skipped;
+                } else {
+                    let mut res = remove_unit(module, &pb, ctx);
+
+                    if res.is_ok() {
+                        pb.finish_with_message("Done".bright_green().to_string());
+                        match module.status {
+                            // In this case reversion is the primary operation so let's mark the status as success
+                            Status::Ready => module.status = Status::Ok,
+                            // Here we are reverting a module becaus something went wrong, so let's mark it as reverted
+                            Status::Ok => module.status = Status::Reverted,
+                            _ => (),
+                        }
+                    } else {
+                        pb.finish_with_message("Error".red().to_string());
+                        errn += 1;
+                        module.status = Status::Err;
+
+                        for err in res.drain_errors() {
+                            print_error(&color_eyre::eyre::eyre!(err));
+                        }
+                    }
+
+                    removed.push((id, res));
                 }
             }
         }
     }
-    errn
+    (removed, errn)
 }
 
-fn remove_unit(
-    module: &Module,
-    states: Vec<Option<provider::State>>,
-    pb: &ProgressBar,
-    ctx: &mut Context,
-) -> Vec<color_eyre::Report> {
+fn remove_unit(module: &mut Module, pb: &ProgressBar, ctx: &mut Context) -> OpResult {
     debug!("Removing module {}", &module.path);
-    let unit = module.unit.as_ref().expect("Unexpected error");
+    let unit = module.unit.as_mut().expect("Unexpected error");
     let mut errors = Vec::new();
 
     if !unit.remove.is_empty() {
@@ -227,20 +263,28 @@ fn remove_unit(
 
         for hook in &unit.remove {
             if let Err(err) = hook.run(shell, &dir) {
-                errors.push(err.into_report().wrap_err("Uninstall hook failed"));
+                let err = err.into_report().wrap_err("Uninstall hook failed");
+                errors.push(OpError::Other(err));
             }
         }
     }
 
-    for (transaction, state) in unit.transactions.iter().zip(states) {
-        let set_msg = |msg| pb.set_message(msg);
-        let exec = ExecCtx::new(&set_msg, module.path.bind(ctx.dotfile_dir().clone()));
-        if let Err(err) = ctx.interpreter().remove(transaction, state, &exec) {
-            errors.push(err);
-        }
-    }
+    let set_msg = Rc::new(|msg| pb.set_message(msg));
+    let run_ctx = RuntimeCtx::new(
+        set_msg,
+        module.path.bind(ctx.dotfile_dir().clone()),
+        unit.topic.as_ref().map(Topic::id),
+        ctx.home_dir().map(ToOwned::to_owned),
+        ctx.dotfile_dir().clone(),
+        false,
+    );
 
-    errors
+    let packages = std::mem::replace(&mut unit.packages, Vec::new());
+    let mut res = ctx.interpreter().remove(packages, &run_ctx);
+    for err in errors {
+        res.push_err(err);
+    }
+    res
 }
 
 fn pb_style(path: &UnitPath) -> ProgressStyle {
@@ -248,7 +292,7 @@ fn pb_style(path: &UnitPath) -> ProgressStyle {
         .unwrap()
 }
 
-fn print_error(err: color_eyre::Report) {
+fn print_error(err: &color_eyre::Report) {
     let msg = format!("Caused by:{err:?}");
     // color-eyre indents using 3 spaces
     let msg = indent::indent_all_by(3, msg);
@@ -291,6 +335,7 @@ fn print_module_status(root: UnitId, modules: &HashMap<UnitId, Module>) {
                 let (col, status) = match &module.status {
                     Status::Ready => (Style::new().default_color(), ""),
                     Status::Ok => (Style::new().bright_green(), " (Ok)"),
+                    Status::Reverted => (Style::new().bright_black(), " (Reverted)"),
                     Status::Err => (Style::new().red(), " (Error)"),
                     Status::Skipped => (Style::new().bright_black(), " (Skipped)"),
                 };

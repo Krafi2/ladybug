@@ -7,19 +7,25 @@ use std::{
 use ariadne::{Color, Fmt, ReportKind};
 use color_eyre::{
     eyre::{bail, eyre, WrapErr},
-    Result, Section,
+    Result,
 };
 use common::command;
-use eval::{params, report, FromArgs, RecoverFromArgs};
+use data::Package;
+use eval::{params, report, Args, FromArgs, RecoverFromArgs};
 use parser::Span;
+use serde::{Deserialize, Serialize};
 use tracing::debug;
 
 use crate::{
     privileged::{self, SuperCtx},
-    ExecCtx,
+    OpCtx, OpError, ParseCtx, ParseError, ProviderId, RawPackages,
 };
 
-use super::ProviderError;
+use super::{Provider, ProviderError};
+
+pub(crate) fn new_provider() -> Result<impl crate::Provider, ProviderError> {
+    Flatpak::new()
+}
 
 #[derive(Debug)]
 pub enum Error {
@@ -49,9 +55,9 @@ report! {
 }
 
 /// The flatpak provider is stateless
-pub struct Provider;
+pub struct Flatpak;
 
-impl super::ConstructProvider for Provider {
+impl Flatpak {
     fn new() -> Result<Self, ProviderError> {
         // try to run 'flatpak --version' to see whether flatpak is installed
         let out = Command::new("flatpak")
@@ -78,6 +84,79 @@ impl super::ConstructProvider for Provider {
     }
 }
 
+impl Provider for Flatpak {
+    // TODO set messages
+    fn parse_packages(
+        &mut self,
+        args: Args,
+        packages: RawPackages,
+        ctx: &mut ParseCtx,
+    ) -> Result<Vec<data::Package>, ()> {
+        // Parse the package block params
+        let params = Params::recover_default(args, ctx.eval());
+        let user = params.user.unwrap_or_default();
+
+        let mut finished = Vec::new();
+        let mut degraded = params.is_degraded();
+
+        // Verify packages
+        for package in packages.packages {
+            if let Some(args) = PackageParams::from_args(package.args, ctx.eval()) {
+                if args.is_degraded() {
+                    degraded = true;
+                    continue;
+                }
+
+                match exists(&package.name.inner, user) {
+                    Ok(PackageStatus::Ok) => match bincode::serialize(&Metadata { user }) {
+                        Ok(metadata) => {
+                            let package = Package::new(
+                                package.name.inner,
+                                metadata,
+                                ctx.runtime().topic(),
+                                ProviderId::Flatpak,
+                            );
+                            finished.push(package);
+                            continue;
+                        }
+                        Err(err) => ctx.emit(ParseError::Bincode(err, package.span)),
+                    },
+                    Ok(PackageStatus::Ambiguous) => {
+                        ctx.emit(Error::AmbiguousPackage(
+                            package.name.inner,
+                            package.name.span,
+                        ));
+                    }
+                    Ok(PackageStatus::Missing) => {
+                        ctx.emit(Error::PackageNotRecognized(
+                            package.name.inner,
+                            package.name.span,
+                        ));
+                    }
+                    Err(err) => {
+                        ctx.emit(Error::Eyre(err, package.name.span));
+                    }
+                }
+            }
+            degraded = true;
+        }
+
+        if !degraded && !params.is_degraded() {
+            Ok(finished)
+        } else {
+            Err(())
+        }
+    }
+
+    fn install(&mut self, packages: Vec<data::Package>, ctx: &mut OpCtx) {
+        flatpak_op(Operation::Install, packages, ctx)
+    }
+
+    fn remove(&mut self, packages: Vec<data::Package>, ctx: &mut OpCtx) {
+        flatpak_op(Operation::Remove, packages, ctx)
+    }
+}
+
 params! {
     struct Params {
         user: Option<bool>,
@@ -87,112 +166,35 @@ params! {
     struct PackageParams {}
 }
 
-struct Package {
-    name: String,
-}
-
-pub struct Transaction {
-    /// Work on user installation
+#[derive(Serialize, Deserialize)]
+struct Metadata {
     user: bool,
-    packages: Vec<Package>,
 }
 
-impl super::Provider for Provider {
-    type Transaction = Transaction;
-    type State = ();
-
-    fn new_transaction(
-        &mut self,
-        args: crate::Args,
-        packages: crate::Packages,
-        ctx: &mut super::EvalCtx,
-        _exec: &ExecCtx,
-    ) -> Result<Self::Transaction, ()> {
-        // Parse the package block params
-        let params = Params::recover_default(args, ctx);
-        let user = params.user.unwrap_or_default();
-
-        let mut packs = Vec::new();
-        let mut degraded = params.is_degraded();
-        // Verify packages
-        for package in packages.packages {
-            if let Some(args) = PackageParams::from_args(package.args, ctx) {
-                if args.is_degraded() {
-                    degraded = true;
-                    continue;
-                }
-
-                match exists(&package.name.inner, user) {
-                    Ok(PackageStatus::Ok) => {
-                        let package = Package {
-                            name: package.name.inner,
-                        };
-                        packs.push(package);
-                    }
-                    Ok(PackageStatus::Ambiguous) => {
-                        ctx.emit(Error::AmbiguousPackage(
-                            package.name.inner,
-                            package.name.span,
-                        ));
-                        degraded = true;
-                    }
-                    Ok(PackageStatus::Missing) => {
-                        ctx.emit(Error::PackageNotRecognized(
-                            package.name.inner,
-                            package.name.span,
-                        ));
-                        degraded = true;
-                    }
-                    Err(err) => {
-                        ctx.emit(Error::Eyre(err, package.name.span));
-                        degraded = true;
-                    }
-                }
-            }
-        }
-
-        if !degraded && !params.is_degraded() {
-            Ok(Transaction {
-                user,
-                packages: packs,
-            })
-        } else {
-            Err(())
-        }
-    }
-
-    fn install(
-        &mut self,
-        transaction: &Self::Transaction,
-        ctx: &mut SuperCtx,
-        exec: &ExecCtx,
-    ) -> (super::OpResult, Self::State) {
-        let res = flatpak_op(Operation::Install, transaction, ctx, exec);
-        (res, ())
-    }
-
-    fn remove(
-        &mut self,
-        transaction: &Self::Transaction,
-        _state: Option<Self::State>,
-        ctx: &mut SuperCtx,
-        exec: &ExecCtx,
-    ) -> super::OpResult {
-        flatpak_op(Operation::Remove, transaction, ctx, exec)
-    }
-}
-
+#[derive(Clone, Copy)]
 enum Operation {
     Install,
     Remove,
 }
 
-fn flatpak_op(
-    operation: Operation,
-    transaction: &Transaction,
-    ctx: &mut SuperCtx,
-    exec: &ExecCtx,
-) -> super::OpResult {
+fn flatpak_op(operation: Operation, packages: Vec<Package>, ctx: &mut OpCtx) {
+    let mut user = Vec::new();
+    let mut sup = Vec::new();
+    let mut errors = Vec::new();
+    for package in packages.into_iter() {
+        match bincode::deserialize::<Metadata>(package.metadata()) {
+            Err(err) => errors.push(OpError::Metadata(err)),
+            Ok(metadata) if metadata.user => user.push(package),
+            Ok(_) => sup.push(package),
+        }
+    }
+    // Deploy user packages
+    do_op(operation, true, user, ctx);
+    // Deploy system packages
+    do_op(operation, false, sup, ctx);
+}
+
+fn do_op(operation: Operation, user: bool, packages: Vec<Package>, ctx: &mut OpCtx) {
     let op = match operation {
         Operation::Install => "install",
         Operation::Remove => "remove",
@@ -200,51 +202,76 @@ fn flatpak_op(
 
     let mut cmd = Command::new("flatpak");
     cmd.arg(op);
-    if transaction.user {
+    if user {
         cmd.arg("--user");
     }
     cmd.arg("--noninteractive")
-        .args(transaction.packages.iter().map(|p| &p.name))
+        .args(packages.iter().map(|p| p.name()))
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let mut proc =
-        spawn_command(&mut cmd, transaction.user, ctx).wrap_err("Failed to run flatpak")?;
 
+    let mut proc = match spawn_command(&mut cmd, user, ctx.sup()).wrap_err("Failed to run flatpak")
+    {
+        Ok(proc) => proc,
+        Err(err) => {
+            ctx.emit(err);
+            return;
+        }
+    };
     let mut stdout = BufReader::new(proc.take_stdout().unwrap());
     let mut buf = String::new();
+    let mut degraded = false;
 
-    let res = loop {
+    // TODO: find a way to verify that each package got installed correctly.
+    // Currently cannot find failures to test against.
+    loop {
         buf.clear();
-        match stdout.read_line(&mut buf) {
+        match stdout.read_line(&mut buf).wrap_err("Failed to read stdout") {
             //EOF
-            Ok(0) => break Ok(()),
+            Ok(0) => break,
             Ok(_) => {
+                // We want to filter out things like "Info: aaaaa"
                 let mut msg = buf.split(':');
                 match msg.next() {
                     Some("Info") => tracing::debug!("{}", msg.next().unwrap()),
-                    Some(s) if s.starts_with("Installing") || s.starts_with("Uninstalling") => {
+                    Some(s)
+                        if s.starts_with("Installing")
+                            || s.starts_with("Uninstalling")
+                            || s.starts_with("Updating")
+                            || s.starts_with("Skipping") =>
+                    {
                         debug!("{}", &s);
-                        exec.set_message(s.into());
+                        ctx.runtime().set_message(s.into());
                     }
                     _ => (),
                 }
             }
-            Err(err) => break Err(err),
+            Err(err) => {
+                degraded = true;
+                ctx.emit(OpError::Other(err));
+                break;
+            }
         }
-    };
+    }
 
     proc.put_stdout(stdout.into_inner());
-    let output = ctx
+    let _ = ctx
+        .sup()
         .wait_with_output(proc)
         .wrap_err("Failed to run flatpak")
-        .and_then(|output| output.into_result().map_err(|err| err.into_report()));
+        .and_then(|output| output.into_result().map_err(|err| err.into_report()))
+        .map_err(|err| {
+            degraded = true;
+            ctx.emit(OpError::Other(err))
+        });
 
-    match (output, res) {
-        (Err(e1), Err(e2)) => Err(e1).error(e2),
-        (Err(err), _) => Err(err),
-        (_, Err(err)) => Err(eyre!(err)),
-        _ => Ok(()),
+    for package in packages {
+        if degraded {
+            ctx.failed(package)
+        } else {
+            ctx.installed(package)
+        }
     }
 }
 

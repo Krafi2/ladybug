@@ -23,31 +23,15 @@ impl Remove {
             let topics = HashSet::from_iter(topics.iter().map(String::as_str));
             filter_modules(topics, root, &mut modules);
         }
-        let queue = generate_queue(root, &modules)
-            .into_iter()
-            .map(|id| {
-                (
-                    id,
-                    // Create an empty state to go with each transaction
-                    modules[&id]
-                        .unit
-                        .as_ref()
-                        .unwrap()
-                        .transactions
-                        .iter()
-                        .map(|_| None)
-                        .collect(),
-                )
-            })
-            .collect::<Vec<_>>();
 
-        if queue.is_empty() {
+        // Report bad user query
+        if !modules.values().any(|m| m.status == Status::Ready) {
             if let Some(topics) = &self.topics {
                 super::no_units_match(topics)
             }
         }
 
-        let errn = super::remove_modules(queue, &mut modules, self.dry_run, ctx);
+        let (removed, errn) = super::remove_modules(root, &mut modules, self.dry_run, false, ctx);
 
         println!();
         // Print number of errors
@@ -80,7 +64,7 @@ fn filter_modules(topics: HashSet<&str>, root: UnitId, modules: &mut HashMap<Uni
                 let remove = *remove_parent
                     || match &module.unit.as_ref().unwrap().topic {
                         // Remove if topics match
-                        Some(topic) => topics.contains(topic.as_str()),
+                        Some(topic) => topics.contains(topic.name()),
                         // Keep otherwise
                         None => false,
                     };

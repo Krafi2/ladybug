@@ -13,6 +13,7 @@ use std::{
     time::Duration,
 };
 
+use ref_cast::RefCast;
 use sendfd::RecvWithFd;
 use serde::{Deserialize, Serialize};
 
@@ -330,8 +331,8 @@ impl Server {
         Self { inner: None }
     }
 
-    pub fn super_ctx(&mut self) -> SuperCtx<'_> {
-        SuperCtx { server: self }
+    pub fn super_ctx(&mut self) -> &mut SuperCtx {
+        SuperCtx::ref_cast_mut(self)
     }
 
     fn inner(&mut self) -> Result<&mut ServerInner> {
@@ -465,11 +466,13 @@ where
     Ok(t)
 }
 
-pub struct SuperCtx<'a> {
-    server: &'a mut Server,
+#[derive(RefCast)]
+#[repr(transparent)]
+pub struct SuperCtx {
+    server: Server,
 }
 
-impl<'a> SuperCtx<'a> {
+impl SuperCtx {
     /// Spawn a privileged process
     pub fn spawn(&mut self, cmd: &mut Command) -> Result<SuperProc> {
         let server = self.server.inner()?;

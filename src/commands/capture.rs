@@ -80,15 +80,15 @@ impl Capture {
                 module.status = Status::Skipped;
             } else {
                 match capture_unit(module, &pb, ctx) {
-                    (_, Ok(_)) => {
+                    Ok(_) => {
                         pb.finish_with_message("Done".bright_green().to_string());
                         module.status = Status::Ok
                     }
-                    (errors, Err(err)) => {
+                    Err(err) => {
                         pb.finish_with_message("Error".red().to_string());
                         module.status = Status::Err;
-                        super::print_error(err);
-                        errn += errors;
+                        super::print_error(&err);
+                        errn += 1;
                     }
                 }
             }
@@ -101,12 +101,7 @@ impl Capture {
 #[error("Capture hook failed")]
 struct CaptureError(#[source] common::command::Error);
 
-fn capture_unit(
-    module: &mut Module,
-    pb: &ProgressBar,
-    ctx: &Context,
-) -> (usize, color_eyre::Result<()>) {
-    let mut errn = 0;
+fn capture_unit(module: &mut Module, pb: &ProgressBar, ctx: &Context) -> color_eyre::Result<()> {
     let unit = module.unit.as_ref().expect("Unexpected error");
     let shell = &unit.shell.as_ref().unwrap_or(ctx.default_shell());
     let dir = module.path.bind(ctx.dotfile_dir().clone());
@@ -116,10 +111,9 @@ fn capture_unit(
         pb.set_message(format!("Running hook {i}"));
         if let Err(err) = hook.run(shell, &dir) {
             res = res.error(CaptureError(err));
-            errn += 1;
         }
     }
-    (errn, res)
+    res
 }
 
 fn filter_modules(topics: Option<HashSet<&str>>, modules: &mut HashMap<UnitId, Module>) {
@@ -128,7 +122,7 @@ fn filter_modules(topics: Option<HashSet<&str>>, modules: &mut HashMap<UnitId, M
         let capture = match (topics.as_ref(), &unit.topic) {
             (None, _) => true,
             // Capture if topics match
-            (Some(topics), Some(topic)) => topics.contains(topic.as_str()),
+            (Some(topics), Some(topic)) => topics.contains(topic.name()),
             // Ignore otherwise
             (Some(_), None) => false,
         };

@@ -3,22 +3,23 @@ use std::{path::Path, process::Stdio};
 use crate::shell::Shell;
 
 use common::rel_path::RelPath;
-use provider::Transaction;
+use data::{Package, Topic};
+use interpreter::UnitFigment;
 
 #[derive(Debug)]
 pub struct Unit {
     pub name: String,
     pub desc: String,
-    pub topic: Option<String>,
+    pub topic: Option<Topic>,
     pub shell: Option<Shell>,
-    pub transactions: Vec<Transaction>,
+    pub packages: Vec<Package>,
     pub deploy: Vec<Routine>,
     pub remove: Vec<Routine>,
     pub capture: Vec<Routine>,
 }
 
 impl Unit {
-    fn from_figment(figment: interpreter::UnitFigment) -> Option<Self> {
+    fn from_figment(figment: UnitFigment) -> Option<Self> {
         let [deploy, remove, capture] =
             [figment.deploy, figment.remove, figment.capture].map(|figments| {
                 figments
@@ -32,7 +33,7 @@ impl Unit {
             desc: figment.desc?,
             topic: figment.topic,
             shell: figment.shell.map(Into::into),
-            transactions: figment.transactions,
+            packages: figment.packages,
             deploy: deploy?,
             remove: remove?,
             capture: capture?,
@@ -83,10 +84,13 @@ impl Routine {
 }
 
 pub mod loader {
+    use std::rc::Rc;
+
     use super::Unit;
     use crate::context::Context;
     use eval::Env;
     use interpreter::{self, UnitFigment, UnitPath};
+    use provider::RuntimeCtx;
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
     pub struct UnitId(u32);
@@ -161,7 +165,7 @@ pub mod loader {
             id: UnitId,
             path: UnitPath,
             env: Env,
-            set_msg: &dyn Fn(String),
+            set_msg: Rc<dyn Fn(String) + '_>,
             ctx: &mut Context,
         ) -> Module {
             let src =
@@ -170,24 +174,27 @@ pub mod loader {
 
             let (status, env, queue) = match src {
                 Ok(src) => {
-                    let home_dir = ctx.home_dir().map(ToOwned::to_owned);
-                    let dotfile_dir = ctx.dotfile_dir().clone();
-                    let data = ctx.interpreter().eval(
-                        &src,
-                        path.clone(),
-                        env,
-                        home_dir,
-                        dotfile_dir,
+                    // TODO: rework all these runtimes into something workable
+                    let runtime = RuntimeCtx::new(
                         set_msg,
+                        path.bind(ctx.dotfile_dir().clone()),
+                        None,
+                        ctx.home_dir().map(ToOwned::to_owned),
+                        ctx.dotfile_dir().clone(),
+                        false,
                     );
-                    let status =
-                        if data.errors.is_empty() {
-                            Status::Ok(Unit::from_figment(data.figment).expect(
-                                "There were no errors, unit generation shouldn't have failed",
-                            ))
-                        } else {
-                            Status::Degraded(data.figment, data.errors, src)
-                        };
+                    let (database, interpreter) = ctx.database_interpreter();
+                    let data = interpreter.eval(&src, path.clone(), env, database, &runtime);
+                    let status = if data.errors.is_empty() {
+                        match Unit::from_figment(data.figment) {
+                            Some(unit) => Status::Ok(unit),
+                            None => panic!(
+                                "There were no errors, unit generation shouldn't have failed"
+                            ),
+                        }
+                    } else {
+                        Status::Degraded(data.figment, data.errors, src)
+                    };
 
                     let queue = data
                         .members
@@ -211,7 +218,11 @@ pub mod loader {
             }
         }
 
-        pub fn load(&mut self, set_msg: &dyn Fn(String), ctx: &mut Context) -> Option<Module> {
+        pub fn load(
+            &mut self,
+            set_msg: Rc<dyn Fn(String) + '_>,
+            ctx: &mut Context,
+        ) -> Option<Module> {
             loop {
                 match self.stack.last_mut() {
                     Some(frame) => match frame.queue.pop() {
@@ -229,7 +240,8 @@ pub mod loader {
                         // This is the first iteration so we load the root node
                         Some(env) => {
                             let id = self.next_id();
-                            let module = self.load_module(id, UnitPath::root(), env, set_msg, ctx);
+                            let path = UnitPath::root();
+                            let module = self.load_module(id, path, env, set_msg, ctx);
                             break Some(module);
                         }
                         // This is the last iteration

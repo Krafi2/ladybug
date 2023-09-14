@@ -1,9 +1,11 @@
 use color_eyre::owo_colors::OwoColorize;
+use data::{Topic, TopicId};
 use indicatif::{ProgressBar, ProgressDrawTarget};
-use provider::ExecCtx;
+use provider::{OpError, OpResult, RuntimeCtx};
 use std::{
     collections::{HashMap, HashSet},
     iter::FromIterator,
+    rc::Rc,
 };
 use tracing::debug;
 
@@ -19,6 +21,9 @@ pub struct Deploy {
     /// Run the command without making any changes to the system
     #[clap(long)]
     dry_run: bool,
+    /// Don't clean up unused packages
+    #[clap(long)]
+    no_clean: bool,
     /// Abort immediately upon encountering an error
     #[clap(long)]
     abort_early: bool,
@@ -31,43 +36,54 @@ impl Deploy {
         self,
         mut modules: HashMap<UnitId, Module>,
         root: UnitId,
-        context: &mut Context,
+        ctx: &mut Context,
     ) -> super::CmdResult {
         let mut errn = 0;
 
         println!("Deploying units:");
-        if let Some(topics) = self.topics.as_ref() {
-            let topics = HashSet::from_iter(topics.iter().map(String::as_str));
+        let topics = self.topics.as_mut().map(|topics| {
+            HashSet::from_iter(
+                topics
+                    .drain(..)
+                    .map(|topic| ctx.database().new_topic(topic)),
+            )
+        });
+
+        // Filter modules based on user query
+        if let Some(topics) = &topics {
             filter_modules(topics, root, &mut modules);
         }
-        let queue = generate_queue(root, &modules);
 
-        if queue.is_empty() {
+        // Report bad user query
+        if !modules.values().any(|m| m.status == Status::Ready) {
             if let Some(topics) = &self.topics {
-                super::no_units_match(topics)
+                super::no_units_match(topics);
             }
         }
 
-        let deployed = self.deploy_modules(queue, &mut modules, context);
+        // Deploy requested modules
+        let (deployed, errs) = self.deploy_modules(root, &mut modules, ctx);
+        errn += errs;
 
-        errn += deployed
-            .iter()
-            .map(|(_, _, is_err)| *is_err as usize)
-            .sum::<usize>();
+        if errn == 0 {
+            println!("\n\nCleaning up old packages:");
+
+            let cached = self.topics.as_ref().map(|topics| {
+                topics
+                    .iter()
+                    .flat_map(|topic| ctx.database().get_topic(topic.id()))
+            });
+        }
 
         // Revert changes if the deployment failed
         if errn > 0 {
-            let to_remove = deployed
-                .into_iter()
-                .filter_map(|(id, states, is_err)| {
-                    (is_err || self.revert_all)
-                        .then(|| (id, states.into_iter().map(Some).collect()))
-                })
-                .collect();
             println!("\n\nEncountered an error, reverting changes:");
-            errn += super::remove_modules(to_remove, &mut modules, self.dry_run, context);
+            let (removed, errs) =
+                super::remove_modules(root, &mut modules, self.dry_run, self.revert_all, ctx);
+            errn += errs;
         }
 
+        // Report errn
         println!();
         if errn != 0 {
             if errn == 1 {
@@ -87,52 +103,123 @@ impl Deploy {
         }
     }
 
+    /// Deploy these `UnitId`s, return deployed ids and the number of errors
     fn deploy_modules(
         &self,
-        queue: Vec<UnitId>,
+        root: UnitId,
         modules: &mut HashMap<UnitId, Module>,
         context: &mut Context,
-    ) -> Vec<(UnitId, Vec<provider::State>, bool)> {
+    ) -> (Vec<(UnitId, OpResult)>, usize) {
+        let queue_len = modules
+            .values()
+            .filter(|m| m.status == Status::Ready)
+            .count();
+
         let mut deployed = Vec::new();
-        let queue_len = queue.len();
-        for (i, id) in queue.into_iter().enumerate() {
-            let module = modules.get_mut(&id).unwrap();
+        let mut errn = 0;
+        // (children, current, skip)
+        let mut stack = vec![(vec![root], 0, false)];
 
-            let style = pb_style(&module.path);
-            let pb = ProgressBar::with_draw_target(None, ProgressDrawTarget::stdout());
-            pb.set_style(style);
-            pb.set_prefix(format!("[{}/{}]", i + 1, queue_len));
-            pb.set_message("Starting deployment");
+        while let Some((members, current, skip)) = stack.last_mut() {
+            match members.get(*current) {
+                Some(id) => {
+                    let mut skip = *skip;
+                    let module = modules.get_mut(id).unwrap();
 
-            if self.dry_run {
-                pb.finish_with_message("Skipped".bright_black().to_string());
-                module.status = Status::Skipped;
-            } else {
-                let (res, states) = deploy_unit(module, &pb, context);
-                let is_err = res.is_err();
+                    // Apply recursive skip flag
+                    if skip {
+                        module.status = Status::Skipped;
+                    }
 
-                deployed.push((id, states, is_err));
-                if let Err(err) = res {
-                    pb.finish_with_message("Error".red().to_string());
-                    module.status = Status::Err;
-                    print_error(err);
-                } else {
-                    pb.finish_with_message("Done".bright_green().to_string());
-                    module.status = Status::Ok;
+                    if module.status == Status::Ready {
+                        let style = pb_style(&module.path);
+                        let pb = ProgressBar::with_draw_target(None, ProgressDrawTarget::stdout());
+                        pb.set_style(style);
+                        pb.set_prefix(format!("[{}/{}]", deployed.len() + 1, queue_len));
+                        pb.set_message("Starting deployment");
+
+                        if self.dry_run {
+                            pb.finish_with_message("Skipped".bright_black().to_string());
+                            module.status = Status::Skipped;
+                        } else {
+                            // Deploy unit
+                            let mut res = self.deploy_unit(module, &pb, context);
+
+                            let is_ok = res.is_ok();
+
+                            if is_ok {
+                                pb.finish_with_message("Done".bright_green().to_string());
+                                module.status = Status::Ok;
+                                deployed.push((*id, res));
+                            } else {
+                                errn += 1;
+                                pb.finish_with_message("Error".red().to_string());
+                                module.status = Status::Err;
+
+                                for err in res.drain_errors() {
+                                    print_error(&color_eyre::eyre::eyre!(err));
+                                }
+                                deployed.push((*id, res));
+
+                                if self.abort_early {
+                                    break;
+                                } else {
+                                    // Skip this module's children
+                                    skip = true;
+                                }
+                            }
+                        }
+                    }
+
+                    *current += 1;
+                    stack.push((module.members.clone(), 0, skip))
                 }
+                None => {
+                    stack.pop();
+                }
+            }
+        }
 
-                if is_err && self.abort_early {
+        (deployed, errn)
+    }
+
+    fn deploy_unit(&self, module: &mut Module, pb: &ProgressBar, ctx: &mut Context) -> OpResult {
+        debug!("Deploying module {}", &module.path);
+        let unit = module.unit.as_mut().expect("Unexpected error");
+        let set_msg = Rc::new(|msg| pb.set_message(msg));
+        let runtime = RuntimeCtx::new(
+            set_msg,
+            module.path.bind(ctx.dotfile_dir().clone()),
+            unit.topic.as_ref().map(Topic::id),
+            ctx.home_dir().map(ToOwned::to_owned),
+            ctx.dotfile_dir().clone(),
+            self.abort_early,
+        );
+
+        // Install packages
+        let packages = std::mem::replace(&mut unit.packages, Vec::new());
+        let mut res = ctx.interpreter().install(packages, &runtime);
+
+        // Run deploy hooks
+        if res.is_ok() {
+            let shell = &unit.shell.as_ref().unwrap_or(ctx.default_shell());
+            let dir = module.path.bind(ctx.dotfile_dir().clone());
+
+            for hook in &unit.deploy {
+                if let Err(err) = hook.run(shell, &dir) {
+                    let err = err.into_report().wrap_err("Deploy hook failed");
+                    res.push_err(OpError::Other(err));
                     break;
                 }
             }
         }
-        deployed
+        res
     }
 }
 
 /// Filter modules based on a set of topics. Member units depend on their
 /// parents, so we need to propagate deployment up the tree.
-fn filter_modules(topics: HashSet<&str>, root: UnitId, modules: &mut HashMap<UnitId, Module>) {
+fn filter_modules(topics: HashSet<TopicId>, root: UnitId, modules: &mut HashMap<UnitId, Module>) {
     struct Frame {
         members: Vec<UnitId>,
         current: usize,
@@ -156,7 +243,7 @@ fn filter_modules(topics: HashSet<&str>, root: UnitId, modules: &mut HashMap<Uni
                 let module = modules.get_mut(id).unwrap();
                 let enabled = match &module.unit.as_ref().unwrap().topic {
                     // Enable if topics match
-                    Some(topic) => topics.contains(topic.as_str()),
+                    Some(topic) => topics.contains(topic.name()),
                     // Disable if the user requested topics but this unit has none
                     None => false,
                 };
@@ -203,41 +290,4 @@ fn generate_queue(root: UnitId, modules: &HashMap<UnitId, Module>) -> Vec<UnitId
         }
     }
     queue
-}
-
-fn deploy_unit(
-    module: &mut Module,
-    pb: &ProgressBar,
-    ctx: &mut Context,
-) -> (Result<(), color_eyre::Report>, Vec<provider::State>) {
-    debug!("Deploying module {}", &module.path);
-    let unit = module.unit.as_ref().expect("Unexpected error");
-    let mut states = Vec::new();
-    let set_msg = |msg| pb.set_message(msg);
-    let exec = ExecCtx::new(&set_msg, module.path.bind(ctx.dotfile_dir().clone()));
-
-    let res = unit
-        .transactions
-        .iter()
-        .try_for_each(|transaction| {
-            let (res, state) = ctx.interpreter().install(transaction, &exec);
-            states.push(state);
-            res
-        })
-        .and_then(|_| {
-            let shell = &unit.shell.as_ref().unwrap_or(ctx.default_shell());
-            let dir = module.path.bind(ctx.dotfile_dir().clone());
-            unit.deploy.iter().try_for_each(|hook| {
-                hook.run(shell, &dir)
-                    .map_err(|err| err.into_report().wrap_err("Deploy hook failed"))
-            })
-        });
-
-    module.status = if res.is_err() {
-        Status::Err
-    } else {
-        Status::Ok
-    };
-
-    (res, states)
 }

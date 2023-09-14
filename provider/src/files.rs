@@ -1,20 +1,212 @@
 use std::{
-    fs::{Metadata, OpenOptions},
+    fs::OpenOptions,
     path::{Path, PathBuf},
 };
 
 use ariadne::{Color, Fmt, ReportKind};
 use color_eyre::eyre::{eyre, WrapErr};
 use common::rel_path::RelPath;
-use eval::{params, report, FromArgs};
+use data::Package;
+use eval::{params, report, Args, FromArgs};
 use parser::{Span, Spanned};
+use serde::{Deserialize, Serialize};
 
-use crate::{privileged::SuperCtx, EvalCtx, ExecCtx};
+use crate::{OpCtx, OpError, ParseCtx, Provider, ProviderError, ProviderId, RawPackages};
 
-use super::OpResult;
+pub(crate) fn new_provider() -> Result<impl Provider, ProviderError> {
+    Ok(FsProvider::new())
+}
+
+struct FsProvider;
+
+impl FsProvider {
+    fn new() -> Self {
+        FsProvider
+    }
+}
+
+impl Provider for FsProvider {
+    fn parse_packages(
+        &mut self,
+        args: Args,
+        packages: RawPackages,
+        ctx: &mut ParseCtx,
+    ) -> Result<Vec<data::Package>, ()> {
+        // Parse the package block params
+        let params = Params::from_args(args, ctx.eval()).expect("Parser should be infallible");
+
+        let mut degraded = params.is_degraded();
+        let Params {
+            method,
+            conflicts,
+            source,
+            target,
+        } = params.value;
+
+        let method = method
+            .and_then(|method| match method.as_str() {
+                "link" => Some(Method::SoftLink),
+                "hardlink" => Some(Method::HardLink),
+                "copy" => Some(Method::Copy),
+                _ => {
+                    ctx.emit(Error::InvalidMethod(method.inner, method.span));
+                    degraded = true;
+                    None
+                }
+            })
+            .unwrap_or(Method::SoftLink);
+
+        let conflicts = conflicts
+            .and_then(|conflicts| match conflicts.as_str() {
+                "abort" => Some(Conflict::Abort),
+                "rename" => Some(Conflict::Rename),
+                "remove" => Some(Conflict::Remove),
+                _ => {
+                    ctx.emit(Error::InvalidConflictStrat(conflicts.inner, conflicts.span));
+                    degraded = true;
+                    None
+                }
+            })
+            .unwrap_or(Conflict::Rename);
+
+        let dir = ctx.runtime().dir();
+        let source = match source {
+            // Attempt to create the specified source
+            Some(source) => Source::from_path(dir, source)
+                .map_err(|err| ctx.emit(err))
+                .ok(),
+            // Default to the unit directory if no source was provided
+            None => Some(Source(dir.clone())),
+        };
+
+        let mut finished = Vec::new();
+        for package in packages.packages {
+            match new_package(package, &source, &target, method, conflicts, ctx) {
+                Ok(package) => finished.push(package),
+                Err(Some(err)) => ctx.emit(err),
+                Err(None) => degraded = true,
+            }
+        }
+
+        if degraded {
+            Err(())
+        } else {
+            Ok(finished)
+        }
+    }
+
+    fn install(&mut self, packages: Vec<data::Package>, ctx: &mut OpCtx) {
+        for package in packages {
+            // Poor man's `try` block, I'm really sorry
+            let res = (|| {
+                let Metadata {
+                    source,
+                    target,
+                    method,
+                    conflicts,
+                } = bincode::deserialize(package.metadata())?;
+                let source = RelPath::new(source, ctx.runtime().home_dir())?;
+                let target = RelPath::new(target, ctx.runtime().home_dir())?;
+
+                match deploy_file(&source, &target, method, conflicts) {
+                    Ok(_) => {
+                        let msg = format!("Deployed {source} to {target}");
+                        tracing::debug!("{}", msg);
+                        ctx.runtime().set_message(msg);
+                        Ok(())
+                    }
+                    Err(err) => {
+                        tracing::error!("Failed to deploy {source} to {target}: {err}");
+                        Err(err)
+                    }
+                }
+            })();
+
+            match res {
+                Ok(_) => ctx.installed(package),
+                Err(err) => {
+                    ctx.emit(err);
+                    ctx.failed(package)
+                }
+            }
+        }
+    }
+
+    fn remove(&mut self, packages: Vec<data::Package>, ctx: &mut OpCtx) {
+        for package in packages {
+            let res = (|| {
+                let Metadata {
+                    source,
+                    target,
+                    method,
+                    conflicts: _,
+                } = bincode::deserialize(package.metadata())?;
+                let source = RelPath::new(source, ctx.runtime().home_dir())?;
+                let target = RelPath::new(target, ctx.runtime().home_dir())?;
+
+                match remove_file(&source, &target, method) {
+                    Ok(_) => {
+                        let msg = format!("Removed {target}");
+                        tracing::debug!("{}", msg);
+                        ctx.runtime().set_message(msg);
+                        Ok(())
+                    }
+                    Err(err) => {
+                        tracing::error!("Failed to remove {target}: {err}");
+                        Err(OpError::Other(err))
+                    }
+                }
+            })();
+
+            match res {
+                Ok(_) => ctx.installed(package),
+                Err(err) => {
+                    ctx.emit(err);
+                    ctx.failed(package)
+                }
+            }
+        }
+    }
+}
+
+fn new_package(
+    package: crate::RawPackage,
+    source: &Option<Source>,
+    target: &Option<RelPath>,
+    method: Method,
+    conflicts: Conflict,
+    ctx: &mut ParseCtx,
+) -> Result<Package, Option<crate::ParseError>> {
+    let path = source.as_ref().and_then(|source| {
+        source
+            .check_exists(package.name.as_ref().map(PathBuf::from))
+            .map(|path| path.inner)
+            .map_err(|err| ctx.emit(err))
+            .ok()
+    });
+    let args = ItemParams::from_args(package.args, ctx.eval());
+    match (path, args, target) {
+        (Some(path), Some(args), Some(target)) if !args.is_degraded() => {
+            let metadata = bincode::serialize(&Metadata {
+                source: path.clone(),
+                target: target.absolute().join(&package.name.inner),
+                method,
+                conflicts,
+            })
+            .map_err(|err| crate::ParseError::Bincode(err, package.span))?;
+            Ok(Package::new(
+                path.display().to_string(),
+                metadata,
+                ctx.runtime().topic(),
+                ProviderId::Files,
+            ))
+        }
+        _ => Err(None),
+    }
+}
 
 #[derive(Debug)]
-pub enum Error {
+enum Error {
     InvalidMethod(String, Span),
     InvalidConflictStrat(String, Span),
     NonRelativePath(PathBuf, Span),
@@ -58,14 +250,14 @@ report! {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Serialize, Deserialize)]
 enum Method {
     SoftLink,
     HardLink,
     Copy,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Serialize, Deserialize)]
 enum Conflict {
     Abort,
     Rename,
@@ -90,7 +282,7 @@ impl Source {
             .and_then(Self::new)
     }
 
-    fn file_exists(&self, path: Spanned<PathBuf>) -> Result<Spanned<PathBuf>, Error> {
+    fn check_exists(&self, path: Spanned<PathBuf>) -> Result<Spanned<PathBuf>, Error> {
         join_path(&self.0, path.clone())
             .and_then(check_exists)
             .map(|_| path)
@@ -113,16 +305,12 @@ fn check_exists(path: Spanned<RelPath>) -> Result<Spanned<RelPath>, Error> {
     }
 }
 
-pub(super) struct Payload {
+#[derive(Serialize, Deserialize)]
+struct Metadata {
+    source: PathBuf,
+    target: PathBuf,
     method: Method,
     conflicts: Conflict,
-    source: Source,
-    target: RelPath,
-    files: Vec<PathBuf>,
-}
-
-pub(super) struct PayloadRes {
-    deployed: usize,
 }
 
 params! {
@@ -135,189 +323,6 @@ params! {
 }
 
 params! { struct ItemParams {} }
-
-pub struct Provider;
-
-impl super::ConstructProvider for Provider {
-    fn new() -> Result<Self, super::ProviderError> {
-        Ok(Provider)
-    }
-}
-
-impl super::Provider for Provider {
-    type Transaction = Payload;
-    type State = PayloadRes;
-
-    fn new_transaction(
-        &mut self,
-        args: crate::Args,
-        packages: crate::Packages,
-        ctx: &mut EvalCtx,
-        exec: &ExecCtx,
-    ) -> Result<Self::Transaction, ()> {
-        // Parse the package block params
-        let params = Params::from_args(args, ctx).expect("Parser should be infallible");
-
-        let mut degraded = params.is_degraded();
-        let Params {
-            method,
-            conflicts,
-            source,
-            target,
-        } = params.value;
-
-        let method = method
-            .and_then(|method| match method.as_str() {
-                "link" => Some(Method::SoftLink),
-                "hardlink" => Some(Method::HardLink),
-                "copy" => Some(Method::Copy),
-                _ => {
-                    ctx.emit(Error::InvalidMethod(method.inner, method.span));
-                    degraded = true;
-                    None
-                }
-            })
-            .unwrap_or(Method::SoftLink);
-
-        let conflicts = conflicts
-            .and_then(|conflicts| match conflicts.as_str() {
-                "abort" => Some(Conflict::Abort),
-                "rename" => Some(Conflict::Rename),
-                "remove" => Some(Conflict::Remove),
-                _ => {
-                    ctx.emit(Error::InvalidConflictStrat(conflicts.inner, conflicts.span));
-                    degraded = true;
-                    None
-                }
-            })
-            .unwrap_or(Conflict::Rename);
-
-        let dir = exec.dir();
-        let source = match source {
-            // Attempt to create the specified source
-            Some(source) => Source::from_path(dir, source)
-                .map_err(|err| ctx.emit(err))
-                .ok(),
-            // Default to the unit directory if no source was provided
-            None => Some(Source(dir.clone())),
-        };
-
-        let mut files = Vec::new();
-        for package in packages.packages {
-            // Check if the referenced file exists
-            let path = source.as_ref().and_then(|source| {
-                source
-                    .file_exists(package.name.map(PathBuf::from))
-                    .map(|path| path.inner)
-                    .map_err(|err| ctx.emit(err))
-                    .ok()
-            });
-
-            let args = ItemParams::from_args(package.args, ctx);
-
-            // See if anything went wrong
-            match (path, args) {
-                (Some(path), Some(args)) if !args.is_degraded() => files.push(path),
-                _ => degraded = true,
-            }
-        }
-
-        if degraded {
-            Err(())
-        } else {
-            Ok(Payload {
-                method,
-                conflicts,
-                source: source.unwrap(),
-                target: target.unwrap(),
-                files,
-            })
-        }
-    }
-
-    fn install(
-        &mut self,
-        transaction: &Self::Transaction,
-        _ctx: &mut SuperCtx,
-        exec: &ExecCtx,
-    ) -> (OpResult, Self::State) {
-        let Payload {
-            method,
-            conflicts,
-            source,
-            target,
-            files,
-        } = transaction;
-
-        let source = &source.0;
-        tracing::debug_span!("deploy", "Deploying files from {source} to {target}");
-
-        for (i, file) in files.iter().enumerate() {
-            let source = source.join(file);
-            let dest = target.join(file);
-            match deploy_file(&source, &dest, *method, *conflicts) {
-                Ok(_) => {
-                    let msg = format!("Deployed {source} to {dest}");
-                    tracing::debug!("{}", msg);
-                    exec.set_message(msg);
-                }
-                Err(err) => {
-                    tracing::error!("Failed to deploy {source} to {dest}: {err}");
-                    return (Err(err), PayloadRes { deployed: i });
-                }
-            }
-        }
-
-        (
-            Ok(()),
-            PayloadRes {
-                deployed: files.len(),
-            },
-        )
-    }
-
-    fn remove(
-        &mut self,
-        transaction: &Self::Transaction,
-        res: Option<Self::State>,
-        _ctx: &mut SuperCtx,
-        exec: &ExecCtx,
-    ) -> OpResult {
-        let Payload {
-            method,
-            conflicts: _,
-            source,
-            target,
-            files,
-        } = transaction;
-
-        let source = &source.0;
-        tracing::debug_span!("deploy", "Deploying files from {source} to {target}");
-
-        let deployed = if let Some(res) = res {
-            res.deployed
-        } else {
-            files.len()
-        };
-
-        for file in &files[..deployed] {
-            let source = source.join(file);
-            let dest = target.join(file);
-            match remove_file(&source, &dest, *method) {
-                Ok(_) => {
-                    let msg = format!("Removed {dest}");
-                    tracing::debug!("{}", msg);
-                    exec.set_message(msg);
-                }
-                // Log errors but don't report to user
-                Err(err) => {
-                    tracing::error!("Failed to remove {dest}: {err}");
-                }
-            }
-        }
-        Ok(())
-    }
-}
 
 fn backup_path(path: &Path) -> PathBuf {
     let mut name = path.file_name().expect("Expected a file").to_owned();
@@ -367,16 +372,14 @@ fn deploy_file(
             // Create a symlink only if it isn't already present
             if !file_eq(source, dest).unwrap_or(false) {
                 // Try to free the file if it exists
-                let meta = if dest.exists() {
-                    let meta = dest.metadata()?;
+                if dest.exists() {
                     free_file(dest, conflict)
                         .wrap_err_with(|| format!("Failed to free file: '{}'", dest.display()))?;
-                    meta
                 // The parent directories may not exist
                 } else {
                     let dir = dest.parent().expect("Path too short");
-                    create_dirs(dir).wrap_err("Failed to create parent directories")?
-                };
+                    std::fs::create_dir_all(dir).wrap_err("Failed to create parent directories")?;
+                }
 
                 match method {
                     Method::SoftLink => imp::symlink_file(source, dest).wrap_err_with(|| {
@@ -395,8 +398,6 @@ fn deploy_file(
                     }),
                     Method::Copy => unreachable!(),
                 }?;
-                imp::copy_permissions(dest, &meta)
-                    .wrap_err_with(|| format!("Failed to set permissions at {dest}"))?;
             }
             Ok(())
         }
@@ -428,7 +429,7 @@ fn deploy_file(
                     .wrap_err_with(|| format!("Failed to free file: '{}'", dest.display()))?;
             }
 
-            let meta = create_dirs(dest.parent().unwrap())
+            std::fs::create_dir_all(dest.parent().unwrap())
                 .wrap_err("Failed to create parent directories")?;
             std::fs::copy(source, dest).wrap_err_with(|| {
                 format!(
@@ -437,25 +438,8 @@ fn deploy_file(
                     dest.display()
                 )
             })?;
-            imp::copy_permissions(dest, &meta)
-                .wrap_err_with(|| format!("Failed to set permissions at {dest}"))?;
             Ok(())
         }
-    }
-}
-
-// Create dir's parents and set permissions to those of the last existing ancestor
-fn create_dirs(dir: &Path) -> std::io::Result<Metadata> {
-    match dir.metadata() {
-        Ok(meta) => Ok(meta),
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-            // At least one of the ancestors should exist
-            let meta = create_dirs(dir.parent().expect("Expected parent"))?;
-            std::fs::create_dir(dir)?;
-            imp::copy_permissions(dir, &meta)?;
-            Ok(meta)
-        }
-        Err(err) => Err(err),
     }
 }
 
@@ -483,8 +467,14 @@ fn remove_file(src: &RelPath, target: &RelPath, method: Method) -> color_eyre::R
             std::fs::rename(&backup, target)
                 .wrap_err_with(|| format!("Failed to restore file: '{}'", backup.display()))
         } else {
-            std::fs::remove_file(target)
-                .wrap_err_with(|| format!("Failed to remove file: '{}'", target))
+            match std::fs::remove_file(target) {
+                Ok(_) => Ok(()),
+                // Succeed if the file has already been deleted
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                Err(err) => {
+                    Err(err).wrap_err_with(|| format!("Failed to remove file: '{}'", target))
+                }
+            }
         }
     } else {
         Ok(())
@@ -529,24 +519,11 @@ where
 #[cfg(any(target_os = "redox", unix))]
 mod imp {
     pub use std::os::unix::fs::symlink as symlink_file;
-    use std::{fs::Metadata, os::unix::prelude::MetadataExt, path::Path};
-
-    pub fn copy_permissions(path: &Path, metadata: &Metadata) -> std::io::Result<()> {
-        let owner = nix::unistd::Uid::from_raw(metadata.uid());
-        let group = nix::unistd::Gid::from_raw(metadata.gid());
-        nix::unistd::chown(path, Some(owner), Some(group))
-            .map_err(|err| std::io::Error::from_raw_os_error(err as i32))
-    }
 }
 
 #[cfg(windows)]
 mod imp {
     pub use std::os::windows::fs::symlink_file;
-    use std::{fs::Metadata, path::Path};
-
-    pub fn copy_permissions(path: &Path, metadata: &Metadata) -> std::io::Result<()> {
-        unimplemented!()
-    }
 }
 
 #[cfg(test)]
