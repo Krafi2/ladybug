@@ -41,12 +41,16 @@ impl Deploy {
         let mut errn = 0;
 
         println!("Deploying units:");
-        let topics = self.topics.as_mut().map(|topics| {
-            HashSet::from_iter(
-                topics
-                    .drain(..)
-                    .map(|topic| ctx.database().new_topic(topic)),
-            )
+        let topics = self.topics.as_ref().map(|topics| {
+            HashSet::from_iter(topics.iter().filter_map(|topic| {
+                ctx.database()
+                    .new_topic(topic.clone())
+                    .map_err(|err| {
+                        tracing::error!("Failed to register topic '{topic}': {err:#}");
+                        errn += 1;
+                    })
+                    .ok()
+            }))
         });
 
         // Filter modules based on user query
@@ -62,17 +66,38 @@ impl Deploy {
         }
 
         // Deploy requested modules
-        let (deployed, errs) = self.deploy_modules(root, &mut modules, ctx);
+        let (mut deployed, errs) = self.deploy_modules(root, &mut modules, ctx);
         errn += errs;
 
+        // Clean old deployment
         if errn == 0 {
             println!("\n\nCleaning up old packages:");
 
-            let cached = self.topics.as_ref().map(|topics| {
-                topics
-                    .iter()
-                    .flat_map(|topic| ctx.database().get_topic(topic.id()))
-            });
+            let mut cached = topics
+                .as_ref()
+                .map(|topics| {
+                    topics
+                        .iter()
+                        .filter_map(|topic| {
+                            ctx.database()
+                                .get_topic(topic.id())
+                                .map_err(|err| tracing::error!("Failed to get packages belonging to topic '{topic}': {err:#}"))
+                                .ok()
+                        })
+                        .flatten()
+                        .collect()
+                })
+                .unwrap_or_else(||
+                    ctx.database()
+                        .get_all()
+                        .map_err(|err| tracing::error!("Failed to get packages: {err:#}"))
+                        .unwrap_or_default()
+                );
+
+            let deployed = deployed.iter().map(|(id, res)| res.completed)
+            
+            cached.sort_unstable_by_key(|pacakage| (pacakage.provider(), pacakage.name()));
+            deployed.sort_unstable_by_key(|(id, _)| id)
         }
 
         // Revert changes if the deployment failed
@@ -219,7 +244,7 @@ impl Deploy {
 
 /// Filter modules based on a set of topics. Member units depend on their
 /// parents, so we need to propagate deployment up the tree.
-fn filter_modules(topics: HashSet<TopicId>, root: UnitId, modules: &mut HashMap<UnitId, Module>) {
+fn filter_modules(topics: &HashSet<Topic>, root: UnitId, modules: &mut HashMap<UnitId, Module>) {
     struct Frame {
         members: Vec<UnitId>,
         current: usize,
@@ -243,7 +268,7 @@ fn filter_modules(topics: HashSet<TopicId>, root: UnitId, modules: &mut HashMap<
                 let module = modules.get_mut(id).unwrap();
                 let enabled = match &module.unit.as_ref().unwrap().topic {
                     // Enable if topics match
-                    Some(topic) => topics.contains(topic.name()),
+                    Some(topic) => topics.contains(&topic),
                     // Disable if the user requested topics but this unit has none
                     None => false,
                 };

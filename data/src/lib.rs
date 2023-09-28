@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::{fmt::Display, hash::Hash, path::Path};
 
 use rusqlite::{params, Result};
 
@@ -13,16 +13,19 @@ pub struct Connection {
 }
 
 impl Connection {
-    pub fn open(database: &Path) -> Result<Self, Error> {
-        let conn = rusqlite::Connection::open(database)?;
+    /// Open a new connection to the database at `path`
+    pub fn open(path: &Path) -> Result<Self, Error> {
+        let conn = rusqlite::Connection::open(path)?;
         init_database(conn)
     }
 
+    /// Open a new database connection in memory
     pub fn open_in_memory() -> Result<Self, Error> {
         let conn = rusqlite::Connection::open_in_memory()?;
         init_database(conn)
     }
 
+    /// Register a new topic
     pub fn new_topic(&mut self, topic: String) -> Result<Topic, Error> {
         let mut stmt = self.conn.prepare_cached(
             "
@@ -35,6 +38,7 @@ impl Connection {
             .map_err(Into::into)
     }
 
+    /// Mark a package as removed
     pub fn installed(&mut self, package: &Package) -> Result<(), Error> {
         self.conn.execute(
             "INSERT INTO packages (name, metadata, provider_id, topic_id) VALUES (?1, ?2, ?3, ?4)",
@@ -48,6 +52,7 @@ impl Connection {
         Ok(())
     }
 
+    /// Remove a package
     pub fn removed(&mut self, package: &Package) -> Result<(), Error> {
         // Package names should be unique per provider
         let rows = self.conn.execute(
@@ -58,10 +63,27 @@ impl Connection {
         Ok(())
     }
 
+    /// Get packages in this topic
     pub fn get_topic(&mut self, topic: TopicId) -> Result<Vec<Package>, Error> {
         self.conn
             .prepare_cached("SELECT * FROM packages WHERE topic_id = ?1")?
             .query_map([topic.0], |row| {
+                Ok(Package {
+                    name: row.get(0)?,
+                    metadata: row.get(1)?,
+                    topic: row.get::<_, Option<_>>(3)?.map(TopicId),
+                    provider: ProviderId(row.get(3)?),
+                })
+            })
+            .and_then(|rows| Result::from_iter(rows))
+            .map_err(Into::into)
+    }
+
+    /// Get all packages
+    pub fn get_all(&mut self) -> Result<Vec<Package>, Error> {
+        self.conn
+            .prepare_cached("SELECT * FROM packages")?
+            .query_map([], |row| {
                 Ok(Package {
                     name: row.get(0)?,
                     metadata: row.get(1)?,
@@ -115,6 +137,27 @@ impl Topic {
     }
 }
 
+impl Display for Topic {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.name.fmt(f)
+    }
+}
+
+// Delegate hash to the unique id
+impl Hash for Topic {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.id.hash(state)
+    }
+}
+
+impl PartialEq for Topic {
+    fn eq(&self, other: &Self) -> bool {
+        self.id.eq(&other.id)
+    }
+}
+
+impl Eq for Topic {}
+
 #[derive(Debug)]
 pub struct Package {
     name: String,
@@ -157,7 +200,7 @@ pub struct PackageId(u32);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct TopicId(u32);
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ProviderId(u32);
 
 impl ProviderId {
