@@ -27,19 +27,18 @@ impl Connection {
 
     /// Register a new topic
     pub fn new_topic(&mut self, topic: String) -> Result<Topic, Error> {
-        let mut stmt = self.conn.prepare_cached(
-            "
-            INSERT OR IGNORE INTO topics (name) VALUES (?1);
-            SELECT topic_id FROM topics WHERE name = ?1;
-            ",
-        )?;
-        stmt.query_row([&topic], |row| Ok(TopicId(row.get(0)?)))
+        self.conn
+            .prepare_cached("INSERT OR IGNORE INTO topics (name) VALUES (?1)")?
+            .execute([&topic])?;
+        self.conn
+            .prepare_cached("SELECT topic_id FROM topics WHERE name = ?1")?
+            .query_row([&topic], |row| Ok(TopicId(row.get(0)?)))
             .map(|id| Topic { name: topic, id })
             .map_err(Into::into)
     }
 
     /// Mark a package as removed
-    pub fn installed(&mut self, package: &Package) -> Result<(), Error> {
+    pub fn installed(&mut self, package: &Package) -> Result<PackageId, Error> {
         self.conn.execute(
             "INSERT INTO packages (name, metadata, provider_id, topic_id) VALUES (?1, ?2, ?3, ?4)",
             params![
@@ -49,7 +48,7 @@ impl Connection {
                 package.topic.map(|t| t.0)
             ],
         )?;
-        Ok(())
+        Ok(PackageId(self.conn.last_insert_rowid()))
     }
 
     /// Remove a package
@@ -64,32 +63,38 @@ impl Connection {
     }
 
     /// Get packages in this topic
-    pub fn get_topic(&mut self, topic: TopicId) -> Result<Vec<Package>, Error> {
+    pub fn get_topic(&mut self, topic: TopicId) -> Result<Vec<(PackageId, Package)>, Error> {
         self.conn
             .prepare_cached("SELECT * FROM packages WHERE topic_id = ?1")?
             .query_map([topic.0], |row| {
-                Ok(Package {
-                    name: row.get(0)?,
-                    metadata: row.get(1)?,
-                    topic: row.get::<_, Option<_>>(3)?.map(TopicId),
-                    provider: ProviderId(row.get(3)?),
-                })
+                Ok((
+                    PackageId(row.get(0)?),
+                    Package {
+                        name: row.get(1)?,
+                        metadata: row.get(2)?,
+                        topic: row.get::<_, Option<_>>(3)?.map(TopicId),
+                        provider: ProviderId(row.get(4)?),
+                    },
+                ))
             })
             .and_then(|rows| Result::from_iter(rows))
             .map_err(Into::into)
     }
 
     /// Get all packages
-    pub fn get_all(&mut self) -> Result<Vec<Package>, Error> {
+    pub fn get_all(&mut self) -> Result<Vec<(PackageId, Package)>, Error> {
         self.conn
             .prepare_cached("SELECT * FROM packages")?
             .query_map([], |row| {
-                Ok(Package {
-                    name: row.get(0)?,
-                    metadata: row.get(1)?,
-                    topic: row.get::<_, Option<_>>(3)?.map(TopicId),
-                    provider: ProviderId(row.get(3)?),
-                })
+                Ok((
+                    PackageId(row.get(0)?),
+                    Package {
+                        name: row.get(1)?,
+                        metadata: row.get(2)?,
+                        topic: row.get::<_, Option<_>>(3)?.map(TopicId),
+                        provider: ProviderId(row.get(4)?),
+                    },
+                ))
             })
             .and_then(|rows| Result::from_iter(rows))
             .map_err(Into::into)
@@ -105,7 +110,7 @@ fn init_database(conn: rusqlite::Connection) -> std::result::Result<Connection, 
         "
         CREATE TABLE IF NOT EXISTS topics (
             topic_id INTEGER NOT NULL PRIMARY KEY,
-            name     STRING NOT NULL UNIQUE,
+            name     STRING NOT NULL UNIQUE
         );
         CREATE TABLE IF NOT EXISTS packages (
             package_id  INTEGER NOT NULL PRIMARY KEY,
@@ -113,7 +118,7 @@ fn init_database(conn: rusqlite::Connection) -> std::result::Result<Connection, 
             metadata    BLOB NOT NULL,
             provider_id INTEGER NOT NULL,
             topic_id    INTEGER,
-            FOREIGN KEY (topic_id) REFERENCES topics(topic_id) -- Note that this doesn't hold for NULL
+            FOREIGN KEY (topic_id) REFERENCES topics(topic_id), -- Note that this doesn't hold for NULL
             UNIQUE(name, provider_id)
         );
         ",
@@ -194,24 +199,24 @@ impl Package {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct PackageId(u32);
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct PackageId(i64);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct TopicId(u32);
+pub struct TopicId(i64);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct ProviderId(u32);
+pub struct ProviderId(i64);
 
 impl ProviderId {
     /// Create a new ProviderId. Please make sure that the numerical ids remain
     /// consistent between versions and runs!
-    pub fn new(id: u32) -> Self {
+    pub fn new(id: i64) -> Self {
         Self(id)
     }
 
     /// Get the inner value of the id
-    pub fn inner(&self) -> u32 {
+    pub fn inner(&self) -> i64 {
         self.0
     }
 }

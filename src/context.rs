@@ -81,7 +81,6 @@ impl Context {
                 }
             }
             Err(err) => {
-                dbg!(&config_path);
                 return Err(err).wrap_err(format!("Failed to read config at '{config_path}'"));
             }
         };

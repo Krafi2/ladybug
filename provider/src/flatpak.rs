@@ -1,6 +1,5 @@
 use std::{
     io::{BufRead, BufReader},
-    process::{Command, Stdio},
     rc::Rc,
 };
 
@@ -17,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use tracing::debug;
 
 use crate::{
-    privileged::{self, SuperCtx},
+    privileged::{self, Command, Stdio},
     OpCtx, OpError, ParseCtx, ParseError, ProviderId, RawPackages,
 };
 
@@ -60,11 +59,11 @@ pub struct Flatpak;
 impl Flatpak {
     fn new() -> Result<Self, ProviderError> {
         // try to run 'flatpak --version' to see whether flatpak is installed
-        let out = Command::new("flatpak")
+        let out = std::process::Command::new("flatpak")
             .arg("--version")
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
             .spawn()
             .wrap_err("Failed to spawn flatpak process")
             .and_then(|mut cmd| cmd.wait().wrap_err("Failed to run flatpak"));
@@ -211,7 +210,8 @@ fn do_op(operation: Operation, user: bool, packages: Vec<Package>, ctx: &mut OpC
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
-    let mut proc = match spawn_command(&mut cmd, user, ctx.sup()).wrap_err("Failed to run flatpak")
+    let mut proc = match privileged::Process::spawn(&mut cmd, user, ctx.sup())
+        .wrap_err("Failed to run flatpak")
     {
         Ok(proc) => proc,
         Err(err) => {
@@ -293,7 +293,7 @@ fn exists(name: &str, user: bool) -> color_eyre::Result<PackageStatus> {
         cmd.arg("--user");
     };
 
-    match command::run_command(&mut cmd) {
+    match command::run_command(&mut cmd.into_std_cmd()) {
         Ok(output) => {
             let stdout = String::from_utf8_lossy(&output.stdout);
             let mut lines = stdout.lines();
@@ -310,19 +310,5 @@ fn exists(name: &str, user: bool) -> color_eyre::Result<PackageStatus> {
             }
         }
         Err(err) => Err(err.into_report()).wrap_err("Failed to run flatpak"),
-    }
-}
-
-fn spawn_command(
-    cmd: &mut std::process::Command,
-    user: bool,
-    ctx: &mut SuperCtx,
-) -> Result<privileged::Process, privileged::Error> {
-    if user {
-        cmd.spawn()
-            .map(Into::into)
-            .map_err(privileged::Error::Other)
-    } else {
-        ctx.spawn(cmd).map(Into::into)
     }
 }

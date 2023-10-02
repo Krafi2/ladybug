@@ -182,7 +182,11 @@ fn remove_modules(
 ) -> (Vec<(UnitId, OpResult)>, usize) {
     let len = modules
         .values()
-        .filter(|m| m.status == Status::Err || revert_all && m.status == Status::Ok)
+        .filter(|m| {
+            m.status == Status::Err
+                || m.status == Status::Ready
+                || m.status == Status::Ok && revert_all
+        })
         .count();
     let mut errn = 0;
     let mut i = 1;
@@ -208,7 +212,10 @@ fn remove_modules(
                 let module = modules.get_mut(&id).unwrap();
 
                 // Remove if the deployment previously failed or the revert_all flag is set
-                if !(module.status == Status::Err || module.status == Status::Ok && revert_all) {
+                if !(module.status == Status::Err
+                    || module.status == Status::Ready
+                    || module.status == Status::Ok && revert_all)
+                {
                     continue;
                 }
 

@@ -352,11 +352,11 @@ fn free_file(path: &Path, conflict: Conflict) -> color_eyre::Result<()> {
     }
 }
 
-/// Check if two paths point to the same file, resolving symlinks if neccessary.
-fn file_eq(path1: &Path, path2: &Path) -> std::io::Result<bool> {
-    let path1 = path1.canonicalize()?;
-    let path2 = path2.canonicalize()?;
-    Ok(path1 == path2)
+/// Try to check if two paths point to the same file, resolving symlinks if neccessary.
+fn path_eq(path1: &Path, path2: &Path) -> Option<bool> {
+    let path1 = path1.canonicalize().ok()?;
+    let path2 = path2.canonicalize().ok()?;
+    Some(path1 == path2)
 }
 
 /// Deploy `source` at `dest`. If `dest` is occupied, try to free
@@ -370,7 +370,7 @@ fn deploy_file(
     match method {
         Method::SoftLink | Method::HardLink => {
             // Create a symlink only if it isn't already present
-            if !file_eq(source, dest).unwrap_or(false) {
+            if !path_eq(source, dest).unwrap_or(false) {
                 // Try to free the file if it exists
                 if dest.exists() {
                     free_file(dest, conflict)
@@ -446,8 +446,14 @@ fn deploy_file(
 fn remove_file(src: &RelPath, target: &RelPath, method: Method) -> color_eyre::Result<()> {
     // Check if source is deployed to target
     let eq = match method {
-        Method::SoftLink | Method::HardLink => file_eq(src.absolute(), target.absolute())
-            .wrap_err_with(|| format!("Failed to canonalize path: '{target}'"))?,
+        // If the deployment method is a link, we only need to check the file's
+        // identity
+        Method::SoftLink | Method::HardLink => {
+            // This will return None if the target doesn't exist, which means
+            // that we don't have to remove it
+            path_eq(src.absolute(), target.absolute()).unwrap_or(false)
+        }
+        // Check the file's contents if it's a copy
         Method::Copy => contents_equal(
             OpenOptions::new()
                 .read(true)

@@ -1,8 +1,9 @@
 use color_eyre::owo_colors::OwoColorize;
-use data::{Topic, TopicId};
-use indicatif::{ProgressBar, ProgressDrawTarget};
+use data::Topic;
+use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
 use provider::{OpError, OpResult, RuntimeCtx};
 use std::{
+    cell::Cell,
     collections::{HashMap, HashSet},
     iter::FromIterator,
     rc::Rc,
@@ -66,7 +67,7 @@ impl Deploy {
         }
 
         // Deploy requested modules
-        let (mut deployed, errs) = self.deploy_modules(root, &mut modules, ctx);
+        let (deployed, errs) = self.deploy_modules(root, &mut modules, ctx);
         errn += errs;
 
         // Clean old deployment
@@ -81,23 +82,114 @@ impl Deploy {
                         .filter_map(|topic| {
                             ctx.database()
                                 .get_topic(topic.id())
-                                .map_err(|err| tracing::error!("Failed to get packages belonging to topic '{topic}': {err:#}"))
+                                .map_err(|err| {
+                                    tracing::error!("Failed to get packages belonging to topic '{topic}': {err:#}");
+                                    errn += 1;
+                                })
                                 .ok()
                         })
                         .flatten()
                         .collect()
                 })
-                .unwrap_or_else(||
+                .unwrap_or_else(|| {
                     ctx.database()
                         .get_all()
-                        .map_err(|err| tracing::error!("Failed to get packages: {err:#}"))
+                        .map_err(|err| {
+                            tracing::error!("Failed to get packages: {err:#}");
+                            errn += 1;
+                        })
                         .unwrap_or_default()
-                );
+                });
 
-            let deployed = deployed.iter().map(|(id, res)| res.completed)
-            
-            cached.sort_unstable_by_key(|pacakage| (pacakage.provider(), pacakage.name()));
-            deployed.sort_unstable_by_key(|(id, _)| id)
+            let deployed = deployed
+                .into_iter()
+                .flat_map(|(_id, res)| {
+                    assert!(
+                        res.failed.is_empty(),
+                        "We should skip this if any packages failed to deploy",
+                    );
+                    res.completed
+                })
+                .map(|package| ctx.database().installed(&package))
+                .collect::<Result<Vec<_>, _>>();
+
+            match deployed {
+                Err(err) => {
+                    tracing::error!("Failed to update package database: {err:#}");
+                    errn += 1;
+                }
+                Ok(mut deployed) => {
+                    deployed.sort_unstable();
+                    cached.sort_unstable_by_key(|(id, _pacakage)| *id);
+
+                    let mut cached = cached.drain(..);
+                    let mut deployed = deployed.drain(..);
+                    let mut deployed_cur = deployed.next();
+                    let mut cached_cur = cached.next();
+                    let mut queue = Vec::new();
+
+                    // Find elements that are in `cached` but not `deployed`
+                    loop {
+                        match (cached_cur.take(), deployed_cur.take()) {
+                            (Some((_, package)), None) => {
+                                queue.push(package);
+                                cached_cur = cached.next();
+                            }
+                            (Some((cached_id, package)), Some(deployed_id)) => {
+                                // Ids match, continue
+                                if cached_id == deployed_id {
+                                    cached_cur = cached.next();
+                                    deployed_cur = deployed.next();
+                                // The cached id is not deployed
+                                } else if deployed_id > cached_id {
+                                    queue.push(package);
+                                    cached_cur = cached.next();
+                                    deployed_cur = Some(deployed_id);
+                                // The deployed id is not cached
+                                } else {
+                                    cached_cur = Some((cached_id, package));
+                                    deployed_cur = deployed.next();
+                                }
+                            }
+                            _ => break,
+                        }
+                    }
+
+                    let i = Cell::new(1);
+                    let len = queue.len();
+                    let style = ProgressStyle::with_template(
+                        "{prefix:.bright.black} Cleaning up packages: {wide_msg}}",
+                    )
+                    .unwrap();
+                    let pb = ProgressBar::with_draw_target(None, ProgressDrawTarget::stdout());
+                    pb.set_style(style);
+                    pb.set_message("Starting deployment");
+                    // TODO: `i` can be greater than len if a package sets multiple messages
+                    let set_msg = Rc::new(|msg| {
+                        pb.set_message(msg);
+                        let val = i.take();
+                        pb.set_prefix(format!("[{val}/{len}]",));
+                        i.replace(val + 1);
+                    });
+                    // TODO: remove some of this contect from RuntimeCtx
+                    let run_ctx = RuntimeCtx::new(
+                        set_msg,
+                        // TODO: remove
+                        ctx.dotfile_dir().clone(),
+                        // TODO: remove
+                        None,
+                        ctx.home_dir().map(ToOwned::to_owned),
+                        ctx.dotfile_dir().clone(),
+                        false,
+                    );
+                    let res = ctx.interpreter().remove(queue, &run_ctx);
+                    for package in res.completed {
+                        if let Err(err) = ctx.database().removed(&package) {
+                            tracing::error!("Failed to update package database: {err:#}");
+                        }
+                    }
+                }
+            }
         }
 
         // Revert changes if the deployment failed
@@ -105,6 +197,15 @@ impl Deploy {
             println!("\n\nEncountered an error, reverting changes:");
             let (removed, errs) =
                 super::remove_modules(root, &mut modules, self.dry_run, self.revert_all, ctx);
+
+            for package in removed
+                .into_iter()
+                .flat_map(|(_id, package)| package.completed)
+            {
+                if let Err(err) = ctx.database().removed(&package) {
+                    tracing::error!("Failed to update package database: {err:#}");
+                }
+            }
             errn += errs;
         }
 
@@ -293,26 +394,4 @@ fn filter_modules(topics: &HashSet<Topic>, root: UnitId, modules: &mut HashMap<U
             }
         }
     }
-}
-
-/// Generate a queue of units to deploy so that no units are orphaned
-fn generate_queue(root: UnitId, modules: &HashMap<UnitId, Module>) -> Vec<UnitId> {
-    let mut queue = Vec::new();
-    let mut stack = vec![(vec![root], 0)];
-    while let Some((members, current)) = stack.last_mut() {
-        match members.get(*current) {
-            Some(id) => {
-                let module = &modules[id];
-                if let Status::Ready = module.status {
-                    queue.push(*id);
-                }
-                *current += 1;
-                stack.push((module.members.clone(), 0))
-            }
-            None => {
-                stack.pop();
-            }
-        }
-    }
-    queue
 }

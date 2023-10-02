@@ -78,6 +78,7 @@ fn run() -> Result<Result<(), ()>, Error> {
 
     // Detect if the proccess should switch to a privileged entrypoint
     provider::detect_privileged();
+    println!("No privileged");
 
     info!("Application started");
 

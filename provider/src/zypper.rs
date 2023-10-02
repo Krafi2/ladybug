@@ -1,7 +1,7 @@
 use std::{
     collections::HashMap,
     io::{BufReader, Write},
-    process::{Child, Stdio},
+    process::Child,
     time::Duration,
 };
 
@@ -18,7 +18,7 @@ use tracing::debug;
 
 use super::{Provider, ProviderError, RawPackages};
 use crate::{
-    privileged::{Stdin, Stdout, SuperCtx, SuperProc},
+    privileged::{Command, Stdin, Stdio, Stdout, SuperCtx, SuperProc},
     OpCtx, OpError, ParseCtx, ParseError, ProviderId,
 };
 
@@ -195,6 +195,7 @@ pub struct Zypper<T> {
 impl Zypper<Child> {
     fn new_user() -> color_eyre::Result<Self> {
         let mut child = Self::zypper_cmd()
+            .into_std_cmd()
             .spawn()
             .wrap_err("Failed to spawn zypper process")?;
         let stdin = child.stdin.take().unwrap().into();
@@ -415,8 +416,8 @@ impl<T> Zypper<T> {
         Ok(new)
     }
 
-    fn zypper_cmd() -> std::process::Command {
-        let mut cmd = std::process::Command::new("zypper");
+    fn zypper_cmd() -> Command {
+        let mut cmd = Command::new("zypper");
         cmd.args(["--xmlout", "--non-interactive", "shell"])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())

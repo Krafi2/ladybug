@@ -6,7 +6,7 @@ mod zypper;
 use color_eyre::eyre::eyre;
 use common::rel_path::RelPath;
 use data::{Package, TopicId};
-use privileged::{Server, SuperCtx};
+use privileged::{Client, SuperCtx};
 
 use ariadne::{Color, Fmt, ReportKind};
 use eval::{report, Args, ConvertError, Value};
@@ -173,14 +173,14 @@ impl Factory {
 /// interface.
 pub struct Runtime {
     factory: Factory,
-    server: Server,
+    client: Client,
 }
 
 impl Runtime {
     pub fn new() -> Self {
         Self {
             factory: Factory::new(),
-            server: Server::new(),
+            client: Client::new(),
         }
     }
 
@@ -299,7 +299,7 @@ impl Runtime {
     }
 
     pub fn install(&mut self, packages: Vec<Package>, ctx: &RuntimeCtx) -> OpResult {
-        let mut ctx = OpCtx::new(ctx, self.server.super_ctx());
+        let mut ctx = OpCtx::new(ctx, self.client.super_ctx());
         let sorted = sort_packages(packages, &mut ctx);
 
         for (provider, packages) in sorted {
@@ -316,7 +316,7 @@ impl Runtime {
 
     /// Remove these packages. All packages must belong to the same provider.
     pub fn remove(&mut self, packages: Vec<data::Package>, ctx: &RuntimeCtx) -> OpResult {
-        let mut ctx = OpCtx::new(ctx, self.server.super_ctx());
+        let mut ctx = OpCtx::new(ctx, self.client.super_ctx());
         let sorted = sort_packages(packages, &mut ctx);
 
         for (provider, packages) in sorted {

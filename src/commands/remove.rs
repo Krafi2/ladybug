@@ -33,6 +33,15 @@ impl Remove {
 
         let (removed, errn) = super::remove_modules(root, &mut modules, self.dry_run, false, ctx);
 
+        for package in removed
+            .into_iter()
+            .flat_map(|(_id, package)| package.completed)
+        {
+            if let Err(err) = ctx.database().removed(&package) {
+                tracing::error!("Failed to update package database: {err:#}");
+            }
+        }
+
         println!();
         // Print number of errors
         if errn != 0 {
@@ -79,33 +88,4 @@ fn filter_modules(topics: HashSet<&str>, root: UnitId, modules: &mut HashMap<Uni
             }
         }
     }
-}
-
-/// Generate a queue of units to remove so that no units are orphaned
-fn generate_queue(root: UnitId, modules: &HashMap<UnitId, Module>) -> Vec<UnitId> {
-    let mut queue = Vec::new();
-    let mut stack = vec![(vec![root], 0)];
-    while let Some((members, current)) = stack.last_mut() {
-        match members.get(*current) {
-            Some(id) => {
-                let module = &modules[id];
-                let mut members = module.members.clone();
-                // Remove in reverse order in case the user relies on the units
-                // being deployed in order of declaration
-                members.reverse();
-                stack.push((members, 0));
-            }
-            None => {
-                let _ = stack.pop();
-                if let Some(frame) = stack.last_mut() {
-                    let parent = frame.0[frame.1];
-                    if let Status::Ready = modules[&parent].status {
-                        queue.push(parent);
-                    }
-                    frame.1 += 1;
-                }
-            }
-        }
-    }
-    queue
 }
