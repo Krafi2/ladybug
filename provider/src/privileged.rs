@@ -378,7 +378,7 @@ mod other_side {
         }
 
         fn recv_message(&self) -> bincode::Result<Message> {
-            bincode::deserialize_from::<_, Message>(&self.stream)
+            bincode::DefaultOptions::new().deserialize_from::<_, Message>(&self.stream)
         }
     }
 }
@@ -591,13 +591,17 @@ impl Client {
 
 impl Drop for Client {
     fn drop(&mut self) {
-        if let Some(Ok(mut inner)) = self.inner.take() {
-            match inner.proc.kill() {
-                Err(err) if err.kind() == std::io::ErrorKind::InvalidInput => (),
-                Err(err) => tracing::error!("Cannot kill privileged server process: {err}"),
-                Ok(_) => (),
-            }
+        if let Some(Ok(inner)) = self.inner.take() {
+            kill_child(inner.proc);
         }
+    }
+}
+
+fn kill_child(mut child: Child) {
+    match child.kill() {
+        Err(err) if err.kind() == std::io::ErrorKind::InvalidInput => (),
+        Err(err) => tracing::error!("Cannot kill privileged server process: {err}"),
+        Ok(_) => (),
     }
 }
 
@@ -611,13 +615,21 @@ impl ClientInner {
         let mut command = std::process::Command::new("sudo");
         let mut args = std::env::args();
 
+        // Make sure that we create a new socket
+        match std::fs::remove_file(SOCKET) {
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => (),
+            Err(err) => return Err(err).wrap_err("Failed to remove old socket at '{SOCKET}'"),
+            Ok(_) => (),
+        }
+
+        // TODO: Maybe pass a file descriptor to the server so that the connection can't be hijacked
         let listener = UnixListener::bind(SOCKET)
             // .and_then(set_sock_timeout)
             .wrap_err("Failed to bind socket")?;
 
         let proc = command
         // Ask sudo to preserve some variables that we need
-        .arg(format!("--preserve-env=XDG_CACHE_HOME,XDG_CONFIG_HOME,XDG_DATA_DIRS,XDG_CONFIG_DIRS,PATH,USER,HOME,{ENV_VAR}"))
+        .arg(format!("--preserve-env=XDG_CACHE_HOME,XDG_CONFIG_HOME,XDG_DATA_DIRS,XDG_CONFIG_DIRS,PATH,USER,HOME,RUST_BACKTRACE,{ENV_VAR}"))
         .arg(args.next().unwrap()) // Get the path to the executable currently running
         .env(ENV_VAR, "true")
         .stdin(StdStdio::inherit())
@@ -625,16 +637,20 @@ impl ClientInner {
         .stderr(StdStdio::inherit()).spawn().wrap_err("Failed to spawn command")?;
 
         // The send timeout should apply here as well
-        let stream = match listener.accept() {
-            Ok((stream, _addr)) => stream,
-            Err(err) => {
-                return Err(check_health(proc)
-                    .wrap_err("Privileged process exited unexpectedly")
-                    .err()
-                    .unwrap_or(err.into())
-                    .wrap_err("Failed to connect to socket"))
+        let (stream, addr) = match listener.accept() {
+            Ok(ok) => ok,
+            Err(err) => return match check_health(proc)
+                .wrap_err("Privileged process exited unexpectedly")
+            {
+                Err(e) => Err(e).wrap_err(err),
+                Ok(proc) => {
+                    kill_child(proc);
+                    Err(eyre!(err))
+                }
             }
+            .wrap_err("Failed to connect to peer"),
         };
+        tracing::info!("Connected to peer at {addr:?}");
 
         Ok(Self {
             proc,
@@ -643,41 +659,39 @@ impl ClientInner {
     }
 
     fn send(mut self, msg: &Message) -> Result<(Self, Result<()>)> {
-        match bincode::DefaultOptions::new().serialize_into(&mut self.stream, msg) {
+        match bincode::DefaultOptions::new()
+            .serialize_into(&mut self.stream, msg)
+            .wrap_err("Error sending messages")
+        {
             Ok(_) => Ok((self, Ok(()))),
-            Err(err) => match *err {
-                // Check that the process is running if we get an Io error
-                bincode::ErrorKind::Io(err) => match check_health(self.proc) {
-                    // The process is still running
-                    Ok(proc) => {
-                        self.proc = proc;
-                        Ok((self, Err(ErrorKind::Connect(eyre!(err)).into())))
-                    }
-                    // The process crashed
-                    Err(err) => Err(ErrorKind::Crash(err).into()),
-                },
-                // There shouldn't be any parsing errors, I trust you, bincode
-                other => panic!("{other}"),
+            // Check that the process is running if we get an Io error
+            Err(err) => match check_health(self.proc) {
+                // The process is still running
+                Ok(proc) => {
+                    self.proc = proc;
+                    Ok((self, Err(ErrorKind::Connect(eyre!(err)).into())))
+                }
+                // The process crashed
+                Err(err) => Err(ErrorKind::Crash(err).into()),
             },
         }
     }
 
     fn receive(mut self) -> Result<(Self, Result<Reply>)> {
-        match bincode::DefaultOptions::new().deserialize_from(&mut self.stream) {
+        match bincode::DefaultOptions::new()
+            .deserialize_from(&mut self.stream)
+            .wrap_err("Error receiving messages")
+        {
             Ok(reply) => Ok((self, Ok(reply))),
-            Err(err) => match *err {
-                // Check that the process is running if we get an Io error
-                bincode::ErrorKind::Io(err) => match check_health(self.proc) {
-                    // The process is still running
-                    Ok(proc) => {
-                        self.proc = proc;
-                        Ok((self, Err(ErrorKind::Connect(eyre!(err)).into())))
-                    }
-                    // The process crashed
-                    Err(err) => Err(ErrorKind::Crash(err).into()),
-                },
-                // There shouldn't be any parsing errors, I trust you, bincode
-                other => panic!("{other}"),
+            // Check that the process is running if we get an Io error
+            Err(err) => match check_health(self.proc) {
+                // The process is still running
+                Ok(proc) => {
+                    self.proc = proc;
+                    Ok((self, Err(ErrorKind::Connect(eyre!(err)).into())))
+                }
+                // The process crashed
+                Err(e) => Err(ErrorKind::Crash(e.wrap_err(err)).into()),
             },
         }
     }
@@ -712,7 +726,6 @@ impl Transceiver {
                     .recv_with_fd(&mut self.buf[self.bytes..], &mut self.fds)?;
                 self.bytes += bytes;
                 self.nfd += nfd;
-                dbg!(&self);
                 println!("Read {bytes} bytes and {nfd} fds");
                 continue;
             }
