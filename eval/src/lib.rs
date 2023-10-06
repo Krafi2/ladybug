@@ -568,8 +568,8 @@ macro_rules! params {
             $context,
         );
     };
-    ($where:vis $what:ident $name:ident { $($fvis:vis $field:ident : $kind:ty),* $(,)? }) => {
-        $where $what $name { $($fvis $field : $kind),* }
+    ($(#[$met:meta])? $where:vis struct $name:ident { $($fvis:vis $field:ident : $kind:ty),* $(,)? }) => {
+        $(#[$met])? $where struct $name { $($fvis $field : $kind),* }
 
         impl $name {
             fn parse_raw_params(args: $crate::Args, ctx: &mut $crate::Ctx) -> $crate::Partial<($(Option<$kind>,)*)> {

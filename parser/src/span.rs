@@ -93,6 +93,13 @@ impl<T> Spanned<T> {
     pub fn map<O, F: FnOnce(T) -> O>(self, f: F) -> Spanned<O> {
         Spanned::new(f(self.inner), self.span)
     }
+
+    pub fn as_ref(&self) -> Spanned<&T> {
+        Spanned {
+            inner: &self.inner,
+            span: self.span,
+        }
+    }
 }
 
 impl<T> AsRef<T> for Spanned<T> {
@@ -111,7 +118,7 @@ impl<T> std::ops::Deref for Spanned<T> {
     type Target = T;
 
     fn deref(&self) -> &Self::Target {
-        self.as_ref()
+        &self.inner
     }
 }
 

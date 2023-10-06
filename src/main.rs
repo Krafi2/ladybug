@@ -31,14 +31,16 @@ impl From<color_eyre::Report> for Error {
 #[derive(Parser)]
 #[clap(author = "Krafi", version = "0.1.0", about = "A cute dotfile manager", long_about = None)]
 pub struct Opts {
-    #[clap(long, action)]
-    no_root: bool,
-    #[clap(long, action)]
-    root: bool,
     #[clap(long, value_parser)]
     config: Option<PathBuf>,
     #[clap(long, value_parser)]
     dotfiles: Option<PathBuf>,
+    #[clap(long, action)]
+    root: bool,
+    #[clap(long, action)]
+    no_root: bool,
+    #[clap(long, action)]
+    no_cache: bool,
     #[clap(subcommand)]
     command: commands::Command,
 }

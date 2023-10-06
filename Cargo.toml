@@ -1,5 +1,5 @@
 [workspace]
-members = ["parser", "interpreter", "common", "eval", "provider"]
+members = ["parser", "interpreter", "common", "eval", "provider", "data"]
 
 [package]
 name = "ladybug"
@@ -14,6 +14,7 @@ interpreter = { path = "interpreter" }
 common = { path = "common" }
 eval = { path = "eval" }
 provider = { path = "provider" }
+data = { path = "data" }
 clap = { version = "4.1.8", features = ["derive", "color"] }
 directories-next = "2.0.0"
 color-eyre = "0.6.2"

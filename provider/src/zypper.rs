@@ -1,26 +1,33 @@
 use std::{
+    collections::HashMap,
     io::{BufReader, Write},
-    process::{Child, Stdio},
+    process::Child,
     time::Duration,
 };
 
 use ariadne::{Color, Fmt, ReportKind};
 use color_eyre::eyre::{eyre, WrapErr};
-use eval::{params, report, FromArgs, RecoverFromArgs};
+use data::Package;
+use eval::{params, report, Args, FromArgs, RecoverFromArgs};
 use parser::Span;
 use quick_xml::events::Event;
 use quick_xml::reader::Reader as XmlReader;
+use serde::{Deserialize, Serialize};
 use timeout_readwrite::TimeoutReader;
 use tracing::debug;
 
-use super::ProviderError;
+use super::{Provider, ProviderError, RawPackages};
 use crate::{
-    privileged::{Stdin, Stdout, SuperCtx, SuperProc},
-    EvalCtx, ExecCtx,
+    privileged::{Command, Stdin, Stdio, Stdout, SuperCtx, SuperProc},
+    OpCtx, OpError, ParseCtx, ParseError, ProviderId,
 };
 
+pub(crate) fn new_provider() -> Result<impl crate::Provider, crate::ProviderError> {
+    ZypperProvider::new()
+}
+
 #[derive(Debug)]
-pub enum Error {
+enum Error {
     PackageNotRecognized(String, Span),
     Eyre(color_eyre::Report, Span),
 }
@@ -42,12 +49,12 @@ report! {
 
 /// The zypper provider spawns a persistent zypper process using `zypper shell` and uses stdio to
 /// communicate commands.
-pub enum Provider {
+pub enum ZypperProvider {
     Super(Zypper<SuperProc>),
     User(Zypper<Child>),
 }
 
-impl super::ConstructProvider for Provider {
+impl ZypperProvider {
     fn new() -> Result<Self, ProviderError> {
         Zypper::new_user()
             .map(Self::User)
@@ -56,45 +63,45 @@ impl super::ConstructProvider for Provider {
     }
 }
 
-struct Package {
-    name: String,
+params! {
+    #[derive(Serialize, Deserialize)]
+    struct Metadata { from: Option<Vec<String>> }
 }
-
-pub struct Transaction {
-    from: Option<Vec<String>>,
-    packages: Vec<Package>,
-}
-
-params! { struct Params { from: Option<Vec<String>> } }
 params! { struct PackageParams {} }
 
-impl super::Provider for Provider {
-    type Transaction = Transaction;
-    type State = ();
-
-    fn new_transaction(
+impl Provider for ZypperProvider {
+    // TODO: report progress
+    fn parse_packages(
         &mut self,
-        args: super::Args,
-        packages: super::Packages,
-        ctx: &mut EvalCtx,
-        _exec: &ExecCtx,
-    ) -> Result<Self::Transaction, ()> {
+        args: Args,
+        packages: RawPackages,
+        ctx: &mut ParseCtx,
+    ) -> Result<Vec<Package>, ()> {
         // Parse the package block params
-        let params = Params::recover_default(args, ctx);
+        let params = Metadata::recover_default(args, ctx.eval());
 
-        let mut packs = Vec::new();
+        let mut finished = Vec::new();
         let mut degraded = params.is_degraded();
+
+        let metadata = match bincode::serialize(&params.to_value()) {
+            Ok(metadata) => metadata,
+            Err(err) => {
+                ctx.emit(ParseError::Bincode(err, packages.span));
+                return Err(());
+            }
+        };
+
         // Verify packages
         for package in packages.packages {
-            if let Some(args) = PackageParams::from_args(package.args, ctx) {
+            if let Some(args) = PackageParams::from_args(package.args, ctx.eval()) {
                 if args.is_degraded() {
                     degraded = true;
                     continue;
                 }
 
                 let exists = match self {
-                    Provider::User(zypper) => zypper.exists(&package.name.inner),
-                    Provider::Super(zypper) => zypper.exists(&package.name.inner),
+                    ZypperProvider::User(zypper) => zypper.exists(&package.name.inner),
+                    ZypperProvider::Super(zypper) => zypper.exists(&package.name.inner),
                 };
 
                 match exists {
@@ -102,10 +109,13 @@ impl super::Provider for Provider {
                     Ok(exists) => {
                         // All is well
                         if exists {
-                            let package = Package {
-                                name: package.name.inner,
-                            };
-                            packs.push(package);
+                            let package = Package::new(
+                                package.name.inner,
+                                metadata.clone(),
+                                ctx.runtime().topic(),
+                                ProviderId::Zypper,
+                            );
+                            finished.push(package);
                         // The package doesn't exist
                         } else {
                             ctx.emit(Error::PackageNotRecognized(
@@ -121,49 +131,39 @@ impl super::Provider for Provider {
                         degraded = true;
                     }
                 }
+            } else {
+                degraded = true;
             }
         }
 
-        if !degraded && !params.is_degraded() {
-            Ok(Transaction {
-                from: params.value.from,
-                packages: packs,
-            })
+        if !degraded {
+            Ok(finished)
         } else {
             Err(())
         }
     }
 
-    fn install(
-        &mut self,
-        transaction: &Self::Transaction,
-        ctx: &mut SuperCtx,
-        exec: &ExecCtx,
-    ) -> (super::OpResult, Self::State) {
-        let res = self
-            .get_super(ctx)
-            .and_then(|zypper| zypper.zypper_op(transaction, Operation::Install, exec));
-        (res, ())
+    fn install(&mut self, packages: Vec<Package>, ctx: &mut OpCtx) {
+        match self.get_super(ctx.sup()) {
+            Ok(sup) => sup.zypper_op(Operation::Install, packages, ctx),
+            Err(err) => ctx.emit(err),
+        }
     }
 
-    fn remove(
-        &mut self,
-        transaction: &Self::Transaction,
-        _state: Option<Self::State>,
-        ctx: &mut SuperCtx,
-        exec: &ExecCtx,
-    ) -> super::OpResult {
-        self.get_super(ctx)?
-            .zypper_op(transaction, Operation::Remove, exec)
+    fn remove(&mut self, packages: Vec<Package>, ctx: &mut OpCtx) {
+        match self.get_super(ctx.sup()) {
+            Ok(sup) => sup.zypper_op(Operation::Remove, packages, ctx),
+            Err(err) => ctx.emit(err),
+        }
     }
 }
 
-impl Provider {
+impl ZypperProvider {
     /// Get a privileged super instance
     fn get_super(&mut self, ctx: &mut SuperCtx) -> color_eyre::Result<&mut Zypper<SuperProc>> {
         match self {
             // If we have a normal process, kill it and launch a privileged instance
-            Provider::User(Zypper { zypper, .. }) => {
+            ZypperProvider::User(Zypper { zypper, .. }) => {
                 // Zypper claims to exit gracefully when killed
                 zypper.kill().wrap_err("Old process already exited")?;
                 // Update the process
@@ -173,13 +173,13 @@ impl Provider {
         }
         // We should be running a super now
         match self {
-            Provider::Super(zypper) => Ok(zypper),
-            Provider::User(_) => unreachable!(),
+            ZypperProvider::Super(zypper) => Ok(zypper),
+            ZypperProvider::User(_) => unreachable!(),
         }
     }
 }
 
-#[derive(PartialEq)]
+#[derive(PartialEq, Clone, Copy)]
 enum Operation {
     Install,
     Remove,
@@ -195,6 +195,7 @@ pub struct Zypper<T> {
 impl Zypper<Child> {
     fn new_user() -> color_eyre::Result<Self> {
         let mut child = Self::zypper_cmd()
+            .into_std_cmd()
             .spawn()
             .wrap_err("Failed to spawn zypper process")?;
         let stdin = child.stdin.take().unwrap().into();
@@ -213,13 +214,35 @@ impl Zypper<SuperProc> {
         Self::new(child, stdin, stdout)
     }
 
-    fn zypper_op(
+    fn zypper_op(&mut self, op: Operation, packages: Vec<Package>, ctx: &mut OpCtx) {
+        // Sort packages based on metadata
+        let mut sorted = HashMap::new();
+        for package in packages {
+            sorted
+                .entry(package.metadata().to_owned())
+                .or_insert_with(Vec::new)
+                .push(package);
+        }
+
+        for (metadata, packages) in sorted {
+            let _ = bincode::deserialize::<Metadata>(&metadata)
+                .map_err(OpError::Metadata)
+                .and_then(|metadata| {
+                    self.zypper_op_inner(op, packages, metadata, ctx)
+                        .map_err(OpError::Other)
+                })
+                .map_err(|err| ctx.emit(err));
+        }
+    }
+
+    fn zypper_op_inner(
         &mut self,
-        transaction: &Transaction,
         op: Operation,
-        exec: &ExecCtx,
-    ) -> Result<(), color_eyre::Report> {
-        let from = if let Some(from) = &transaction.from {
+        packages: Vec<Package>,
+        metadata: Metadata,
+        ctx: &mut OpCtx,
+    ) -> color_eyre::Result<()> {
+        let from = if let Some(from) = &metadata.from {
             from.iter()
                 .map(String::as_str)
                 .flat_map(|s| [" --from ", s])
@@ -227,19 +250,17 @@ impl Zypper<SuperProc> {
         } else {
             "".to_owned()
         };
-        let packages = transaction
-            .packages
-            .iter()
-            .fold(String::new(), |mut state, package| {
-                state.push(' ');
-                // Remove packages by prepending !
-                if let Operation::Remove = op {
-                    state.push('!');
-                }
-                state.push_str(&package.name);
-                state
-            });
-        let cmd = format!("install{} {}", from, packages);
+        let pack_string = packages.iter().fold(String::new(), |mut state, package| {
+            state.push(' ');
+            // Remove packages by prepending '!'. This is neccessary because
+            // otherwise zypper removes reverse dependencies.
+            if let Operation::Remove = op {
+                state.push('!');
+            }
+            state.push_str(&package.name());
+            state
+        });
+        let cmd = format!("install{} {}", from, pack_string);
         debug!("Running '{cmd}'");
         self.command(&cmd)?;
 
@@ -247,6 +268,8 @@ impl Zypper<SuperProc> {
         let mut level = 0;
         let mut error = None;
         let mut finished = false;
+        let mut packages: HashMap<String, Package, std::collections::hash_map::RandomState> =
+            HashMap::from_iter(packages.into_iter().map(|p| (p.name().to_owned(), p)));
 
         loop {
             let event = self.read_event();
@@ -287,20 +310,22 @@ impl Zypper<SuperProc> {
                                 if let Some(done) = attributes.next().transpose()? {
                                     if done.key.local_name().as_ref() == b"done" {
                                         // Print what has been installed
-                                        let name = String::from_utf8_lossy(&name.value);
-                                        exec.set_message(name.as_ref().to_owned());
-                                        debug!("{}", &name);
+                                        let msg = String::from_utf8_lossy(&name.value);
+                                        ctx.runtime().set_message(msg.as_ref().to_owned());
+                                        debug!("{}", &msg);
 
                                         // The name is in the format "(n/n) blabla"
                                         // The transaction is complete if the numbers in the parantheses match
-                                        let (s, _) = name
-                                            .strip_prefix('(')
-                                            .unwrap()
-                                            .split_once(')')
-                                            .unwrap();
+                                        let (s, name) =
+                                            msg.strip_prefix('(').unwrap().split_once(')').unwrap();
                                         let (left, right) = s.split_once('/').unwrap();
                                         if left == right {
                                             finished = true;
+                                        }
+
+                                        let name = name.trim();
+                                        if let Some(package) = packages.remove(&name.to_owned()) {
+                                            ctx.installed(package)
                                         }
                                     }
                                 }
@@ -315,7 +340,7 @@ impl Zypper<SuperProc> {
 
                     // Zypper ends progress messages with '...'
                     if message.ends_with("...") {
-                        exec.set_message(message.as_ref().to_owned());
+                        ctx.runtime().set_message(message.as_ref().to_owned());
                     }
 
                     // Zypper feels like it's finished
@@ -329,23 +354,31 @@ impl Zypper<SuperProc> {
                             && message.starts_with("No provider of ")
                             && message.ends_with(" found.")
                         {
-                            
                         } else {
                             error = Some(message.into_owned());
                         }
                         handle_error = false;
                     }
                 }
-                Ok(Event::Eof) => return Err(eyre!("Unexpected EOF")),
-                Err(quick_xml::Error::Io(err)) => return Err(eyre!(err)).wrap_err("IO error"),
+                Ok(Event::Eof) => {
+                    return Err(eyre!("Unexpected EOF")).wrap_err("Failed to parse xml")
+                }
                 Err(e) => return Err(e).wrap_err("Failed to parse xml"),
                 _ => (),
             }
             if level == 0 {
                 if let Some(error) = error {
+                    // The remaining packages haven't been installed
+                    for package in packages.into_values() {
+                        ctx.failed(package);
+                    }
                     return Err(eyre!(error));
                 }
                 if finished {
+                    // The remaining packages haven't been installed
+                    for package in packages.into_values() {
+                        ctx.failed(package);
+                    }
                     return Ok(());
                 }
             }
@@ -373,20 +406,21 @@ impl<T> Zypper<T> {
             match new.read_event() {
                 Ok(Event::Start(tag)) => {
                     if tag.local_name().as_ref() == b"stream" {
-                        break;
+                        break Ok(());
                     }
                 }
-                Err(quick_xml::Error::Io(err)) => return Err(eyre!(err)).wrap_err("IO error"),
-                Err(e) => return Err(e).wrap_err("Failed to parse xml"),
+                Ok(Event::Eof) => break Err(eyre!("Unexpected end of file")),
+                Err(e) => break Err(e).wrap_err("Failed to parse xml"),
                 _ => (),
             }
         }
+        .wrap_err("Failed to initialize zypper subprocess")?;
 
         Ok(new)
     }
 
-    fn zypper_cmd() -> std::process::Command {
-        let mut cmd = std::process::Command::new("zypper");
+    fn zypper_cmd() -> Command {
+        let mut cmd = Command::new("zypper");
         cmd.args(["--xmlout", "--non-interactive", "shell"])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -431,8 +465,9 @@ impl<T> Zypper<T> {
                         found = Some(false);
                     }
                 }
-                Ok(Event::Eof) => return Err(eyre!("Unexpected EOF")),
-                Err(quick_xml::Error::Io(err)) => return Err(eyre!(err)).wrap_err("IO error"),
+                Ok(Event::Eof) => {
+                    return Err(eyre!("Unexpected EOF")).wrap_err("Failed to parse xml")
+                }
                 Err(e) => return Err(e).wrap_err("Failed to parse xml"),
                 _ => (),
             }

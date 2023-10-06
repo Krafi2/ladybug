@@ -2,6 +2,7 @@ use std::path::{Path, PathBuf};
 
 use color_eyre::eyre::{bail, ContextCompat, Result, WrapErr};
 use common::rel_path::{HomeError, RelPath};
+use data::Connection;
 use eval::IntoReport;
 use interpreter::{Config, Interpreter};
 
@@ -12,6 +13,7 @@ pub struct Context {
     home_dir: Result<PathBuf, HomeError>,
     shell: Shell,
     interpreter: Interpreter,
+    database: data::Connection,
 }
 
 impl std::fmt::Debug for Context {
@@ -79,7 +81,6 @@ impl Context {
                 }
             }
             Err(err) => {
-                dbg!(&config_path);
                 return Err(err).wrap_err(format!("Failed to read config at '{config_path}'"));
             }
         };
@@ -89,11 +90,19 @@ impl Context {
             .ok_or(())
             .or_else(|_| default_dotfile_dir())?;
 
+        let database = match opts.no_cache {
+            true => Connection::open_in_memory().map_err(color_eyre::Report::new),
+            false => default_database_path()
+                .and_then(|p| Connection::open(&p).map_err(color_eyre::Report::new)),
+        }
+        .wrap_err("Failed to initialize database")?;
+
         Ok(Self {
             dotfile_dir: dotfiles,
             home_dir,
-            shell: config.shell.map(From::from).unwrap_or_else(default_shell),
+            shell: config.shell.map(Shell::from).unwrap_or_else(default_shell),
             interpreter,
+            database,
         })
     }
 
@@ -115,6 +124,14 @@ impl Context {
     pub fn interpreter(&mut self) -> &mut Interpreter {
         &mut self.interpreter
     }
+
+    pub fn database(&mut self) -> &mut Connection {
+        &mut self.database
+    }
+
+    pub fn database_interpreter(&mut self) -> (&mut Connection, &mut Interpreter) {
+        (&mut self.database, &mut self.interpreter)
+    }
 }
 
 pub fn detect_root() -> bool {
@@ -131,6 +148,12 @@ pub fn default_config_path() -> Result<PathBuf> {
     project_dirs()
         .map(|dirs| dirs.config_dir().join("config.ldbg"))
         .wrap_err("No config directory found")
+}
+
+fn default_database_path() -> Result<PathBuf> {
+    project_dirs()
+        .map(|dirs| dirs.cache_dir().join("database.sqlite"))
+        .wrap_err("No cache directory found")
 }
 
 pub fn project_dirs() -> Option<directories_next::ProjectDirs> {
