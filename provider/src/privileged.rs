@@ -5,14 +5,13 @@ use std::{
     fs::File,
     io::{Read, Write},
     os::{
-        fd::{AsRawFd, FromRawFd, OwnedFd, RawFd},
+        fd::{AsRawFd, FromRawFd, RawFd},
         unix::net::{UnixListener, UnixStream},
     },
     path::{Path, PathBuf},
     process::{Child, Command as StdCommand, Stdio as StdStdio},
     sync::Arc,
     thread,
-    time::Duration,
 };
 
 use bincode::Options;
@@ -211,8 +210,7 @@ pub enum ErrorKindDef {
 pub fn detect_privileged() {
     // The privileged process wil set `LADYBUG_PRIVILEGED`
     if std::env::var_os(ENV_VAR).is_some() {
-        println!("Privileged");
-        other_side::run();
+        other_side::main();
         std::process::exit(0);
     }
 }
@@ -225,28 +223,38 @@ mod other_side {
             fd::{AsRawFd, RawFd},
             unix::net::UnixStream,
         },
-        process::{Child, Command, Stdio},
+        process::{Child, Command},
     };
 
     use bincode::Options;
+    use color_eyre::eyre::{eyre, WrapErr};
     use sendfd::SendWithFd;
     use serde::{Deserialize, Serialize};
 
-    use super::{set_sock_timeout, IoError, Message, Reply, StdioVal};
+    use super::{IoError, Message, Reply};
 
     /// Entrypoint for the privileged process
-    pub fn run() {
+    pub fn main() {
+        match run() {
+            Ok(_) => (),
+            Err(err) => {
+                eprintln!("Server error:{err:?}");
+                std::process::exit(1);
+            }
+        }
+    }
+
+    pub fn run() -> color_eyre::Result<()> {
+        println!("Server");
         let mut server = Server::new();
         loop {
-            let _ = match server.recv_message() {
+            match server.recv_message() {
                 Ok(msg) => server.handle_msg(msg),
                 Err(err) => match *err {
-                    bincode::ErrorKind::Io(err) => Err(err),
-                    // This would be a bug so we don't bother returning the error in a nice way
-                    other => panic!("Malformed message: {other}"),
+                    bincode::ErrorKind::Io(err) => server.emit_err(err),
+                    other => Err(eyre!(other)).wrap_err("Malformed message"),
                 },
-            }
-            .map_err(|err| server.emit_err(err));
+            }?
         }
     }
 
@@ -270,9 +278,7 @@ mod other_side {
             }
         }
 
-        fn handle_msg(&mut self, msg: Message) -> std::io::Result<()> {
-            // let mut lock = std::io::stderr().lock();
-            // writeln!(&mut lock, "{:?}", &msg).unwrap();
+        fn handle_msg(&mut self, msg: Message) -> color_eyre::Result<()> {
             match msg {
                 Message::Spawn {
                     cmd,
@@ -291,12 +297,16 @@ mod other_side {
                         cmd.current_dir(dir);
                     }
 
-                    cmd.stdin::<Stdio>(stdin.into());
-                    cmd.stdout::<Stdio>(stdout.into());
-                    cmd.stderr::<Stdio>(stderr.into());
+                    cmd.stdin(stdin);
+                    cmd.stdout(stdout);
+                    cmd.stderr(stderr);
 
-                    let mut proc = cmd.spawn()?;
+                    let mut proc = cmd.spawn().wrap_err("Failed to spawn requested process")?;
                     let id = ProcId(self.id_gen.next().unwrap());
+
+                    let stdin = proc.stdin.is_some();
+                    let stdout = proc.stdout.is_some();
+                    let stderr = proc.stderr.is_some();
 
                     let fds = [
                         proc.stdin.as_ref().map(AsRawFd::as_raw_fd),
@@ -307,18 +317,14 @@ mod other_side {
                     .flat_map(std::convert::identity)
                     .collect::<Vec<_>>();
 
-                    // // Send over the fds
-                    // self.stream.send_with_fd(&[], dbg!(&fds))?;
-
                     // Send data
                     let reply = Reply::OkSpawn {
-                        stdin: stdin != StdioVal::Null,
-                        stdout: stdout != StdioVal::Null,
-                        stderr: stderr != StdioVal::Null,
+                        stdin,
+                        stdout,
+                        stderr,
                         id: ProcId(id.0),
                     };
-                    // writeln!(&mut lock, "{:?}", &reply).unwrap();
-                    self.send(&reply, &fds);
+                    self.send(&reply, &fds)?;
 
                     // Close our side of the file descriptors
                     proc.stdin.take();
@@ -329,26 +335,34 @@ mod other_side {
                     Ok(())
                 }
                 Message::Kill { id } => {
-                    let mut proc = self.procs.remove(&id).expect("This process doesn't exist");
-                    proc.kill()?;
-                    self.send(&Reply::Killed, &[]);
+                    let mut proc = self.remove_proc(id)?;
+                    proc.kill().wrap_err("Failed to kill requested process")?;
+                    self.send(&Reply::Killed, &[])?;
                     Ok(())
                 }
                 Message::Wait { id } => {
-                    let mut proc = self.procs.remove(&id).expect("This process doesn't exist");
-                    let status = proc.wait()?;
-                    self.send(&Reply::ExitStatus(status.into()), &[]);
+                    let mut proc = self.remove_proc(id)?;
+                    let status = proc
+                        .wait()
+                        .wrap_err("Failed to wait on requested process")?;
+                    self.send(&Reply::ExitStatus(status.into()), &[])?;
                     Ok(())
                 }
             }
         }
 
-        fn emit_err(&self, err: std::io::Error) {
+        fn remove_proc(&mut self, id: ProcId) -> color_eyre::Result<Child> {
+            self.procs
+                .remove(&id)
+                .ok_or(eyre!("Tried to remove non-existent process"))
+        }
+
+        fn emit_err(&mut self, err: std::io::Error) -> color_eyre::Result<()> {
             self.send(&Reply::Err(IoError(err)), &[])
         }
 
-        fn send(&self, value: &Reply, fds: &[RawFd]) {
-            let err = match bincode::DefaultOptions::new()
+        fn send(&mut self, value: &Reply, fds: &[RawFd]) -> color_eyre::Result<()> {
+            bincode::DefaultOptions::new()
                 .serialize(value)
                 .and_then(|buf| {
                     let mut bytes = 0;
@@ -361,24 +375,17 @@ mod other_side {
                         }
                     }
                 })
-                .map_err(|e| *e)
-            {
-                Err(bincode::ErrorKind::Io(err)) => {
-                    match bincode::serialize_into(&self.stream, &Reply::Err(IoError(err))) {
-                        Ok(_) => return,
-                        Err(err) => *err,
+                .or_else(|err| match *err {
+                    bincode::ErrorKind::Io(err) => {
+                        bincode::serialize_into(&self.stream, &Reply::Err(IoError(err)))
                     }
-                }
-                Err(err) => err,
-                Ok(_) => {
-                    return;
-                }
-            };
-            panic!("Failed to send message: {err}");
+                    _ => Err(err),
+                })
+                .wrap_err("Failed to send message to client")
         }
 
-        fn recv_message(&self) -> bincode::Result<Message> {
-            bincode::DefaultOptions::new().deserialize_from::<_, Message>(&self.stream)
+        fn recv_message(&mut self) -> bincode::Result<Message> {
+            bincode::DefaultOptions::new().deserialize_from::<_, Message>(&mut self.stream)
         }
     }
 }
@@ -613,30 +620,29 @@ struct ClientInner {
 impl ClientInner {
     fn new() -> color_eyre::Result<Self> {
         let mut command = std::process::Command::new("sudo");
-        let mut args = std::env::args();
 
         // Make sure that we create a new socket
         match std::fs::remove_file(SOCKET) {
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => (),
-            Err(err) => return Err(err).wrap_err("Failed to remove old socket at '{SOCKET}'"),
+            Err(err) => {
+                return Err(err).wrap_err(format!("Failed to remove old socket at '{SOCKET}'"))
+            }
             Ok(_) => (),
         }
 
         // TODO: Maybe pass a file descriptor to the server so that the connection can't be hijacked
-        let listener = UnixListener::bind(SOCKET)
-            // .and_then(set_sock_timeout)
-            .wrap_err("Failed to bind socket")?;
+        let listener = UnixListener::bind(SOCKET).wrap_err("Failed to bind socket")?;
 
         let proc = command
         // Ask sudo to preserve some variables that we need
         .arg(format!("--preserve-env=XDG_CACHE_HOME,XDG_CONFIG_HOME,XDG_DATA_DIRS,XDG_CONFIG_DIRS,PATH,USER,HOME,RUST_BACKTRACE,{ENV_VAR}"))
-        .arg(args.next().unwrap()) // Get the path to the executable currently running
+        // .arg("--reset-timestamp")
+        .arg(std::env::current_exe().wrap_err("Failed to get ladybug executable")?) // Get the path to the executable currently running
         .env(ENV_VAR, "true")
-        .stdin(StdStdio::inherit())
-        .stdout(StdStdio::inherit())
-        .stderr(StdStdio::inherit()).spawn().wrap_err("Failed to spawn command")?;
+        .stdin(StdStdio::null())
+        .stdout(StdStdio::piped())
+        .stderr(StdStdio::piped()).spawn().wrap_err("Failed to spawn command")?;
 
-        // The send timeout should apply here as well
         let (stream, addr) = match listener.accept() {
             Ok(ok) => ok,
             Err(err) => return match check_health(proc)
@@ -650,6 +656,7 @@ impl ClientInner {
             }
             .wrap_err("Failed to connect to peer"),
         };
+
         tracing::info!("Connected to peer at {addr:?}");
 
         Ok(Self {
@@ -718,7 +725,6 @@ impl Transceiver {
     }
 
     fn next_fd(&mut self) -> std::io::Result<RawFd> {
-        println!("Reading next fd");
         loop {
             if self.nfd == 0 {
                 let (bytes, nfd) = self
@@ -726,14 +732,12 @@ impl Transceiver {
                     .recv_with_fd(&mut self.buf[self.bytes..], &mut self.fds)?;
                 self.bytes += bytes;
                 self.nfd += nfd;
-                println!("Read {bytes} bytes and {nfd} fds");
                 continue;
             }
 
             let fd = self.fds[0];
-            self.buf.copy_within(1..self.nfd, 0);
+            self.fds.copy_within(1..self.nfd, 0);
             self.nfd -= 1;
-            println!("Wrote fd");
             return Ok(fd);
         }
     }
@@ -741,17 +745,14 @@ impl Transceiver {
 
 impl Read for Transceiver {
     fn read(&mut self, mut buf: &mut [u8]) -> std::io::Result<usize> {
-        println!("Reading bytes");
         if self.bytes > 0 {
             let bytes = buf.write(&self.buf[..self.bytes])?;
             self.buf.copy_within(bytes..self.bytes, 0);
             self.bytes -= bytes;
-            println!("Wrote {bytes} bytes from cache");
             return Ok(bytes);
         }
 
         let (bytes, nfd) = self.stream.recv_with_fd(buf, &mut self.fds[self.nfd..])?;
-        println!("Read {bytes} bytes and {nfd} fds: {:x?}", &buf[..bytes]);
         self.nfd += nfd;
         Ok(bytes)
     }
@@ -784,19 +785,6 @@ fn check_health(mut proc: Child) -> color_eyre::Result<Child> {
     } else {
         Ok(proc)
     }
-}
-
-fn set_sock_timeout<T>(t: T) -> std::io::Result<T>
-where
-    T: From<OwnedFd>,
-    OwnedFd: From<T>,
-{
-    let stream = UnixStream::from(OwnedFd::from(t));
-    let timeout = Duration::from_secs(1);
-    stream.set_read_timeout(Some(timeout))?;
-    stream.set_write_timeout(Some(timeout))?;
-    let t = T::from(<OwnedFd as From<UnixStream>>::from(stream));
-    Ok(t)
 }
 
 pub type SuperCtx = Client;
@@ -1330,5 +1318,30 @@ impl ExitStatus {
 impl From<std::process::ExitStatus> for ExitStatus {
     fn from(value: std::process::ExitStatus) -> Self {
         Self { code: value.code() }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::Read;
+
+    use super::{detect_privileged, Client, Command, Stdio};
+
+    #[test]
+    fn test_fd() -> color_eyre::Result<()> {
+        detect_privileged();
+
+        let mut client = Client::new();
+        let mut cmd = Command::new("echo");
+        cmd.stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .stdin(Stdio::piped());
+        cmd.arg("hey it's me");
+        let mut child = client.spawn(&mut cmd)?;
+        let mut buf = String::new();
+        let mut stdout = child.stdout.take().unwrap();
+        stdout.read_to_string(&mut buf)?;
+        assert_eq!(&buf, "hey it's me");
+        Ok(())
     }
 }

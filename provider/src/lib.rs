@@ -309,7 +309,7 @@ impl Runtime {
                 .expect("Unitialized provider")
                 .expect("Provider not available");
 
-            provider.remove(packages, &mut ctx);
+            provider.install(packages, &mut ctx);
         }
         ctx.into()
     }

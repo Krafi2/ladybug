@@ -40,7 +40,7 @@ impl Connection {
     /// Mark a package as removed
     pub fn installed(&mut self, package: &Package) -> Result<PackageId, Error> {
         self.conn.execute(
-            "INSERT INTO packages (name, metadata, provider_id, topic_id) VALUES (?1, ?2, ?3, ?4)",
+            "INSERT OR IGNORE INTO packages (name, metadata, provider_id, topic_id) VALUES (?1, ?2, ?3, ?4)",
             params![
                 &package.name,
                 &package.metadata,
@@ -58,7 +58,7 @@ impl Connection {
             "DELETE FROM packages WHERE name = ?1 AND provider_id = ?2",
             params![&package.name, package.provider.0],
         )?;
-        assert_eq!(rows, 1);
+        assert!(rows <= 1);
         Ok(())
     }
 

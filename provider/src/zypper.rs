@@ -252,7 +252,8 @@ impl Zypper<SuperProc> {
         };
         let pack_string = packages.iter().fold(String::new(), |mut state, package| {
             state.push(' ');
-            // Remove packages by prepending !
+            // Remove packages by prepending '!'. This is neccessary because
+            // otherwise zypper removes reverse dependencies.
             if let Operation::Remove = op {
                 state.push('!');
             }
@@ -359,8 +360,9 @@ impl Zypper<SuperProc> {
                         handle_error = false;
                     }
                 }
-                Ok(Event::Eof) => return Err(eyre!("Unexpected EOF")),
-                Err(quick_xml::Error::Io(err)) => return Err(eyre!(err)).wrap_err("IO error"),
+                Ok(Event::Eof) => {
+                    return Err(eyre!("Unexpected EOF")).wrap_err("Failed to parse xml")
+                }
                 Err(e) => return Err(e).wrap_err("Failed to parse xml"),
                 _ => (),
             }
@@ -404,14 +406,15 @@ impl<T> Zypper<T> {
             match new.read_event() {
                 Ok(Event::Start(tag)) => {
                     if tag.local_name().as_ref() == b"stream" {
-                        break;
+                        break Ok(());
                     }
                 }
-                Err(quick_xml::Error::Io(err)) => return Err(eyre!(err)).wrap_err("IO error"),
-                Err(e) => return Err(e).wrap_err("Failed to parse xml"),
+                Ok(Event::Eof) => break Err(eyre!("Unexpected end of file")),
+                Err(e) => break Err(e).wrap_err("Failed to parse xml"),
                 _ => (),
             }
         }
+        .wrap_err("Failed to initialize zypper subprocess")?;
 
         Ok(new)
     }
@@ -462,8 +465,9 @@ impl<T> Zypper<T> {
                         found = Some(false);
                     }
                 }
-                Ok(Event::Eof) => return Err(eyre!("Unexpected EOF")),
-                Err(quick_xml::Error::Io(err)) => return Err(eyre!(err)).wrap_err("IO error"),
+                Ok(Event::Eof) => {
+                    return Err(eyre!("Unexpected EOF")).wrap_err("Failed to parse xml")
+                }
                 Err(e) => return Err(e).wrap_err("Failed to parse xml"),
                 _ => (),
             }

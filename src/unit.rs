@@ -73,6 +73,8 @@ impl Routine {
             .unwrap_or(dir);
 
         let mut command = shell.new_command(&self.code);
+
+        // TODO: Maybe read from the pipes so that the buffers don't fill up
         command
             .current_dir(dir)
             .stdin(Stdio::null())

@@ -72,11 +72,11 @@ impl Provider for FsProvider {
         let dir = ctx.runtime().dir();
         let source = match source {
             // Attempt to create the specified source
-            Some(source) => Source::from_path(dir, source)
+            Some(source) => SourceDir::from_path(dir, source)
                 .map_err(|err| ctx.emit(err))
                 .ok(),
             // Default to the unit directory if no source was provided
-            None => Some(Source(dir.clone())),
+            None => Some(SourceDir(dir.clone())),
         };
 
         let mut finished = Vec::new();
@@ -171,7 +171,7 @@ impl Provider for FsProvider {
 
 fn new_package(
     package: crate::RawPackage,
-    source: &Option<Source>,
+    source: &Option<SourceDir>,
     target: &Option<RelPath>,
     method: Method,
     conflicts: Conflict,
@@ -188,7 +188,7 @@ fn new_package(
     match (path, args, target) {
         (Some(path), Some(args), Some(target)) if !args.is_degraded() => {
             let metadata = bincode::serialize(&Metadata {
-                source: path.clone(),
+                source: path.absolute().to_owned(),
                 target: target.absolute().join(&package.name.inner),
                 method,
                 conflicts,
@@ -250,24 +250,25 @@ report! {
     }
 }
 
-#[derive(Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 enum Method {
     SoftLink,
     HardLink,
     Copy,
 }
 
-#[derive(Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 enum Conflict {
     Abort,
     Rename,
     Remove,
 }
 
+/// Source directory
 #[derive(Debug)]
-struct Source(RelPath);
+struct SourceDir(RelPath);
 
-impl Source {
+impl SourceDir {
     fn new(rel_path: Spanned<RelPath>) -> Result<Self, Error> {
         if rel_path.is_dir() {
             Ok(Self(rel_path.inner))
@@ -282,10 +283,8 @@ impl Source {
             .and_then(Self::new)
     }
 
-    fn check_exists(&self, path: Spanned<PathBuf>) -> Result<Spanned<PathBuf>, Error> {
-        join_path(&self.0, path.clone())
-            .and_then(check_exists)
-            .map(|_| path)
+    fn check_exists(&self, path: Spanned<PathBuf>) -> Result<Spanned<RelPath>, Error> {
+        join_path(&self.0, path.clone()).and_then(check_exists)
     }
 }
 
@@ -305,7 +304,7 @@ fn check_exists(path: Spanned<RelPath>) -> Result<Spanned<RelPath>, Error> {
     }
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 struct Metadata {
     source: PathBuf,
     target: PathBuf,
@@ -353,10 +352,16 @@ fn free_file(path: &Path, conflict: Conflict) -> color_eyre::Result<()> {
 }
 
 /// Try to check if two paths point to the same file, resolving symlinks if neccessary.
-fn path_eq(path1: &Path, path2: &Path) -> Option<bool> {
-    let path1 = path1.canonicalize().ok()?;
-    let path2 = path2.canonicalize().ok()?;
-    Some(path1 == path2)
+fn path_eq(path1: &Path, path2: &Path) -> std::io::Result<bool> {
+    match path1.canonicalize() {
+        Ok(path1) => match path2.canonicalize() {
+            Ok(path2) => Ok(path1 == path2),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(err) => Err(err),
+        },
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(err) => Err(err),
+    }
 }
 
 /// Deploy `source` at `dest`. If `dest` is occupied, try to free
@@ -369,36 +374,44 @@ fn deploy_file(
 ) -> color_eyre::Result<()> {
     match method {
         Method::SoftLink | Method::HardLink => {
-            // Create a symlink only if it isn't already present
-            if !path_eq(source, dest).unwrap_or(false) {
+            // Skip if the symlink already exists
+            if path_eq(source, dest).unwrap_or(false) {
+                return Ok(());
+            }
+
+            match std::fs::symlink_metadata(dest) {
                 // Try to free the file if it exists
-                if dest.exists() {
+                Ok(_) => {
                     free_file(dest, conflict)
                         .wrap_err_with(|| format!("Failed to free file: '{}'", dest.display()))?;
-                // The parent directories may not exist
-                } else {
-                    let dir = dest.parent().expect("Path too short");
-                    std::fs::create_dir_all(dir).wrap_err("Failed to create parent directories")?;
                 }
-
-                match method {
-                    Method::SoftLink => imp::symlink_file(source, dest).wrap_err_with(|| {
-                        format!(
-                            "Failed to create symlink: '{}' -> '{}'",
-                            source.display(),
-                            dest.display(),
-                        )
-                    }),
-                    Method::HardLink => std::fs::hard_link(source, dest).wrap_err_with(|| {
-                        format!(
-                            "Failed to create hardlink: '{}' -> '{}'",
-                            source.display(),
-                            dest.display(),
-                        )
-                    }),
-                    Method::Copy => unreachable!(),
-                }?;
+                // The parent directories may not exist
+                Err(_) => {
+                    if let Some(dir) = dest.parent() {
+                        std::fs::create_dir_all(dir)
+                            .wrap_err("Failed to create parent directories")?;
+                    }
+                }
             }
+
+            match method {
+                Method::SoftLink => imp::symlink_file(source, dest).wrap_err_with(|| {
+                    format!(
+                        "Failed to create symlink: '{}' -> '{}'",
+                        source.display(),
+                        dest.display(),
+                    )
+                }),
+                Method::HardLink => std::fs::hard_link(source, dest).wrap_err_with(|| {
+                    format!(
+                        "Failed to create hardlink: '{}' -> '{}'",
+                        source.display(),
+                        dest.display(),
+                    )
+                }),
+                Method::Copy => unreachable!(),
+            }?;
+
             Ok(())
         }
         Method::Copy => {

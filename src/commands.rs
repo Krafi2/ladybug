@@ -2,14 +2,19 @@ mod capture;
 mod deploy;
 mod remove;
 
-use std::{collections::HashMap, rc::Rc, time::Duration};
+use std::{
+    cell::Cell,
+    collections::{HashMap, HashSet},
+    rc::Rc,
+    time::Duration,
+};
 
 use clap::Subcommand;
 use color_eyre::{
     eyre::WrapErr,
     owo_colors::{OwoColorize, Style},
 };
-use data::Topic;
+use data::{PackageId, Topic};
 use eval::IntoReport;
 use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
 use interpreter::UnitPath;
@@ -294,6 +299,121 @@ fn remove_unit(module: &mut Module, pb: &ProgressBar, ctx: &mut Context) -> OpRe
     res
 }
 
+fn clean_deployed(
+    deployed: Vec<PackageId>,
+    topics: Option<HashSet<Topic>>,
+    ctx: &mut Context,
+) -> usize {
+    let mut errn = 0;
+    let cached = topics
+        .as_ref()
+        .map(|topics| {
+            topics
+                .iter()
+                .filter_map(|topic| {
+                    ctx.database()
+                        .get_topic(topic.id())
+                        .map_err(|err| {
+                            tracing::error!(
+                                "Failed to get packages belonging to topic '{topic}': {err:#}"
+                            );
+                            errn += 1;
+                        })
+                        .ok()
+                })
+                .flatten()
+                .collect()
+        })
+        .unwrap_or_else(|| {
+            ctx.database()
+                .get_all()
+                .map_err(|err| {
+                    tracing::error!("Failed to get packages: {err:#}");
+                    errn += 1;
+                })
+                .unwrap_or_default()
+        });
+
+    let queue = generate_clean_queue(deployed, cached);
+
+    let i = Cell::new(1);
+    let len = queue.len();
+    let style =
+        ProgressStyle::with_template("{prefix:.bright.black} Cleaning up packages: {wide_msg}}")
+            .unwrap();
+    let pb = ProgressBar::with_draw_target(None, ProgressDrawTarget::stdout());
+    pb.set_style(style);
+    pb.set_message("Starting removal");
+    // TODO: `i` can be greater than len if a package sets multiple messages
+    let set_msg = Rc::new(|msg| {
+        pb.set_message(msg);
+        let val = i.take();
+        pb.set_prefix(format!("[{val}/{len}]",));
+        i.replace(val + 1);
+    });
+    // TODO: remove some of this contect from RuntimeCtx
+    let run_ctx = RuntimeCtx::new(
+        set_msg,
+        // TODO: remove
+        ctx.dotfile_dir().clone(),
+        // TODO: remove
+        None,
+        ctx.home_dir().map(ToOwned::to_owned),
+        ctx.dotfile_dir().clone(),
+        false,
+    );
+    let res = ctx.interpreter().remove(queue, &run_ctx);
+    for package in res.completed {
+        if let Err(err) = ctx.database().removed(&package) {
+            tracing::error!("Failed to update package database: {err:#}");
+        }
+    }
+
+    errn
+}
+
+fn generate_clean_queue(
+    mut deployed: Vec<data::PackageId>,
+    mut cached: Vec<(data::PackageId, data::Package)>,
+) -> Vec<data::Package> {
+    deployed.sort_unstable();
+    cached.sort_unstable_by_key(|(id, _pacakage)| *id);
+
+    let mut cached = cached.drain(..);
+    let mut deployed = deployed.drain(..);
+    let mut deployed_cur = deployed.next();
+    let mut cached_cur = cached.next();
+    let mut queue = Vec::new();
+
+    // Find elements that are in `cached` but not `deployed`
+    loop {
+        match (cached_cur.take(), deployed_cur.take()) {
+            (Some((_, package)), None) => {
+                queue.push(package);
+                cached_cur = cached.next();
+            }
+            (Some((cached_id, package)), Some(deployed_id)) => {
+                // Ids match, continue
+                if cached_id == deployed_id {
+                    cached_cur = cached.next();
+                    deployed_cur = deployed.next();
+                // The cached id is not deployed
+                } else if deployed_id > cached_id {
+                    queue.push(package);
+                    cached_cur = cached.next();
+                    deployed_cur = Some(deployed_id);
+                // The deployed id is not cached
+                } else {
+                    cached_cur = Some((cached_id, package));
+                    deployed_cur = deployed.next();
+                }
+            }
+            _ => break,
+        }
+    }
+    queue
+}
+
 fn pb_style(path: &UnitPath) -> ProgressStyle {
     ProgressStyle::with_template(&format!("{{prefix:.bright.black}} {}: {{wide_msg}}", path))
         .unwrap()
@@ -358,4 +478,18 @@ fn print_module_status(root: UnitId, modules: &HashMap<UnitId, Module>) {
             }
         }
     }
+}
+
+fn register_topics(topics: &[String], ctx: &mut Context) -> (HashSet<Topic>, usize) {
+    let mut errn = 0;
+    let topics = HashSet::from_iter(topics.iter().filter_map(|topic| {
+        ctx.database()
+            .new_topic(topic.clone())
+            .map_err(|err| {
+                eprintln!("Failed to register topic '{topic}': {err:#}");
+                errn += 1;
+            })
+            .ok()
+    }));
+    (topics, errn)
 }
