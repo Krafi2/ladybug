@@ -54,41 +54,9 @@ impl Context {
         let home_dir = home_dir();
         let interpreter = Interpreter::new();
 
-        let config = match std::fs::read_to_string(&config_path) {
-            Ok(config_src) => {
-                let (config, errors) = interpreter.eval_config(&config_src, home_dir.clone());
-
-                let errn = errors.len();
-                for err in errors {
-                    let filename = config_path.to_string();
-                    let report = err.into_report(&filename);
-                    let res = report
-                        .eprint::<(&str, ariadne::Source)>((
-                            &filename,
-                            ariadne::Source::from(&config_src),
-                        ))
-                        .wrap_err("Failed to print message");
-                    tracing::warn!("{res:?}");
-                }
-
-                if errn == 1 {
-                    bail!("Failed to load config due to previous error");
-                } else if errn > 1 {
-                    bail!("Failed to load config due to {errn} previous errors")
-                }
-
-                config
-            }
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-                println!("Config not found at '{config_path}', using default");
-                Config {
-                    dotfiles: None,
-                    shell: None,
-                }
-            }
-            Err(err) => {
-                return Err(err).wrap_err(format!("Failed to read config at '{config_path}'"));
-            }
+        let config = match read_config(config_path, &interpreter, &home_dir) {
+            Ok(config) => config,
+            Err(err) => return Err(err),
         };
 
         let dotfiles = dotfiles
@@ -137,6 +105,47 @@ impl Context {
 
     pub fn database_interpreter(&mut self) -> (&mut Connection, &mut Interpreter) {
         (&mut self.database, &mut self.interpreter)
+    }
+}
+
+fn read_config(
+    config_path: RelPath,
+    interpreter: &Interpreter,
+    home_dir: &std::result::Result<PathBuf, HomeError>,
+) -> Result<Config> {
+    match std::fs::read_to_string(&config_path) {
+        Ok(config_src) => {
+            let (config, errors) = interpreter.eval_config(&config_src, home_dir.clone());
+
+            let errn = errors.len();
+            for err in errors {
+                let filename = config_path.to_string();
+                let report = err.into_report(&filename);
+                let res = report
+                    .eprint::<(&str, ariadne::Source)>((
+                        &filename,
+                        ariadne::Source::from(&config_src),
+                    ))
+                    .wrap_err("Failed to print message");
+                tracing::warn!("{res:?}");
+            }
+
+            if errn == 1 {
+                bail!("Failed to load config due to previous error");
+            } else if errn > 1 {
+                bail!("Failed to load config due to {errn} previous errors")
+            }
+
+            Ok(config)
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            println!("Config not found at '{config_path}', using default");
+            Ok(Config {
+                dotfiles: None,
+                shell: None,
+            })
+        }
+        Err(err) => Err(err).wrap_err(format!("Failed to read config at '{config_path}'")),
     }
 }
 
