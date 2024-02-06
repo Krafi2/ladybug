@@ -1,5 +1,6 @@
 use std::{
     io::{BufRead, BufReader},
+    process::{Command, Stdio},
     rc::Rc,
 };
 
@@ -15,10 +16,7 @@ use parser::Span;
 use serde::{Deserialize, Serialize};
 use tracing::debug;
 
-use crate::{
-    privileged::{self, Command, Stdio},
-    OpCtx, OpError, ParseCtx, ParseError, ProviderId, RawPackages,
-};
+use crate::{OpCtx, OpError, ParseCtx, ParseError, ProviderId, RawPackages};
 
 use super::{Provider, ProviderError};
 
@@ -210,16 +208,21 @@ fn do_op(operation: Operation, user: bool, packages: Vec<Package>, ctx: &mut OpC
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
-    let mut proc = match privileged::Process::spawn(&mut cmd, user, ctx.sup())
-        .wrap_err("Failed to run flatpak")
-    {
+    let proc = match user {
+        true => cmd.spawn(),
+        false => ctx.sup.spawn(&cmd),
+    }
+    .wrap_err("Failed to run flatpak");
+
+    let mut proc = match proc {
         Ok(proc) => proc,
         Err(err) => {
             ctx.emit(err);
             return;
         }
     };
-    let mut stdout = BufReader::new(proc.take_stdout().unwrap());
+
+    let mut stdout = BufReader::new(proc.stdout.take().unwrap());
     let mut buf = String::new();
     let mut degraded = false;
 
@@ -255,12 +258,12 @@ fn do_op(operation: Operation, user: bool, packages: Vec<Package>, ctx: &mut OpC
         }
     }
 
-    proc.put_stdout(stdout.into_inner());
-    let _ = ctx
-        .sup()
-        .wait_with_output(proc)
+    proc.stdout = Some(stdout.into_inner());
+
+    let _ = proc
+        .wait_with_output()
         .wrap_err("Failed to run flatpak")
-        .and_then(|output| output.into_result().map_err(|err| err.into_report()))
+        .and_then(|output| common::command::check_output(output).map_err(|err| err.into_report()))
         .map_err(|err| {
             degraded = true;
             ctx.emit(OpError::Other(err))
@@ -293,7 +296,7 @@ fn exists(name: &str, user: bool) -> color_eyre::Result<PackageStatus> {
         cmd.arg("--user");
     };
 
-    match command::run_command(&mut cmd.into_std_cmd()) {
+    match command::run_command(&mut cmd) {
         Ok(output) => {
             let stdout = String::from_utf8_lossy(&output.stdout);
             let mut lines = stdout.lines();

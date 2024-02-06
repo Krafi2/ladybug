@@ -76,9 +76,6 @@ fn run() -> Result<Result<(), ()>, Error> {
     install_eyre()?;
     install_tracing()?;
 
-    // Detect if the proccess should switch to a privileged entrypoint
-    provider::detect_privileged();
-
     info!("Application started");
 
     let opts = Opts::try_parse()?;

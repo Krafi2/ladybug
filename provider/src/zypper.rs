@@ -1,7 +1,7 @@
 use std::{
     collections::HashMap,
     io::{BufReader, Write},
-    process::Child,
+    process::{Child, ChildStdin, ChildStdout, Command, Stdio},
     time::Duration,
 };
 
@@ -17,10 +17,7 @@ use timeout_readwrite::TimeoutReader;
 use tracing::debug;
 
 use super::{Provider, ProviderError, RawPackages};
-use crate::{
-    privileged::{Command, Stdin, Stdio, Stdout, SuperCtx, SuperProc},
-    OpCtx, OpError, ParseCtx, ParseError, ProviderId,
-};
+use crate::{privileged::SuperCtx, OpCtx, OpError, ParseCtx, ParseError, ProviderId};
 
 pub(crate) fn new_provider() -> Result<impl crate::Provider, crate::ProviderError> {
     ZypperProvider::new()
@@ -49,17 +46,16 @@ report! {
 
 /// The zypper provider spawns a persistent zypper process using `zypper shell` and uses stdio to
 /// communicate commands.
-pub enum ZypperProvider {
-    Super(Zypper<SuperProc>),
-    User(Zypper<Child>),
+pub struct ZypperProvider {
+    zypper: Zypper,
 }
 
 impl ZypperProvider {
     fn new() -> Result<Self, ProviderError> {
-        Zypper::new_user()
-            .map(Self::User)
+        let zypper = Zypper::new_user()
             .wrap_err("Failed to spawn zypper process")
-            .map_err(|err| ProviderError::Unavailable(std::rc::Rc::new(err)))
+            .map_err(|err| ProviderError::Unavailable(std::rc::Rc::new(err)))?;
+        Ok(Self { zypper })
     }
 }
 
@@ -99,10 +95,7 @@ impl Provider for ZypperProvider {
                     continue;
                 }
 
-                let exists = match self {
-                    ZypperProvider::User(zypper) => zypper.exists(&package.name.inner),
-                    ZypperProvider::Super(zypper) => zypper.exists(&package.name.inner),
-                };
+                let exists = self.zypper.exists(&package.name.inner);
 
                 match exists {
                     // The package may exist
@@ -160,22 +153,22 @@ impl Provider for ZypperProvider {
 
 impl ZypperProvider {
     /// Get a privileged super instance
-    fn get_super(&mut self, ctx: &mut SuperCtx) -> color_eyre::Result<&mut Zypper<SuperProc>> {
-        match self {
-            // If we have a normal process, kill it and launch a privileged instance
-            ZypperProvider::User(Zypper { zypper, .. }) => {
-                // Zypper claims to exit gracefully when killed
-                zypper.kill().wrap_err("Old process already exited")?;
-                // Update the process
-                *self = Self::Super(Zypper::new_super(ctx)?);
-            }
-            _ => (),
+    fn get_super(&mut self, ctx: &mut SuperCtx) -> color_eyre::Result<&mut Zypper> {
+        // If we have a normal process, kill it and launch a privileged instance
+        if !self.zypper.privileged {
+            // Zypper claims to exit gracefully when killed
+            self.zypper
+                .proc
+                .kill()
+                .wrap_err("Old process already exited")?;
+            // Update the process
+            self.zypper = Zypper::new_super(ctx)?;
         }
-        // We should be running a super now
-        match self {
-            ZypperProvider::Super(zypper) => Ok(zypper),
-            ZypperProvider::User(_) => unreachable!(),
-        }
+
+        // We should be running a privileged proccess now
+        assert!(self.zypper.privileged);
+
+        Ok(&mut self.zypper)
     }
 }
 
@@ -185,33 +178,60 @@ enum Operation {
     Remove,
 }
 
-pub struct Zypper<T> {
-    zypper: T,
-    stdin: Stdin,
-    reader: XmlReader<BufReader<TimeoutReader<Stdout>>>,
+pub struct Zypper {
+    proc: Child,
+    stdin: ChildStdin,
+    reader: XmlReader<BufReader<TimeoutReader<ChildStdout>>>,
     buf: Vec<u8>,
+    privileged: bool,
 }
 
-impl Zypper<Child> {
+impl Zypper {
     fn new_user() -> color_eyre::Result<Self> {
-        let mut child = Self::zypper_cmd()
-            .into_std_cmd()
+        let child = Self::zypper_cmd()
             .spawn()
             .wrap_err("Failed to spawn zypper process")?;
-        let stdin = child.stdin.take().unwrap().into();
-        let stdout = child.stdout.take().unwrap().into();
-        Self::new(child, stdin, stdout)
+        Self::new(child, false)
     }
-}
 
-impl Zypper<SuperProc> {
     fn new_super(ctx: &mut SuperCtx) -> color_eyre::Result<Self> {
-        let mut child = ctx
-            .spawn(&mut Self::zypper_cmd())
+        let child = ctx
+            .spawn(&Self::zypper_cmd())
             .wrap_err("Failed to spawn zypper process")?;
-        let stdin = child.stdin.take().unwrap().into();
-        let stdout = child.stdout.take().unwrap().into();
-        Self::new(child, stdin, stdout)
+        Self::new(child, true)
+    }
+
+    fn new(mut proc: Child, privileged: bool) -> color_eyre::Result<Self> {
+        let mut reader = XmlReader::from_reader(BufReader::new(TimeoutReader::new(
+            proc.stdout.take().unwrap(),
+            Duration::from_secs(8),
+        )));
+        reader.trim_text(true);
+
+        let mut new = Self {
+            stdin: proc.stdin.take().unwrap(),
+            proc,
+            reader,
+            buf: Vec::new(),
+            privileged,
+        };
+
+        // Pop the initialization events
+        loop {
+            match new.read_event() {
+                Ok(Event::Start(tag)) => {
+                    if tag.local_name().as_ref() == b"stream" {
+                        break Ok(());
+                    }
+                }
+                Ok(Event::Eof) => break Err(eyre!("Unexpected end of file")),
+                Err(e) => break Err(e).wrap_err("Failed to parse xml"),
+                _ => (),
+            }
+        }
+        .wrap_err("Failed to initialize zypper subprocess")?;
+
+        Ok(new)
     }
 
     fn zypper_op(&mut self, op: Operation, packages: Vec<Package>, ctx: &mut OpCtx) {
@@ -383,40 +403,6 @@ impl Zypper<SuperProc> {
                 }
             }
         }
-    }
-}
-
-impl<T> Zypper<T> {
-    fn new(proc: T, stdin: Stdin, stdout: Stdout) -> color_eyre::Result<Self> {
-        let mut reader = XmlReader::from_reader(BufReader::new(TimeoutReader::new(
-            stdout,
-            Duration::from_secs(8),
-        )));
-        reader.trim_text(true);
-
-        let mut new = Self {
-            zypper: proc,
-            stdin,
-            reader,
-            buf: Vec::new(),
-        };
-
-        // Pop the initialization events
-        loop {
-            match new.read_event() {
-                Ok(Event::Start(tag)) => {
-                    if tag.local_name().as_ref() == b"stream" {
-                        break Ok(());
-                    }
-                }
-                Ok(Event::Eof) => break Err(eyre!("Unexpected end of file")),
-                Err(e) => break Err(e).wrap_err("Failed to parse xml"),
-                _ => (),
-            }
-        }
-        .wrap_err("Failed to initialize zypper subprocess")?;
-
-        Ok(new)
     }
 
     fn zypper_cmd() -> Command {
