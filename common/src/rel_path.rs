@@ -14,24 +14,30 @@ impl std::fmt::Display for HomeError {
 impl std::error::Error for HomeError {}
 
 #[derive(Debug)]
-pub struct Error {
-    path: PathBuf,
-    err: HomeError,
+pub enum Error {
+    MissingHome { path: PathBuf, err: HomeError },
+    UnexpectedRelative { path: PathBuf },
 }
 
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "Failed to expand relative path '{}'",
-            self.path.display(),
-        )
+        match self {
+            Error::MissingHome { path, .. } => {
+                write!(f, "Failed to expand relative path '{}'", path.display())
+            }
+            Error::UnexpectedRelative { path } => {
+                write!(f, "Expected an absolute path, not '{}'", path.display())
+            }
+        }
     }
 }
 
 impl std::error::Error for Error {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        Some(&self.err)
+        match self {
+            Error::MissingHome { path: _, err } => Some(err),
+            Error::UnexpectedRelative { .. } => None,
+        }
     }
 }
 
@@ -51,7 +57,7 @@ impl RelPath {
                     absolute: home.as_ref().join(rel),
                     relative: path,
                 }),
-                Err(err) => Err(Error { path, err }),
+                Err(err) => Err(Error::MissingHome { path, err }),
             };
         }
         if let Ok(home) = home {
@@ -62,6 +68,10 @@ impl RelPath {
                 });
             }
         }
+        if path.is_relative() {
+            return Err(Error::UnexpectedRelative { path });
+        }
+
         Ok(RelPath {
             relative: path.clone(),
             absolute: path.clone(),

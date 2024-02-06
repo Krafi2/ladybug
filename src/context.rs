@@ -1,4 +1,7 @@
-use std::path::{Path, PathBuf};
+use std::{
+    env::current_dir,
+    path::{Path, PathBuf},
+};
 
 use color_eyre::eyre::{bail, ContextCompat, Result, WrapErr};
 use common::rel_path::{HomeError, RelPath};
@@ -31,8 +34,8 @@ impl Context {
         let config_path = opts
             .config
             .clone()
-            .ok_or(())
-            .or_else(|_| default_config_path())
+            .map(make_absolute)
+            .unwrap_or_else(default_config_path)
             .and_then(|path| {
                 RelPath::new(path, home_dir()).wrap_err("Failed to expand config path")
             })?;
@@ -41,7 +44,10 @@ impl Context {
             .dotfiles
             .clone()
             .map(|path| {
-                RelPath::new(path, home_dir()).wrap_err("Failed to expand dotfile directory path")
+                make_absolute(path).and_then(|path| {
+                    RelPath::new(path, home_dir())
+                        .wrap_err("Failed to expand dotfile directory path")
+                })
             })
             .transpose()?;
 
@@ -132,6 +138,19 @@ impl Context {
     pub fn database_interpreter(&mut self) -> (&mut Connection, &mut Interpreter) {
         (&mut self.database, &mut self.interpreter)
     }
+}
+
+// Make a relative path absolute by prepending the CWD. Absolute paths remain unchanged.
+fn make_absolute(path: PathBuf) -> Result<PathBuf> {
+    if path.is_absolute() || path.starts_with("~") {
+        return Ok(path);
+    }
+    current_dir()
+        .map(|mut cwd| {
+            cwd.push(&path);
+            cwd
+        })
+        .wrap_err("Current directory doesn't exist or is unreadeable")
 }
 
 pub fn detect_root() -> bool {
