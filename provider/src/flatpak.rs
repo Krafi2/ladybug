@@ -177,10 +177,9 @@ enum Operation {
 fn flatpak_op(operation: Operation, packages: Vec<Package>, ctx: &mut OpCtx) {
     let mut user = Vec::new();
     let mut sup = Vec::new();
-    let mut errors = Vec::new();
     for package in packages.into_iter() {
         match bincode::deserialize::<Metadata>(package.metadata()) {
-            Err(err) => errors.push(OpError::Metadata(err)),
+            Err(err) => ctx.emit(OpError::Metadata(err)),
             Ok(metadata) if metadata.user => user.push(package),
             Ok(_) => sup.push(package),
         }

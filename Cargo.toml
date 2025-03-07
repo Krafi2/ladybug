@@ -1,5 +1,5 @@
 [workspace]
-members = ["parser", "interpreter", "common", "eval", "provider", "data"]
+members = ["parser", "interpreter", "common", "eval", "provider", "data", "pkit_zbus"]
 
 [package]
 name = "ladybug"

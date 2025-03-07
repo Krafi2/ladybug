@@ -1,5 +1,6 @@
 mod files;
 mod flatpak;
+mod packagekit;
 mod privileged;
 mod zypper;
 
@@ -19,10 +20,12 @@ use std::{
 };
 
 #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq)]
+#[repr(i64)]
 enum ProviderId {
-    Files,
-    Flatpak,
-    Zypper,
+    Files = 0,
+    Flatpak = 1,
+    Zypper = 2,
+    PackageKit = 3,
 }
 
 impl ProviderId {
@@ -30,6 +33,7 @@ impl ProviderId {
         match name {
             "flatpak" => Some(ProviderId::Flatpak),
             "zypper" => Some(ProviderId::Zypper),
+            "pkit" => Some(ProviderId::PackageKit),
             _ => None,
         }
     }
@@ -37,12 +41,7 @@ impl ProviderId {
 
 impl From<ProviderId> for data::ProviderId {
     fn from(value: ProviderId) -> Self {
-        let i = match value {
-            ProviderId::Files => 0,
-            ProviderId::Flatpak => 1,
-            ProviderId::Zypper => 2,
-        };
-        data::ProviderId::new(i)
+        data::ProviderId::new(value as i64)
     }
 }
 
@@ -54,6 +53,7 @@ impl TryFrom<data::ProviderId> for ProviderId {
             0 => Ok(ProviderId::Files),
             1 => Ok(ProviderId::Flatpak),
             2 => Ok(ProviderId::Zypper),
+            3 => Ok(ProviderId::PackageKit),
             _ => Err(value),
         }
     }
@@ -65,6 +65,7 @@ impl std::fmt::Display for ProviderId {
             ProviderId::Files => "files",
             ProviderId::Flatpak => "flatpak",
             ProviderId::Zypper => "zypper",
+            ProviderId::PackageKit => "packagekit",
         };
         f.write_str(s)
     }
@@ -137,6 +138,7 @@ impl Factory {
             ProviderId::Files => files::new_provider().map(|p| Box::new(p) as _),
             ProviderId::Flatpak => flatpak::new_provider().map(|p| Box::new(p) as _),
             ProviderId::Zypper => zypper::new_provider().map(|p| Box::new(p) as _),
+            ProviderId::PackageKit => packagekit::new_provider().map(|p| Box::new(p) as _),
         });
 
         provider.as_deref_mut().map_err(|err| err.clone())

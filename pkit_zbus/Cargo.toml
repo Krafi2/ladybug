@@ -1,0 +1,7 @@
+[package]
+name = "pkit_zbus"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+zbus = "5.1.0"
