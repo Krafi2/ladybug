@@ -49,7 +49,7 @@ impl Capture {
             }
         }
 
-        super::print_module_status(root, &modules);
+        super::print_module_status(root, &modules, true);
 
         if errn == 0 {
             Ok(())

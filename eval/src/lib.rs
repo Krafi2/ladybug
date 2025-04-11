@@ -1,5 +1,5 @@
 mod error;
-pub use error::{Error, IntoReport, IntoReportBoxed};
+pub use error::{Error, ErrorKind, IntoReport, IntoReportBoxed};
 
 use ariadne::{Color, Fmt, ReportKind};
 use common::rel_path::RelPath;

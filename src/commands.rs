@@ -77,6 +77,7 @@ impl Command {
         let errn = load_modules(
             &mut loader,
             &mut modules,
+            true, // TODO: Add some way to configure this with a flag
             Rc::new(move |msg| pb_ref.set_message(msg)),
             context,
         );
@@ -88,7 +89,7 @@ impl Command {
             } else if errn > 1 {
                 println!("\nOperation aborted due to previous {errn} errors")
             }
-            print_module_status(root, &modules);
+            print_module_status(root, &modules, true);
             return Err(());
         }
 
@@ -107,6 +108,7 @@ enum Status {
     Reverted,
     Err,
     Skipped,
+    Disabled,
 }
 
 #[derive(Debug)]
@@ -120,6 +122,7 @@ struct Module {
 fn load_modules(
     loader: &mut loader::Loader,
     modules: &mut HashMap<UnitId, Module>,
+    silence_disabled: bool, // Silence errors from disabled units except parsing errors
     set_msg: Rc<dyn Fn(String) + '_>,
     ctx: &mut Context,
 ) -> usize {
@@ -128,9 +131,27 @@ fn load_modules(
 
     while let Some(module) = loader.load(set_msg.clone(), ctx) {
         let (unit, status) = match module.status {
-            loader::Status::Ok(unit) => (Some(unit), Status::Ready),
-            loader::Status::Degraded(_, errors, src) => {
+            loader::Status::Ok(unit) => {
+                let disabled = unit.disabled;
+                (
+                    Some(unit),
+                    if disabled {
+                        Status::Disabled
+                    } else {
+                        Status::Ready
+                    },
+                )
+            }
+            loader::Status::Degraded(figment, errors, src) => {
+                let mut report_err = false;
                 for err in errors {
+                    // Silence more advanced errors if the caller asks us to
+                    if figment.disabled && silence_disabled && err.kind() != eval::ErrorKind::Parse
+                    {
+                        continue;
+                    }
+
+                    report_err = true;
                     errn += 1;
                     let filename = module.path.clone().unit_file().to_string();
                     let report = err.into_report(&filename);
@@ -142,7 +163,11 @@ fn load_modules(
                         tracing::warn!("{:?}", err);
                     }
                 }
-                (None, Status::Err)
+
+                match (figment.disabled, report_err) {
+                    (true, false) => (None, Status::Disabled),
+                    _ => (None, Status::Err),
+                }
             }
             loader::Status::Err(err) => {
                 // Non-root modules should have already reported their errors
@@ -438,7 +463,7 @@ fn no_units_match(topics: &[String]) {
     )
 }
 
-fn print_module_status(root: UnitId, modules: &HashMap<UnitId, Module>) {
+fn print_module_status(root: UnitId, modules: &HashMap<UnitId, Module>, filter_disabled: bool) {
     println!("\nUnit status:");
     let mut stack = vec![(vec![root], 0)];
 
@@ -465,12 +490,26 @@ fn print_module_status(root: UnitId, modules: &HashMap<UnitId, Module>) {
                     Status::Reverted => (Style::new().bright_black(), " (Reverted)"),
                     Status::Err => (Style::new().red(), " (Error)"),
                     Status::Skipped => (Style::new().bright_black(), " (Skipped)"),
+                    Status::Disabled => (Style::new().black(), " (Disabled)"),
                 };
 
                 println!("{}{}", name.style(col), status.style(col));
 
-                if !module.members.is_empty() {
-                    stack.push((module.members.clone(), 0));
+                // Filter out disabled modules
+                let members = module
+                    .members
+                    .iter()
+                    .cloned()
+                    .filter(|memb| {
+                        filter_disabled
+                            && modules
+                                .get(memb)
+                                .is_some_and(|unit| unit.status != Status::Disabled)
+                    })
+                    .collect::<Vec<_>>();
+
+                if !members.is_empty() {
+                    stack.push((members, 0));
                 }
             }
             None => {

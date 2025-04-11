@@ -12,6 +12,7 @@ pub struct Unit {
     pub desc: String,
     pub topic: Option<Topic>,
     pub shell: Option<Shell>,
+    pub disabled: bool,
     pub packages: Vec<Package>,
     pub deploy: Vec<Routine>,
     pub remove: Vec<Routine>,
@@ -33,6 +34,7 @@ impl Unit {
             desc: figment.desc?,
             topic: figment.topic,
             shell: figment.shell.map(Into::into),
+            disabled: figment.disabled,
             packages: figment.packages,
             deploy: deploy?,
             remove: remove?,
@@ -118,6 +120,7 @@ pub mod loader {
     struct Frame {
         env: Env,
         queue: Vec<(UnitId, UnitPath)>,
+        disabled: bool,
     }
 
     pub struct Loader {
@@ -166,6 +169,7 @@ pub mod loader {
             &mut self,
             id: UnitId,
             path: UnitPath,
+            disable: bool,
             env: Env,
             set_msg: Rc<dyn Fn(String) + '_>,
             ctx: &mut Context,
@@ -176,7 +180,7 @@ pub mod loader {
 
             let (status, env, queue) = match src {
                 Ok(src) => {
-                    // TODO: rework all these runtimes into something workable
+                    // TODO: rework all these contexts into something workable
                     let runtime = RuntimeCtx::new(
                         set_msg,
                         path.bind(ctx.dotfile_dir().clone()),
@@ -186,7 +190,11 @@ pub mod loader {
                         false,
                     );
                     let (database, interpreter) = ctx.database_interpreter();
-                    let data = interpreter.eval(&src, path.clone(), env, database, &runtime);
+                    let mut data = interpreter.eval(&src, path.clone(), env, database, &runtime);
+                    if disable {
+                        data.figment.disabled = true;
+                    }
+
                     let status = if data.errors.is_empty() {
                         match Unit::from_figment(data.figment) {
                             Some(unit) => Status::Ok(unit),
@@ -211,7 +219,11 @@ pub mod loader {
             };
 
             let members = queue.iter().map(|&(id, _)| id).collect();
-            self.stack.push(Frame { env, queue });
+            self.stack.push(Frame {
+                env,
+                queue,
+                disabled: disable,
+            });
             Module {
                 id,
                 path,
@@ -230,7 +242,8 @@ pub mod loader {
                     Some(frame) => match frame.queue.pop() {
                         Some((id, path)) => {
                             let env = frame.env.clone();
-                            let module = self.load_module(id, path, env, set_msg, ctx);
+                            let disable = frame.disabled;
+                            let module = self.load_module(id, path, disable, env, set_msg, ctx);
                             break Some(module);
                         }
                         None => {
@@ -243,7 +256,7 @@ pub mod loader {
                         Some(env) => {
                             let id = self.next_id();
                             let path = UnitPath::root();
-                            let module = self.load_module(id, path, env, set_msg, ctx);
+                            let module = self.load_module(id, path, false, env, set_msg, ctx);
                             break Some(module);
                         }
                         // This is the last iteration

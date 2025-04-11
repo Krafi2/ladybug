@@ -112,7 +112,7 @@ impl Deploy {
         };
 
         // Print status of units
-        super::print_module_status(root, &modules);
+        super::print_module_status(root, &modules, true);
 
         if errn == 0 {
             Ok(())
@@ -133,6 +133,7 @@ impl Deploy {
             .filter(|m| m.status == Status::Ready)
             .count();
 
+        let mut processed = 0;
         let mut deployed = Vec::new();
         let mut errn = 0;
         // (children, current, skip)
@@ -144,16 +145,21 @@ impl Deploy {
                     let mut skip = *skip;
                     let module = modules.get_mut(id).unwrap();
 
-                    // Apply recursive skip flag
+                    // Apply skip flag transitively
                     if skip {
                         module.status = Status::Skipped;
+                    }
+
+                    // We are processing only skipped and ready packages
+                    if let Status::Ready | Status::Skipped = module.status {
+                        processed += 1;
                     }
 
                     if module.status == Status::Ready {
                         let style = pb_style(&module.path);
                         let pb = ProgressBar::with_draw_target(None, ProgressDrawTarget::stdout());
                         pb.set_style(style);
-                        pb.set_prefix(format!("[{}/{}]", deployed.len() + 1, queue_len));
+                        pb.set_prefix(format!("[{}/{}]", processed, queue_len));
                         pb.set_message("Starting deployment");
 
                         if self.dry_run {

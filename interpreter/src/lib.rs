@@ -109,6 +109,7 @@ impl Interpreter {
         let mut topic = None;
         let mut shell = None;
         let mut members = None;
+        let mut disabled = false;
 
         let mut packages = Vec::new();
         let mut deploy = Vec::new();
@@ -166,6 +167,10 @@ impl Interpreter {
                         });
                     shell = header.shell;
                     members = header.members;
+
+                    if let Some(dis) = header.disabled {
+                        disabled = dis;
+                    }
                 }
 
                 (Name::Env, Body::Map(body)) => {
@@ -238,6 +243,7 @@ impl Interpreter {
                 desc,
                 topic,
                 shell,
+                disabled,
                 packages,
                 deploy,
                 remove,
@@ -281,6 +287,7 @@ params! {
         topic: Option<Spanned<String>>,
         shell: Option<Command>,
         members: Option<Vec<Spanned<PathBuf>>>,
+        disabled: Option<bool>,
     }
 }
 
@@ -290,6 +297,7 @@ struct UnitHeader {
     topic: Option<Spanned<String>>,
     shell: Option<Command>,
     members: Option<Vec<UnitPath>>,
+    disabled: Option<bool>,
 }
 
 impl UnitHeader {
@@ -299,39 +307,43 @@ impl UnitHeader {
         dotfile_dir: &RelPath,
         ctx: &mut EvalCtx,
     ) -> Partial<UnitHeader> {
-        UnitHeaderFigment::parse_raw_params(body, ctx).map(|(name, desc, topic, shell, members)| {
-            let members = members.flatten().map(|members| {
-                members
-                    .into_iter()
-                    .fold(Partial::complete(None), |members, p| {
-                        if let Some(path) =
-                            UnitPath::from_path(p, ctx, path.clone(), dotfile_dir.clone())
-                        {
-                            path.map(|path| {
-                                members.map_complete(|members: Option<Vec<UnitPath>>| match members
-                                {
-                                    Some(mut members) => {
-                                        members.push(path);
-                                        Some(members)
-                                    }
-                                    None => Some(vec![path]),
+        UnitHeaderFigment::parse_raw_params(body, ctx).map(
+            |(name, desc, topic, shell, members, disabled)| {
+                let members = members.flatten().map(|members| {
+                    members
+                        .into_iter()
+                        .fold(Partial::complete(None), |members, p| {
+                            if let Some(path) =
+                                UnitPath::from_path(p, ctx, path.clone(), dotfile_dir.clone())
+                            {
+                                path.map(|path| {
+                                    members.map_complete(|members: Option<Vec<UnitPath>>| {
+                                        match members {
+                                            Some(mut members) => {
+                                                members.push(path);
+                                                Some(members)
+                                            }
+                                            None => Some(vec![path]),
+                                        }
+                                    })
                                 })
-                            })
-                        } else {
-                            members
-                        }
+                            } else {
+                                members
+                            }
+                        })
+                });
+                members
+                    .unwrap_or_default()
+                    .map_complete(|members| UnitHeader {
+                        name: name.unwrap_or_default(),
+                        desc: desc.unwrap_or_default(),
+                        topic: topic.unwrap_or_default(),
+                        shell: shell.unwrap_or_default(),
+                        members,
+                        disabled: disabled.unwrap_or_default(),
                     })
-            });
-            members
-                .unwrap_or_default()
-                .map_complete(|members| UnitHeader {
-                    name: name.unwrap_or_default(),
-                    desc: desc.unwrap_or_default(),
-                    topic: topic.unwrap_or_default(),
-                    shell: shell.unwrap_or_default(),
-                    members,
-                })
-        })
+            },
+        )
     }
 }
 
@@ -349,6 +361,7 @@ pub struct UnitFigment {
     pub desc: Option<String>,
     pub topic: Option<Topic>,
     pub shell: Option<Command>,
+    pub disabled: bool,
 
     pub packages: Vec<Package>,
     pub deploy: Vec<RoutineFigment>,

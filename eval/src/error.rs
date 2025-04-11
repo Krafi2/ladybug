@@ -2,6 +2,15 @@ use parser::span::AriadneSpan;
 
 use super::Spanned;
 
+#[derive(Debug, PartialEq, Eq)]
+pub enum ErrorKind {
+    Value,
+    Parse,
+    Convert,
+    Param,
+    Other,
+}
+
 enum Inner {
     Value(Spanned<crate::ValueError>),
     Parse(parser::Error),
@@ -54,6 +63,18 @@ pub struct Error(Inner);
 impl<T: Into<Inner>> From<T> for Error {
     fn from(err: T) -> Self {
         Error(err.into())
+    }
+}
+
+impl Error {
+    pub fn kind(&self) -> ErrorKind {
+        match &self.0 {
+            Inner::Value(_) => ErrorKind::Value,
+            Inner::Parse(_) => ErrorKind::Parse,
+            Inner::Convert(_) => ErrorKind::Convert,
+            Inner::Param(_) => ErrorKind::Param,
+            Inner::Other(_) => ErrorKind::Other,
+        }
     }
 }
 
