@@ -360,9 +360,15 @@ impl Provider for PackageKit {
 
         for (pkg, _status) in resolved {
             match pkg_data.get_mut(&pkg.name) {
-                Some((_span, count, id)) => {
-                    *count += 1;
-                    id.replace(pkg);
+                Some((_span, count, prev_pkg)) => {
+                    if let Some(prev_pkg) = prev_pkg {
+                        if prev_pkg.name != pkg.name {
+                            *count += 1;
+                        }
+                    } else {
+                        *prev_pkg = Some(pkg);
+                        *count = 1;
+                    }
                 }
                 None => {
                     tracing::warn!("Packagekit returned an unregistered package: Ignoring")
