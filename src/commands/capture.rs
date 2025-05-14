@@ -119,7 +119,10 @@ fn capture_unit(module: &mut Module, pb: &ProgressBar, ctx: &Context) -> color_e
 fn filter_modules(topics: Option<HashSet<&str>>, modules: &mut HashMap<UnitId, Module>) {
     for module in modules.values_mut() {
         let unit = &module.unit.as_ref().unwrap();
-        let capture = match (topics.as_ref(), &unit.topic) {
+        let capture = match (
+            topics.as_ref(),
+            module.unit.as_ref().and_then(|unit| unit.topic.as_ref()),
+        ) {
             (None, _) => true,
             // Capture if topics match
             (Some(topics), Some(topic)) => topics.contains(topic.name()),

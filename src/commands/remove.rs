@@ -93,7 +93,7 @@ fn filter_modules(topics: &HashSet<Topic>, root: UnitId, modules: &mut HashMap<U
             Some(id) => {
                 let module = modules.get_mut(&id).unwrap();
                 let remove = *remove_parent
-                    || match &module.unit.as_ref().unwrap().topic {
+                    || match &module.unit.as_ref().and_then(|unit| unit.topic.as_ref()) {
                         // Remove if topics match
                         Some(topic) => topics.contains(&topic),
                         // Keep otherwise

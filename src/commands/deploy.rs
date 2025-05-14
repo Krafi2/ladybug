@@ -142,27 +142,18 @@ impl Deploy {
         while let Some((members, current, skip)) = stack.last_mut() {
             match members.get(*current) {
                 Some(id) => {
-                    let mut skip = *skip;
                     let module = modules.get_mut(id).unwrap();
 
-                    // Apply skip flag transitively
-                    if skip {
-                        module.status = Status::Skipped;
-                    }
-
-                    // We are processing only skipped and ready packages
-                    if let Status::Ready | Status::Skipped = module.status {
-                        processed += 1;
-                    }
-
                     if module.status == Status::Ready {
+                        processed += 1;
+
                         let style = pb_style(&module.path);
                         let pb = ProgressBar::with_draw_target(None, ProgressDrawTarget::stdout());
                         pb.set_style(style);
                         pb.set_prefix(format!("[{}/{}]", processed, queue_len));
                         pb.set_message("Starting deployment");
 
-                        if self.dry_run {
+                        if self.dry_run || *skip {
                             pb.finish_with_message("Skipped".bright_black().to_string());
                             module.status = Status::Skipped;
                         } else {
@@ -189,13 +180,14 @@ impl Deploy {
                                     break;
                                 } else {
                                     // Skip this module's children
-                                    skip = true;
+                                    *skip = true;
                                 }
                             }
                         }
                     }
 
                     *current += 1;
+                    let skip = *skip;
                     stack.push((module.members.clone(), 0, skip))
                 }
                 None => {
@@ -247,47 +239,58 @@ fn filter_modules(topics: &HashSet<Topic>, root: UnitId, modules: &mut HashMap<U
     struct Frame {
         members: Vec<UnitId>,
         current: usize,
+        enableable: bool,
         enabled: bool,
     }
 
     let mut stack = vec![Frame {
         members: vec![root],
         current: 0,
+        enableable: true,
         enabled: false,
     }];
 
     while let Some(Frame {
         members,
         current,
-        enabled: _,
+        enableable,
+        enabled,
     }) = stack.last_mut()
     {
         match members.get(*current) {
             Some(id) => {
                 let module = modules.get_mut(id).unwrap();
-                let enabled = match &module.unit.as_ref().unwrap().topic {
-                    // Enable if topics match
-                    Some(topic) => topics.contains(&topic),
-                    // Disable if the user requested topics but this unit has none
-                    None => false,
-                };
+                let (child_enable, child_enableable) =
+                    match &module.unit.as_ref().and_then(|unit| unit.topic.as_ref()) {
+                        // Enable if topics match
+                        Some(topic) => (topics.contains(topic), false),
+                        // Disable if the user requested topics but this unit has none
+                        None => (false, true),
+                    };
 
-                // The status of this unit will be set when this frame is popped
+                let propagate_enable = (*enabled || *enableable) && module.status == Status::Ready;
                 stack.push(Frame {
                     members: module.members.clone(),
                     current: 0,
-                    enabled,
+                    enabled: propagate_enable && child_enable,
+                    enableable: propagate_enable && child_enableable,
                 });
             }
             None => {
-                let old = stack.pop().unwrap();
-                if let Some(frame) = stack.last_mut() {
-                    if !old.enabled {
-                        let current = frame.members[frame.current];
-                        modules.get_mut(&current).unwrap().status = Status::Skipped;
+                let child_frame = stack.pop().unwrap();
+                if let Some(parent) = stack.last_mut() {
+                    let child_id = parent.members[parent.current];
+                    let child = modules.get_mut(&child_id).unwrap();
+
+                    if !child_frame.enabled {
+                        child.status = Status::Skipped;
                     }
-                    frame.enabled = frame.enabled || old.enabled;
-                    frame.current += 1;
+
+                    if child_frame.enabled && parent.enableable {
+                        parent.enabled = true;
+                    }
+
+                    parent.current += 1;
                 }
             }
         }
