@@ -282,7 +282,7 @@ params! {
 
 params! {
     struct UnitHeaderFigment {
-        name: Option<String>,
+        name: String,
         desc: Option<String>,
         topic: Option<Spanned<String>>,
         shell: Option<Command>,
@@ -335,7 +335,7 @@ impl UnitHeader {
                 members
                     .unwrap_or_default()
                     .map_complete(|members| UnitHeader {
-                        name: name.unwrap_or_default(),
+                        name,
                         desc: desc.unwrap_or_default(),
                         topic: topic.unwrap_or_default(),
                         shell: shell.unwrap_or_default(),

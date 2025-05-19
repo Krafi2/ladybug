@@ -9,7 +9,7 @@ use interpreter::UnitFigment;
 #[derive(Debug)]
 pub struct Unit {
     pub name: String,
-    pub desc: String,
+    pub desc: Option<String>,
     pub topic: Option<Topic>,
     pub shell: Option<Shell>,
     pub disabled: bool,
@@ -31,7 +31,7 @@ impl Unit {
 
         Some(Self {
             name: figment.name?,
-            desc: figment.desc?,
+            desc: figment.desc,
             topic: figment.topic,
             shell: figment.shell.map(Into::into),
             disabled: figment.disabled,
